@@ -131,3 +131,25 @@ on conflict (id) do update set
   reference_code = excluded.reference_code,
   title = excluded.title,
   summary = excluded.summary;
+
+insert into public.financial_statement_templates
+  (id, standard_set, statement_type, section, line_item, account_key, display_order, basis)
+values
+  ('ifrs_bs_cash', 'IFRS', '재무상태표', '유동자산', '현금및현금성자산', 'cash', 10, 'IAS 7 표시 목적의 현금및현금성자산 라인입니다.'),
+  ('ifrs_bs_receivables', 'IFRS', '재무상태표', '유동자산', '매출채권 및 기타채권', 'receivables', 20, 'IFRS 9 기대신용손실 검토 후 채권 라인에 표시합니다.'),
+  ('ifrs_bs_inventory', 'IFRS', '재무상태표', '유동자산', '재고자산', 'inventory', 30, 'IAS 2에 따라 원가와 순실현가능가치를 검토한 뒤 표시합니다.'),
+  ('ifrs_bs_lease_asset', 'IFRS', '재무상태표', '비유동자산/부채', '사용권자산 및 리스부채', 'lease', 90, 'IFRS 16에 따라 사용권자산과 리스부채 표시를 검토합니다.'),
+  ('ifrs_bs_development', 'IFRS', '재무상태표 또는 손익계산서', '무형자산/비용', '무형자산 또는 연구개발비', 'development', 100, 'IAS 38 개발단계 자산화 요건에 따라 표시 라인이 달라집니다.'),
+  ('ifrs_bs_financial_instrument', 'IFRS', '재무상태표', '금융자산/금융부채', '금융자산 또는 금융부채', 'financial_instrument', 110, 'IFRS 9 분류 결과에 따라 금융자산 또는 금융부채로 표시합니다.'),
+  ('ifrs_bs_provision', 'IFRS', '재무상태표', '부채', '충당부채', 'provision', 120, 'IAS 37 인식요건을 충족하면 충당부채로 표시합니다.'),
+  ('ifrs_pl_revenue', 'IFRS', '손익계산서', '수익', '고객과의 계약에서 생기는 수익', 'revenue', 10, 'IFRS 15 수행의무와 인식시점 검토 후 수익 라인에 표시합니다.'),
+  ('ifrs_review_required', 'IFRS', '검토 필요', '미분류', '검토자 분류 필요', 'other', 999, '내부 표준계정 매핑 신뢰도가 낮아 사람이 표시 라인을 확정합니다.')
+on conflict (id) do update set
+  standard_set = excluded.standard_set,
+  statement_type = excluded.statement_type,
+  section = excluded.section,
+  line_item = excluded.line_item,
+  account_key = excluded.account_key,
+  display_order = excluded.display_order,
+  basis = excluded.basis,
+  active = true;

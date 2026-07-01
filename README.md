@@ -143,6 +143,7 @@ Reference data tables:
 - `mapping_rules`: K-GAAP → IFRS 변환 룰 DB
 - `checklist_items`: 판단 필요 항목별 체크리스트 DB
 - `standards_references`: 기준서 참조 DB
+- `financial_statement_templates`: DART 연동 전 자체 재무제표 표시 양식 DB
 
 The app seeds the local reference tables from the MVP defaults at startup. In production, run `postgres/schema.sql` and `supabase/seed_reference_data.sql` in the managed Postgres provider, then manage those tables as controlled master data.
 
@@ -169,4 +170,4 @@ The app seeds the local reference tables from the MVP defaults at startup. In pr
 
 ## Notes
 
-The OCR and LLM provider integrations are represented as boundaries in this MVP. In production, connect Gemini OCR, DART, Claude, and authoritative standards content through separate service adapters, and keep human approval as a required workflow step.
+The OCR and LLM provider integrations are represented as boundaries in this MVP. DART can be added later; until then, conversion drafts use the internal financial statement template DB for presentation lines. Keep human approval as a required workflow step.

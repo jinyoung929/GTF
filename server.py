@@ -117,6 +117,100 @@ STANDARD_ACCOUNTS = {
 }
 
 
+FINANCIAL_STATEMENT_TEMPLATES = [
+    {
+        "id": "ifrs_bs_cash",
+        "standard_set": "IFRS",
+        "statement_type": "재무상태표",
+        "section": "유동자산",
+        "line_item": "현금및현금성자산",
+        "account_key": "cash",
+        "display_order": 10,
+        "basis": "IAS 7 표시 목적의 현금및현금성자산 라인입니다.",
+    },
+    {
+        "id": "ifrs_bs_receivables",
+        "standard_set": "IFRS",
+        "statement_type": "재무상태표",
+        "section": "유동자산",
+        "line_item": "매출채권 및 기타채권",
+        "account_key": "receivables",
+        "display_order": 20,
+        "basis": "IFRS 9 기대신용손실 검토 후 채권 라인에 표시합니다.",
+    },
+    {
+        "id": "ifrs_bs_inventory",
+        "standard_set": "IFRS",
+        "statement_type": "재무상태표",
+        "section": "유동자산",
+        "line_item": "재고자산",
+        "account_key": "inventory",
+        "display_order": 30,
+        "basis": "IAS 2에 따라 원가와 순실현가능가치를 검토한 뒤 표시합니다.",
+    },
+    {
+        "id": "ifrs_bs_lease_asset",
+        "standard_set": "IFRS",
+        "statement_type": "재무상태표",
+        "section": "비유동자산/부채",
+        "line_item": "사용권자산 및 리스부채",
+        "account_key": "lease",
+        "display_order": 90,
+        "basis": "IFRS 16에 따라 사용권자산과 리스부채 표시를 검토합니다.",
+    },
+    {
+        "id": "ifrs_bs_development",
+        "standard_set": "IFRS",
+        "statement_type": "재무상태표 또는 손익계산서",
+        "section": "무형자산/비용",
+        "line_item": "무형자산 또는 연구개발비",
+        "account_key": "development",
+        "display_order": 100,
+        "basis": "IAS 38 개발단계 자산화 요건에 따라 표시 라인이 달라집니다.",
+    },
+    {
+        "id": "ifrs_bs_financial_instrument",
+        "standard_set": "IFRS",
+        "statement_type": "재무상태표",
+        "section": "금융자산/금융부채",
+        "line_item": "금융자산 또는 금융부채",
+        "account_key": "financial_instrument",
+        "display_order": 110,
+        "basis": "IFRS 9 분류 결과에 따라 금융자산 또는 금융부채로 표시합니다.",
+    },
+    {
+        "id": "ifrs_bs_provision",
+        "standard_set": "IFRS",
+        "statement_type": "재무상태표",
+        "section": "부채",
+        "line_item": "충당부채",
+        "account_key": "provision",
+        "display_order": 120,
+        "basis": "IAS 37 인식요건을 충족하면 충당부채로 표시합니다.",
+    },
+    {
+        "id": "ifrs_pl_revenue",
+        "standard_set": "IFRS",
+        "statement_type": "손익계산서",
+        "section": "수익",
+        "line_item": "고객과의 계약에서 생기는 수익",
+        "account_key": "revenue",
+        "display_order": 10,
+        "basis": "IFRS 15 수행의무와 인식시점 검토 후 수익 라인에 표시합니다.",
+    },
+    {
+        "id": "ifrs_review_required",
+        "standard_set": "IFRS",
+        "statement_type": "검토 필요",
+        "section": "미분류",
+        "line_item": "검토자 분류 필요",
+        "account_key": "other",
+        "display_order": 999,
+        "basis": "내부 표준계정 매핑 신뢰도가 낮아 사람이 표시 라인을 확정합니다.",
+    },
+]
+
+
 CHECKLISTS = {
     "lease": [
         {"key": "lease_term_months", "label": "리스기간(개월)", "type": "number", "required": True},
@@ -403,6 +497,19 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 summary TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS financial_statement_templates (
+                id TEXT PRIMARY KEY,
+                standard_set TEXT NOT NULL,
+                statement_type TEXT NOT NULL,
+                section TEXT NOT NULL,
+                line_item TEXT NOT NULL,
+                account_key TEXT NOT NULL,
+                display_order INTEGER NOT NULL,
+                basis TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(account_key) REFERENCES standard_accounts(account_key)
+            );
             """
         )
         seed_reference_data(conn)
@@ -526,6 +633,27 @@ def seed_reference_data(conn: sqlite3.Connection) -> None:
             VALUES (?, ?, ?, ?, ?)
             """,
             (ref.lower().replace(" ", "_"), "IFRS", ref, ref, "기준서 원문 연결 전까지 요약 기준정보로 사용합니다."),
+        )
+
+    for template in FINANCIAL_STATEMENT_TEMPLATES:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO financial_statement_templates (
+                id, standard_set, statement_type, section, line_item, account_key,
+                display_order, basis, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                template["id"],
+                template["standard_set"],
+                template["statement_type"],
+                template["section"],
+                template["line_item"],
+                template["account_key"],
+                template["display_order"],
+                template["basis"],
+            ),
         )
 
 
@@ -1002,7 +1130,8 @@ def extract_rows_from_upload(upload: dict) -> tuple[list[dict], list[str], str]:
     return sample_rows, issues, "ocr_placeholder"
 
 
-def generate_conversion(project: dict, statements: list[dict], responses: dict) -> dict:
+def generate_conversion(project: dict, statements: list[dict], responses: dict, templates: dict | None = None) -> dict:
+    templates = templates or {}
     entries = []
     notes = []
     judgment_items = []
@@ -1020,6 +1149,13 @@ def generate_conversion(project: dict, statements: list[dict], responses: dict) 
             "mapping_type": item["mapping_type"],
             "basis": item["rule_summary"],
         }
+        template = templates.get(account_key)
+        if template:
+            entry["statement_type"] = template["statement_type"]
+            entry["statement_section"] = template["section"]
+            entry["statement_line_item"] = template["line_item"]
+            entry["presentation_order"] = template["display_order"]
+            entry["presentation_basis"] = template["basis"]
 
         if account_key == "lease":
             months = float(checklist_response.get("lease_term_months") or 0)
@@ -1061,7 +1197,7 @@ def generate_conversion(project: dict, statements: list[dict], responses: dict) 
             notes.append(
                 {
                     "account": item["account_name"],
-                    "draft_note": f"{standard['ifrs']} 항목은 검토자 확인이 필요합니다. 근거: {item['rule_summary']}",
+                    "draft_note": f"{standard['ifrs']} 항목은 검토자 확인이 필요합니다. 표시 양식: {entry.get('statement_line_item', '검토 필요')}. 근거: {item['rule_summary']}",
                 }
             )
 
@@ -1075,6 +1211,7 @@ def generate_conversion(project: dict, statements: list[dict], responses: dict) 
             "source_standard": project["source_standard"],
             "target_standard": project["target_standard"],
         },
+        "statement_template": "IFRS 내부 재무제표 양식 DB",
         "entries": entries,
         "judgment_items": judgment_items,
         "draft_notes": notes,
@@ -1086,13 +1223,15 @@ def generate_conversion(project: dict, statements: list[dict], responses: dict) 
 def conversion_adjustments_csv(conversion: dict) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["원 계정", "내부 코드", "IFRS 계정", "금액", "조정액", "유형", "계산/근거"])
+    writer.writerow(["원 계정", "내부 코드", "IFRS 계정", "표시 재무제표", "표시 라인", "금액", "조정액", "유형", "계산/근거"])
     for entry in conversion.get("entries", []):
         writer.writerow(
             [
                 entry.get("source_account", ""),
                 entry.get("standard_code", ""),
                 entry.get("target_account", ""),
+                entry.get("statement_type", ""),
+                entry.get("statement_line_item", ""),
                 entry.get("amount", 0),
                 entry.get("adjustment", 0),
                 label_backend(entry.get("mapping_type", "")),
@@ -1117,6 +1256,19 @@ def localize_export_text(value) -> str:
     return str(value or "-").replace("review required", "추가 검토 필요").replace("Human review required", "사람 검토 필요")
 
 
+def load_statement_template_map(conn) -> dict:
+    rows = conn.execute(
+        """
+        SELECT account_key, statement_type, section, line_item, display_order, basis
+        FROM financial_statement_templates
+        WHERE standard_set = ? AND active = true
+        ORDER BY display_order
+        """,
+        ("IFRS",),
+    ).fetchall()
+    return {row["account_key"]: row_to_dict(row) for row in rows}
+
+
 def conversion_basis_report(conversion: dict) -> str:
     project = conversion.get("project", {})
     lines = [
@@ -1125,6 +1277,7 @@ def conversion_basis_report(conversion: dict) -> str:
         f"회사명: {project.get('company_name', '-')}",
         f"기간: {project.get('period', '-')}",
         f"변환 기준: {project.get('source_standard', 'K-GAAP')} -> {project.get('target_standard', 'IFRS')}",
+        f"표시 양식: {conversion.get('statement_template', '-')}",
         f"검토 상태: {conversion.get('review_status', '-')}",
         f"생성 시각: {conversion.get('generated_at', '-')}",
         "",
@@ -1135,6 +1288,7 @@ def conversion_basis_report(conversion: dict) -> str:
             [
                 f"{index}. {entry.get('source_account', '-')} -> {entry.get('target_account', '-')}",
                 f"   내부 코드: {entry.get('standard_code', '-')}",
+                f"   표시 라인: {entry.get('statement_type', '-')} / {entry.get('statement_line_item', '-')}",
                 f"   금액: {float(entry.get('amount') or 0):,.0f}",
                 f"   조정액: {float(entry.get('adjustment') or 0):,.0f}",
                 f"   근거: {localize_export_text(entry.get('calculation') or entry.get('basis'))}",
@@ -1295,6 +1449,7 @@ class AppHandler(BaseHTTPRequestHandler):
             ("mapping_rules", "변환 룰 DB"),
             ("checklist_items", "판단 체크리스트 DB"),
             ("standards_references", "기준서 참조 DB"),
+            ("financial_statement_templates", "재무제표 양식 DB"),
         ]
         with connect() as conn:
             summary = []
@@ -1311,7 +1466,19 @@ class AppHandler(BaseHTTPRequestHandler):
                     """
                 )
             ]
-        self.respond_json({"summary": summary, "accounts": accounts})
+            templates = [
+                row_to_dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT statement_type, section, line_item, account_key, display_order
+                    FROM financial_statement_templates
+                    WHERE standard_set = ? AND active = true
+                    ORDER BY statement_type, display_order
+                    """,
+                    ("IFRS",),
+                )
+            ]
+        self.respond_json({"summary": summary, "accounts": accounts, "templates": templates})
 
     def handle_create_project(self) -> None:
         payload = self.read_json()
@@ -1621,13 +1788,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
                 for row in conn.execute("SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,))
             ]
-            output = generate_conversion(row_to_dict(project_row), statement_rows, responses)
+            templates = load_statement_template_map(conn)
+            output = generate_conversion(row_to_dict(project_row), statement_rows, responses, templates)
             conn.execute(
                 "INSERT INTO conversions (id, project_id, output_json, created_at) VALUES (?, ?, ?, ?)",
                 (str(uuid.uuid4()), project_id, json.dumps(output, ensure_ascii=False), utc_now()),
             )
             conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("draft_generated", utc_now(), project_id))
-            log_event(conn, project_id, "conversion.generated", {"responses": responses, "entry_count": len(output["entries"])})
+            log_event(conn, project_id, "conversion.generated", {"responses": responses, "entry_count": len(output["entries"]), "template": output["statement_template"]})
         self.respond_json(output)
 
     def handle_review(self, project_id: str) -> None:
@@ -2876,6 +3044,7 @@ function renderDraft(draft) {
       <td>${escapeHtml(entry.source_account)}</td>
       <td>${escapeHtml(entry.standard_code)}</td>
       <td>${escapeHtml(entry.target_account)}</td>
+      <td>${escapeHtml(entry.statement_type || "-")} · ${escapeHtml(entry.statement_line_item || "-")}</td>
       <td>${Number(entry.amount || 0).toLocaleString()}</td>
       <td>${Number(entry.adjustment || 0).toLocaleString()}</td>
       <td>${escapeHtml(localizeText(entry.calculation || entry.basis || "-"))}</td>
@@ -2907,12 +3076,13 @@ function renderDraft(draft) {
             <th>원 계정</th>
             <th>코드</th>
             <th>IFRS 계정</th>
+            <th>표시 양식</th>
             <th>금액</th>
             <th>조정액</th>
             <th>계산/근거</th>
           </tr>
         </thead>
-        <tbody>${entryRows || '<tr><td colspan="6">생성된 조정분개가 없습니다.</td></tr>'}</tbody>
+        <tbody>${entryRows || '<tr><td colspan="7">생성된 조정분개가 없습니다.</td></tr>'}</tbody>
       </table>
     </div>
     <div class="draft-section">

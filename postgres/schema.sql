@@ -137,6 +137,18 @@ create table if not exists public.standards_references (
   summary text not null
 );
 
+create table if not exists public.financial_statement_templates (
+  id text primary key,
+  standard_set text not null,
+  statement_type text not null,
+  section text not null,
+  line_item text not null,
+  account_key text not null references public.standard_accounts(account_key) on delete cascade,
+  display_order integer not null,
+  basis text not null,
+  active boolean not null default true
+);
+
 create index if not exists idx_uploads_project_id on public.uploads(project_id);
 create index if not exists idx_extractions_project_id on public.extractions(project_id);
 create index if not exists idx_statements_project_id on public.statements(project_id);
@@ -145,3 +157,4 @@ create index if not exists idx_reviews_project_id_created_at on public.reviews(p
 create index if not exists idx_audit_logs_project_id_created_at on public.audit_logs(project_id, created_at desc);
 create index if not exists idx_kgaap_accounts_name on public.kgaap_accounts(kgaap_name);
 create index if not exists idx_mapping_rules_pair on public.mapping_rules(source_standard, target_standard, account_key);
+create index if not exists idx_financial_statement_templates_account on public.financial_statement_templates(standard_set, account_key);
