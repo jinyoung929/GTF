@@ -1,0 +1,169 @@
+# GTF Accounting Conversion MVP
+
+K-GAAP financial statement conversion workflow for Korean startups and SMEs preparing overseas fundraising, IFRS reporting, or listing readiness.
+
+This MVP is intentionally a review-first system. It identifies likely mapping and judgment items, generates conversion drafts, and preserves an audit trail. Final accounting policy decisions remain with company reviewers, accountants, and auditors.
+
+## Features
+
+- Upload K-GAAP financial statement files or paste extracted trial balance rows
+- Preserve uploaded PDF, Excel, CSV, and image source files for OCR handoff
+- Create extraction results from uploaded files before accepting rows into the mapping workflow
+- Show OCR provider/model/API-key readiness before extraction
+- Normalize account names into internal standard account codes
+- Split simple 1:1 mappings from judgment-required areas
+- Collect checklist inputs for leases, development costs, revenue recognition, financial instruments, and provisions
+- Generate IFRS conversion draft entries and disclosure notes
+- Record human review decisions for approval or requested changes
+- Store every project, checklist response, generated output, and audit log in SQLite
+- Web dashboard plus JSON API
+- Saved project list for reopening prior work
+
+## Run Locally
+
+```bash
+python3 server.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:4173
+```
+
+To use a different port:
+
+```bash
+PORT=8080 python3 server.py
+```
+
+## Deploy
+
+This app has no runtime dependency beyond Python 3.11+.
+
+Common deployment command:
+
+```bash
+PORT=$PORT python3 server.py
+```
+
+For platforms that require binding to a public interface:
+
+```bash
+HOST=0.0.0.0 PORT=$PORT python3 server.py
+```
+
+Included deployment files:
+
+- `Procfile`: process command for Heroku-style platforms
+- `render.yaml`: Render web service blueprint
+- `runtime.txt`: Python runtime pin
+- `requirements.txt`: empty dependency marker because the MVP uses the Python standard library
+- `.env.example`: local environment variable template
+
+Health check:
+
+```text
+GET /healthz
+```
+
+For production, use a managed Postgres database instead of the local SQLite file.
+
+Recommended when Supabase is unavailable:
+
+- Neon Postgres for SQL data
+- S3-compatible object storage such as Cloudflare R2 for uploaded files
+
+Postgres setup files:
+
+- `postgres/README.md`
+- `supabase/schema.sql`
+- `supabase/seed_reference_data.sql`
+- `supabase/README.md`
+
+The `supabase/schema.sql` file is regular Postgres SQL and can be reused on Neon. If a provider does not support Supabase-style RLS statements, remove the `alter table ... enable row level security;` lines before running it.
+
+Set these deployment variables when switching the persistence layer to Neon/Postgres:
+
+```bash
+DATABASE_BACKEND=postgres
+DATABASE_URL=postgresql://...
+```
+
+The current code path still uses SQLite for local MVP execution. The Postgres schema is ready; the next implementation step is adding the Postgres repository/storage adapter.
+
+## OCR Settings
+
+The MVP reads OCR readiness from environment variables:
+
+로컬에서 계속 사용할 OCR 키는 프로젝트 루트의 `.env` 또는 `.env.local`에 저장할 수 있습니다. 이 파일들은 `.gitignore`에 포함되어 저장소에는 올라가지 않습니다.
+
+```bash
+GEMINI_API_KEY=...
+OCR_PROVIDER=gemini
+GEMINI_OCR_MODEL=gemini-3.5-flash
+```
+
+환경변수로 직접 실행할 수도 있습니다.
+
+```bash
+GEMINI_API_KEY=... OCR_PROVIDER=gemini GEMINI_OCR_MODEL=gemini-3.5-flash python3 server.py
+```
+
+고객용 웹 UI에서는 OCR 키를 입력하지 않습니다. OCR 키와 모델은 운영자가 서버 환경변수 또는 `.env` 파일로 설정하고, 화면에는 연결 준비 상태만 표시합니다.
+
+`GEMINI_API_KEY`가 없으면 PDF와 이미지는 샘플 추출 결과를 사용하며, 검토자가 확인하는 흐름은 그대로 유지됩니다.
+
+## Database Layout
+
+Local SQLite file:
+
+```text
+data/gtf.sqlite3
+```
+
+Operational workflow tables:
+
+- `projects`: 회사, 기준, 기간, 진행 상태
+- `uploads`: 업로드 원본 파일 메타데이터
+- `extractions`: OCR/Excel/CSV 추출 결과
+- `statements`: 매핑된 계정 행과 체크리스트
+- `conversions`: 변환 초안 JSON
+- `reviews`: 사람 검토 및 승인 이력
+- `audit_logs`: 입력값, 적용 룰, 검증, 변환, 승인 감사 로그
+
+Reference data tables:
+
+- `standard_accounts`: 내부 표준계정코드 DB
+- `kgaap_accounts`: K-GAAP 계정명/별칭 DB
+- `ifrs_accounts`: IFRS 계정 및 기준서 요약 DB
+- `mapping_rules`: K-GAAP → IFRS 변환 룰 DB
+- `checklist_items`: 판단 필요 항목별 체크리스트 DB
+- `standards_references`: 기준서 참조 DB
+
+The app seeds the local reference tables from the MVP defaults at startup. In production, run `supabase/schema.sql` and `supabase/seed_reference_data.sql` in the managed Postgres provider, then manage those tables as controlled master data.
+
+## API
+
+- `GET /api/projects`
+- `GET /healthz`
+- `GET /api/ocr-config`
+- `GET /api/reference-data`
+- `POST /api/projects`
+- `GET /api/projects/{id}`
+- `GET /api/projects/{id}/uploads`
+- `POST /api/projects/{id}/uploads`
+- `GET /api/projects/{id}/extractions`
+- `POST /api/projects/{id}/uploads/{upload_id}/extract`
+- `POST /api/projects/{id}/extractions/{extraction_id}/accept`
+- `POST /api/projects/{id}/statements`
+- `POST /api/projects/{id}/validate`
+- `POST /api/projects/{id}/convert`
+- `POST /api/projects/{id}/review`
+- `GET /api/projects/{id}/audit`
+- `GET /api/projects/{id}/exports/adjustments.csv`
+- `GET /api/projects/{id}/exports/basis-report.txt`
+
+## Notes
+
+The OCR and LLM provider integrations are represented as boundaries in this MVP. In production, connect Gemini OCR, DART, Claude, and authoritative standards content through separate service adapters, and keep human approval as a required workflow step.

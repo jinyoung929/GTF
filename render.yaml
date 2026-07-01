@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: gtf-accounting-conversion
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "HOST=0.0.0.0 python3 server.py"
+    healthCheckPath: "/healthz"
+    envVars:
+      - key: OCR_PROVIDER
+        value: gemini
+      - key: GEMINI_OCR_MODEL
+        value: gemini-3.5-flash
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DATABASE_BACKEND
+        value: sqlite
+      - key: DATABASE_URL
+        sync: false
+      - key: NEON_DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: gtf-uploads
