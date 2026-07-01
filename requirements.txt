@@ -1,3 +1,4 @@
 # SQLite mode uses only the Python standard library.
 # Postgres/Neon deployments use psycopg.
 psycopg[binary]>=3.2.0
+pdfplumber>=0.11.0

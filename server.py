@@ -702,6 +702,8 @@ def normalize_account_name(name: str) -> str:
         "현금": "cash",
         "cash": "cash",
         "매출채권": "receivables",
+        "대손충당금": "receivables",
+        "미수수익": "receivables",
         "trade receivable": "receivables",
         "재고자산": "inventory",
         "inventory": "inventory",
@@ -716,6 +718,11 @@ def normalize_account_name(name: str) -> str:
         "금융상품": "financial_instrument",
         "파생상품": "financial_instrument",
         "전환사채": "financial_instrument",
+        "장기차입금": "financial_instrument",
+        "단기차입금": "financial_instrument",
+        "차입금": "financial_instrument",
+        "사채상환할증금": "financial_instrument",
+        "전환권조정": "financial_instrument",
         "충당부채": "provision",
         "provision": "provision",
     }
@@ -876,6 +883,111 @@ def parse_xlsx_statement_rows(path: Path) -> tuple[list[dict], list[str]]:
     if not rows:
         issues.append("Excel 파일은 읽었지만 계정명/금액 행을 찾지 못했습니다.")
     return rows, issues
+
+
+def clean_pdf_account_name(value) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").replace("\n", " ")).strip()
+    text = re.sub(r"\(주석\s*[^)]*\)", "", text).strip()
+    text = re.sub(r"^[ㆍ·]\s*", "", text)
+    text = re.sub(r"^(?:[0-9]+\.|\([0-9]+\)|[가-힣]\.|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩXI]+\.?)\s*", "", text).strip()
+    return text
+
+
+def pdf_statement_account_key(name: str) -> str:
+    compact = re.sub(r"\s+", "", name)
+    if not compact:
+        return "other"
+    exclusions = [
+        "매출원가",
+        "매출총이익",
+        "영업활동",
+        "현금흐름",
+        "현금의유입",
+        "현금의유출",
+        "현금유입",
+        "현금유출",
+        "활동으로인한",
+        "감소",
+        "증가",
+        "기초",
+        "기말",
+        "감가상각",
+        "상각비",
+        "처분손실",
+        "처분이익",
+        "당기순",
+        "주당",
+        "전환사채발행",
+        "유상증자",
+        "주식선택권",
+        "토지재평가",
+        "영업외수익",
+        "이자수익",
+    ]
+    if any(token in compact for token in exclusions):
+        return "other"
+    return normalize_account_name(name)
+
+
+def pdf_row_current_amount(row: list) -> float | None:
+    for cell in row[1:]:
+        if looks_numeric(cell):
+            return parse_amount(cell)
+    return None
+
+
+def parse_pdf_statement_rows(path: Path) -> tuple[list[dict], list[str]]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return [], ["PDF 표 직접 추출을 위해 pdfplumber 패키지가 필요합니다."]
+
+    rows: list[dict] = []
+    issues: list[str] = []
+    started = False
+    pages_scanned = 0
+
+    with pdfplumber.open(path) as pdf:
+        for page_number, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text() or ""
+            compact_text = re.sub(r"\s+", "", text)
+            if started and "재무제표주석" in compact_text:
+                break
+            if any(marker in compact_text for marker in ("재무상태표", "손익계산서", "현금흐름표", "자본변동표")):
+                started = True
+            if not started:
+                continue
+
+            pages_scanned += 1
+            for table in page.extract_tables() or []:
+                for raw_row in table:
+                    if not raw_row:
+                        continue
+                    name = clean_pdf_account_name(raw_row[0])
+                    if not name or name in {"과목", "과 목", "구분", "자산", "자 산", "부채", "자본"}:
+                        continue
+                    account_key = pdf_statement_account_key(name)
+                    if account_key == "other":
+                        continue
+                    amount = pdf_row_current_amount(raw_row)
+                    if amount is None:
+                        continue
+                    rows.append({"account_name": name, "amount": amount})
+
+    deduped: list[dict] = []
+    seen: set[tuple[str, float]] = set()
+    for row in rows:
+        key = (row["account_name"], float(row["amount"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+
+    if pages_scanned:
+        issues.append(f"PDF 표 직접 추출: 재무제표 본문 {pages_scanned}쪽을 분석했습니다.")
+    if not deduped:
+        issues.append("PDF 표는 읽었지만 변환 가능한 핵심 계정 행을 찾지 못했습니다.")
+    return deduped, issues
 
 
 def build_statement_record(project_period: str, row: dict) -> dict:
@@ -1431,15 +1543,24 @@ def extract_rows_from_upload(upload: dict) -> tuple[list[dict], list[str], str]:
         return [], ["구형 .xls 파일은 아직 지원하지 않습니다. .xlsx 또는 CSV로 변환해 업로드하세요."], "unsupported_excel"
 
     ocr_mime = supported_ocr_mime(Path(upload["original_name"]), content_type)
+    pdf_table_issues: list[str] = []
+    if suffix == ".pdf" or ocr_mime == "application/pdf":
+        rows, pdf_table_issues = parse_pdf_statement_rows(stored_path)
+        if rows:
+            return rows, pdf_table_issues, "local_pdf_table_parser"
+        if pdf_table_issues:
+            pdf_table_issues = [*pdf_table_issues, "PDF 표 직접 추출 실패 후 OCR 분석으로 전환합니다."]
+
     if config["api_key_ready"] and config["provider"] == "gemini" and ocr_mime:
         rows, issues = call_gemini_ocr(stored_path, ocr_mime, config["model"])
-        issues = [f"OCR 제공자: {config['provider']} / 모델: {config['model']}", *issues]
+        issues = [*pdf_table_issues, f"OCR 제공자: {config['provider']} / 모델: {config['model']}", *issues]
         return rows, issues, "gemini_ocr"
 
     if ocr_mime:
         return (
             [],
             [
+                *pdf_table_issues,
                 f"OCR 제공자: {config['provider']} / 모델: {config['model']}",
                 "서버 OCR 키가 설정되지 않아 실제 PDF/이미지 분석을 실행하지 못했습니다.",
                 "관리자가 서버 환경변수 GEMINI_API_KEY를 설정한 뒤 다시 분석하세요.",
@@ -3451,6 +3572,7 @@ const statusLabels = {
   "review.recorded": "검토 결과 기록",
   local_csv_parser: "CSV 파서",
   local_xlsx_parser: "Excel 파서",
+  local_pdf_table_parser: "PDF 표 분석",
   unsupported_excel: "지원하지 않는 Excel",
   ocr_placeholder: "OCR 대기 샘플",
   ocr_not_configured: "분석 설정 필요",
