@@ -2296,11 +2296,17 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
   <header class="topbar">
-    <div>
+    <div class="brand-block">
+      <span class="eyebrow">Accounting conversion workspace</span>
       <h1>GTF 회계기준 변환</h1>
-      <p>K-GAAP 재무제표를 IFRS/US GAAP 검토 초안으로 정리하는 작업공간</p>
+      <p>K-GAAP 재무제표 업로드부터 IFRS 검토 초안, 조정분개, 근거 리포트까지 한 화면에서 처리합니다.</p>
     </div>
-    <button id="sampleBtn" class="ghost">예시 입력</button>
+    <div class="topbar-actions">
+      <span class="status-chip">OCR</span>
+      <span class="status-chip">OpenAI</span>
+      <span class="status-chip">감사 로그</span>
+      <button id="sampleBtn" class="secondary">예시 입력</button>
+    </div>
   </header>
 
   <section id="accessPanel" class="access-panel hidden">
@@ -2324,9 +2330,12 @@ INDEX_HTML = """<!doctype html>
       <div id="projectList" class="project-empty">저장된 프로젝트가 없습니다.</div>
     </aside>
 
-    <section class="panel project-panel">
+    <section class="panel project-panel primary-work-panel">
       <div class="panel-head">
-        <h2>기본 정보</h2>
+        <div>
+          <h2>새 변환 프로젝트</h2>
+          <p>회사와 대상 기간을 정하면 업로드, 검증, 변환 단계가 열립니다.</p>
+        </div>
         <span id="statusPill" class="pill">시작 전</span>
       </div>
       <form id="projectForm" class="grid">
@@ -2353,9 +2362,12 @@ INDEX_HTML = """<!doctype html>
       </form>
     </section>
 
-    <section class="panel progress-panel">
+    <section class="panel progress-panel workflow-panel">
       <div class="panel-head">
-        <h2>진행 현황</h2>
+        <div>
+          <h2>진행 흐름</h2>
+          <p>원본 업로드, 데이터 검증, 변환 초안 생성, 사람 검토 순서로 진행됩니다.</p>
+        </div>
         <span id="nextActionPill" class="pill">프로젝트 생성</span>
       </div>
       <div id="workflowSteps" class="steps"></div>
@@ -2379,17 +2391,23 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel input-panel">
       <div class="panel-head">
-        <h2>수동 입력</h2>
+        <div>
+          <h2>수동 입력</h2>
+          <p>OCR 대신 계정명과 금액을 직접 붙여넣을 수 있습니다.</p>
+        </div>
         <button id="mapBtn" class="primary" disabled>계정 매핑</button>
       </div>
       <textarea id="csvInput" spellcheck="false" placeholder="계정명,금액&#10;현금및현금성자산,120000000&#10;리스부채,30000000&#10;개발비,45000000"></textarea>
     </section>
 
-    <section class="panel">
+    <section class="panel upload-panel">
       <div class="panel-head">
-        <h2>원본 파일</h2>
+        <div>
+          <h2>원본 파일</h2>
+          <p>PDF, Excel, CSV, 이미지를 업로드하면 추출 결과를 먼저 검토합니다.</p>
+        </div>
         <button id="uploadBtn" class="primary" disabled>업로드</button>
       </div>
       <label>재무제표 파일
@@ -2466,9 +2484,12 @@ INDEX_HTML = """<!doctype html>
 
     <section class="panel wide">
       <div class="panel-head">
-        <h2>계정 매핑 및 판단항목</h2>
+        <div>
+          <h2>계정 매핑 및 판단항목</h2>
+          <p>단순 매핑 항목과 회계정책 판단이 필요한 항목을 분리합니다.</p>
+        </div>
         <div class="actions">
-          <button id="validateBtn" class="ghost" disabled>검증</button>
+          <button id="validateBtn" class="secondary" disabled>검증</button>
           <button id="convertBtn" class="primary" disabled>변환 초안 생성</button>
         </div>
       </div>
@@ -2476,12 +2497,15 @@ INDEX_HTML = """<!doctype html>
       <div id="validation" class="validation-report"></div>
     </section>
 
-    <section class="panel">
+    <section class="panel result-panel wide">
       <div class="panel-head">
-        <h2>변환 초안</h2>
-        <div class="actions">
-          <button id="exportCsvBtn" class="ghost" disabled>조정분개 CSV</button>
-          <button id="exportReportBtn" class="ghost" disabled>근거 리포트</button>
+        <div>
+          <h2>변환 초안 및 리포트</h2>
+          <p>조정분개, 표시 라인, 판단 근거, OpenAI 검토 메모를 확인합니다.</p>
+        </div>
+        <div class="actions export-actions">
+          <button id="exportCsvBtn" class="download" disabled>조정분개 CSV</button>
+          <button id="exportReportBtn" class="download primary-download" disabled>근거 리포트</button>
         </div>
       </div>
       <div id="outputBox" class="draft-empty">아직 생성된 변환 초안이 없습니다.</div>
@@ -2521,15 +2545,20 @@ INDEX_HTML = """<!doctype html>
 STYLES_CSS = """
 :root {
   color-scheme: light;
-  --ink: #182027;
-  --muted: #63727a;
-  --line: #d8e1e4;
-  --surface: #f4f7f7;
+  --ink: #172126;
+  --muted: #66737a;
+  --line: #d7e0e3;
+  --surface: #f3f6f7;
   --panel: #ffffff;
-  --accent: #0b6b5c;
-  --accent-2: #264e86;
+  --accent: #096b5b;
+  --accent-hover: #075648;
+  --accent-soft: #e8f5f1;
+  --accent-2: #285176;
+  --accent-2-soft: #edf3f8;
   --warn: #9c5b10;
   --danger: #9e2f2f;
+  --success: #167455;
+  --shadow: 0 8px 24px rgba(23, 33, 38, 0.06);
 }
 
 * { box-sizing: border-box; }
@@ -2543,17 +2572,51 @@ body {
 }
 
 .topbar {
-  min-height: 84px;
-  padding: 18px 24px;
+  min-height: 116px;
+  padding: 22px 28px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
+  gap: 32px;
   border-bottom: 1px solid var(--line);
   background: #fff;
 }
 
 .hidden { display: none !important; }
+
+.brand-block {
+  display: grid;
+  gap: 5px;
+  max-width: 780px;
+}
+
+.eyebrow {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-chip {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #c9d9dd;
+  border-radius: 999px;
+  padding: 0 10px;
+  background: #f8fbfb;
+  color: #40555f;
+  font-size: 12px;
+  font-weight: 700;
+}
 
 .access-panel {
   margin: 16px 16px 0;
@@ -2577,16 +2640,16 @@ body {
 }
 
 h1, h2, p { margin: 0; }
-h1 { font-size: 22px; letter-spacing: 0; }
-h2 { font-size: 15px; letter-spacing: 0; }
+h1 { font-size: 28px; line-height: 1.18; letter-spacing: 0; }
+h2 { font-size: 16px; letter-spacing: 0; }
 p { margin-top: 4px; color: var(--muted); font-size: 13px; }
 
 .layout {
   display: grid;
-  grid-template-columns: 300px minmax(360px, 1fr) minmax(520px, 1.25fr);
+  grid-template-columns: 280px minmax(320px, 0.9fr) minmax(390px, 1.1fr);
   align-items: start;
-  gap: 16px;
-  padding: 16px;
+  gap: 14px;
+  padding: 14px;
 }
 
 .panel {
@@ -2596,6 +2659,11 @@ p { margin-top: 4px; color: var(--muted); font-size: 13px; }
   padding: 18px;
   min-width: 0;
   box-shadow: 0 1px 2px rgba(24, 32, 39, 0.03);
+}
+
+.primary-work-panel {
+  border-color: #bdd5d2;
+  box-shadow: var(--shadow);
 }
 
 .sidebar {
@@ -2609,6 +2677,10 @@ p { margin-top: 4px; color: var(--muted); font-size: 13px; }
 
 .progress-panel { grid-column: span 2; }
 
+.result-panel {
+  grid-column: span 2;
+}
+
 .wide {
   grid-column: span 2;
   grid-row: span 2;
@@ -2618,8 +2690,14 @@ p { margin-top: 4px; color: var(--muted); font-size: 13px; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.panel-head > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
 }
 
 .grid {
@@ -2672,6 +2750,11 @@ button {
   white-space: nowrap;
 }
 
+button:not(:disabled):hover {
+  border-color: #b7c8cd;
+  background: #f8fbfb;
+}
+
 button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -2683,9 +2766,47 @@ button:disabled {
   color: #fff;
 }
 
+.primary:not(:disabled):hover {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+}
+
 .ghost {
   background: #fff;
   color: var(--accent-2);
+}
+
+.secondary {
+  border-color: #c7d7df;
+  background: var(--accent-2-soft);
+  color: var(--accent-2);
+}
+
+.secondary:not(:disabled):hover {
+  border-color: #aebfca;
+  background: #e2edf4;
+}
+
+.download {
+  border-color: #b8cec8;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.download:not(:disabled):hover {
+  border-color: #92bbb0;
+  background: #dcf0ea;
+}
+
+.primary-download {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.primary-download:not(:disabled):hover {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
 }
 
 .pill {
@@ -2706,25 +2827,34 @@ button:disabled {
   justify-content: flex-end;
 }
 
+.export-actions {
+  padding: 8px;
+  border: 1px solid #c9ddd7;
+  border-radius: 8px;
+  background: #f7fcfa;
+}
+
 .review-actions { margin-top: 12px; }
 
 .steps {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
   margin-bottom: 16px;
+  counter-reset: workflow;
 }
 
 .step {
-  min-height: 60px;
+  min-height: 72px;
   display: grid;
   align-content: center;
   gap: 4px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 10px;
+  padding: 11px 10px;
   background: #fbfcfc;
   color: var(--muted);
+  position: relative;
 }
 
 .step strong {
@@ -2747,6 +2877,11 @@ button:disabled {
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
   background: #f8fffc;
+}
+
+.step.done strong,
+.step.current strong {
+  color: var(--accent);
 }
 
 .summary-grid {
@@ -2823,7 +2958,35 @@ th {
   color: var(--muted);
   font-size: 11px;
   text-transform: uppercase;
-  background: #fbfcfc;
+  background: #f5f8f8;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.table-scroll {
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.table-scroll table th,
+.table-scroll table td {
+  border-bottom: 1px solid var(--line);
+}
+
+.mapping-table th:nth-child(3),
+.mapping-table td:nth-child(3),
+.result-table th:nth-child(5),
+.result-table th:nth-child(6),
+.result-table td:nth-child(5),
+.result-table td:nth-child(6) {
+  text-align: right;
+}
+
+.result-table td:nth-child(7) {
+  min-width: 240px;
 }
 
 .badge {
@@ -2844,19 +3007,31 @@ th {
 
 .checklist {
   display: grid;
-  gap: 10px;
-  min-width: 260px;
+  gap: 8px;
+  min-width: 300px;
+  padding: 10px;
+  border: 1px solid #dce6e8;
+  border-radius: 8px;
+  background: #fbfdfd;
 }
 
 .checkitem {
   display: grid;
   gap: 5px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #edf2f3;
+}
+
+.checkitem:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .checklabel {
   display: flex;
   align-items: center;
-  gap: 5px;
+  justify-content: space-between;
+  gap: 8px;
   color: var(--ink);
   font-size: 12px;
   font-weight: 700;
@@ -2876,13 +3051,21 @@ th {
 
 .checkline {
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   color: var(--ink);
   font-weight: 700;
   line-height: 1.45;
   font-size: 12px;
+  min-height: 34px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #edf2f3;
+}
+
+.checkline:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .notice {
@@ -2968,12 +3151,18 @@ pre {
 
 .draft-view {
   display: grid;
-  gap: 16px;
+  gap: 18px;
 }
 
 .draft-summary {
   display: grid;
-  gap: 4px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 16px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid #cfe0dd;
+  border-radius: 8px;
+  background: #f6fbfa;
   color: var(--muted);
   font-size: 13px;
 }
@@ -2985,7 +3174,7 @@ pre {
 
 .draft-section {
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .draft-section h3 {
@@ -2996,15 +3185,16 @@ pre {
 
 .draft-list {
   display: grid;
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
 }
 
 .draft-card {
   display: grid;
-  gap: 4px;
-  padding: 10px;
+  gap: 7px;
+  padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 8px;
   background: #fbfcfc;
   font-size: 12px;
 }
@@ -3017,6 +3207,56 @@ pre {
 .draft-card span {
   color: var(--muted);
   line-height: 1.45;
+}
+
+.ai-summary-card {
+  grid-column: 1 / -1;
+  border-color: #c7d7df;
+  background: #f7fbfd;
+}
+
+.ai-card {
+  border-color: #d6e3e6;
+  background: #fff;
+}
+
+.ai-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.risk-pill {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 800;
+  background: #edf3f8;
+  color: var(--accent-2);
+}
+
+.risk-pill.medium {
+  background: #fff3df;
+  color: var(--warn);
+}
+
+.risk-pill.high {
+  background: #fff0f0;
+  color: var(--danger);
+}
+
+.question-list {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--muted);
+}
+
+.question-list li {
+  margin: 3px 0;
 }
 
 .log-item {
@@ -3238,7 +3478,8 @@ const statusLabels = {
   local_xlsx_parser: "Excel 파서",
   unsupported_excel: "지원하지 않는 Excel",
   ocr_placeholder: "OCR 대기 샘플",
-  gemini: "Gemini OCR"
+  gemini: "Gemini OCR",
+  openai: "OpenAI"
 };
 
 function labelFor(value) {
@@ -3538,7 +3779,8 @@ function renderMapping() {
     </tr>
   `).join("");
   $("#mappingTable").innerHTML = `
-    <table>
+    <div class="table-scroll">
+    <table class="mapping-table">
       <thead>
         <tr>
           <th>K-GAAP 계정</th>
@@ -3551,6 +3793,7 @@ function renderMapping() {
       </thead>
       <tbody>${rows}</tbody>
     </table>
+    </div>
   `;
 }
 
@@ -3614,14 +3857,18 @@ function renderDraft(draft) {
   `).join("");
   const ai = draft.ai_assistance || {};
   const aiCards = (ai.items || []).map((item) => {
-    const questions = (item.additional_questions || []).map((question) => escapeHtml(question)).join("<br>");
+    const risk = String(item.risk_level || "").toLowerCase();
+    const questions = (item.additional_questions || []).map((question) => `<li>${escapeHtml(question)}</li>`).join("");
     return `
-      <div class="draft-card">
-        <strong>${escapeHtml(item.account || "-")} · 위험도 ${escapeHtml(riskLabel(item.risk_level))}</strong>
-        <span>${escapeHtml(localizeText(item.classification_hint || "-"))}</span>
-        <span>${escapeHtml(localizeText(item.review_note || "-"))}</span>
-        <span>근거 요약: ${escapeHtml(localizeText(item.basis_summary || "-"))}</span>
-        <span>추가 질문: ${questions || "-"}</span>
+      <div class="draft-card ai-card">
+        <div class="ai-card-head">
+          <strong>${escapeHtml(item.account || "-")}</strong>
+          <span class="risk-pill ${escapeHtml(risk)}">위험도 ${escapeHtml(riskLabel(item.risk_level))}</span>
+        </div>
+        <span><strong>분류 방향</strong> ${escapeHtml(localizeText(item.classification_hint || "-"))}</span>
+        <span><strong>검토 메모</strong> ${escapeHtml(localizeText(item.review_note || "-"))}</span>
+        <span><strong>근거 요약</strong> ${escapeHtml(localizeText(item.basis_summary || "-"))}</span>
+        ${questions ? `<ul class="question-list">${questions}</ul>` : '<span><strong>추가 질문</strong> -</span>'}
       </div>
     `;
   }).join("");
@@ -3635,7 +3882,8 @@ function renderDraft(draft) {
     </div>
     <div class="draft-section">
       <h3>조정분개 리스트</h3>
-      <table>
+      <div class="table-scroll">
+      <table class="result-table">
         <thead>
           <tr>
             <th>원 계정</th>
@@ -3649,6 +3897,7 @@ function renderDraft(draft) {
         </thead>
         <tbody>${entryRows || '<tr><td colspan="7">생성된 조정분개가 없습니다.</td></tr>'}</tbody>
       </table>
+      </div>
     </div>
     <div class="draft-section">
       <h3>판단 필요 항목</h3>
@@ -3657,7 +3906,7 @@ function renderDraft(draft) {
     <div class="draft-section">
       <h3>OpenAI 판단 보조</h3>
       <div class="draft-list">
-        <div class="draft-card">
+        <div class="draft-card ai-summary-card">
           <strong>${escapeHtml(aiStatus)}</strong>
           <span>${escapeHtml(localizeText(ai.overall_note || "OpenAI 판단 보조 결과가 없습니다."))}</span>
           ${aiIssues ? `<ul class="issues">${aiIssues}</ul>` : ""}
