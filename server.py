@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import base64
+import hashlib
 import hmac
 import io
 import importlib.util
@@ -9,6 +10,7 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import sqlite3
 import uuid
 import zipfile
@@ -17,6 +19,7 @@ from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -33,6 +36,8 @@ ENV_PATHS = (ROOT / ".env", ROOT / ".env.local")
 GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024
 OPENAI_API_ENDPOINT = "https://api.openai.com/v1/responses"
 OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
+SESSION_COOKIE = "gtf_session"
+SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
 
 
 def load_local_env() -> None:
@@ -362,10 +367,27 @@ def init_db() -> None:
         with connect() as conn:
             conn.execute("SELECT 1")
             conn.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_bytes bytea")
+            ensure_auth_tables(conn)
         return
     with connect() as conn:
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS app_users (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES app_users(id)
+            );
+
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
                 company_name TEXT NOT NULL,
@@ -528,6 +550,31 @@ def init_db() -> None:
         if "file_bytes" not in upload_columns:
             conn.execute("ALTER TABLE uploads ADD COLUMN file_bytes BLOB")
         seed_reference_data(conn)
+
+
+def ensure_auth_tables(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_users (
+            id TEXT PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES app_users(id)
+        )
+        """
+    )
 
 
 def seed_reference_data(conn: sqlite3.Connection) -> None:
@@ -1124,6 +1171,38 @@ def access_config() -> dict:
         "enabled": False,
         "header": "X-GTF-Access-Code",
         "mode": "open",
+    }
+
+
+def normalize_email(email: str) -> str:
+    return re.sub(r"\s+", "", str(email or "")).lower()
+
+
+def hash_password(password: str, salt: str | None = None) -> str:
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000)
+    return f"pbkdf2_sha256${salt}${digest.hex()}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        algorithm, salt, _digest = stored_hash.split("$", 2)
+    except ValueError:
+        return False
+    if algorithm != "pbkdf2_sha256":
+        return False
+    return hmac.compare_digest(hash_password(password, salt), stored_hash)
+
+
+def session_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def user_public_dict(user: dict) -> dict:
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "created_at": user["created_at"],
     }
 
 
@@ -1795,7 +1874,17 @@ def conversion_basis_report(conversion: dict) -> str:
 
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "GTFServer/0.1"
-    public_paths = {"/", "/styles.css", "/app.js", "/healthz", "/api/access-config"}
+    public_paths = {
+        "/",
+        "/styles.css",
+        "/app.js",
+        "/healthz",
+        "/api/access-config",
+        "/api/auth/session",
+        "/api/auth/login",
+        "/api/auth/register",
+        "/api/auth/logout",
+    }
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -1827,6 +1916,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_ai_config()
         elif path == "/api/access-config":
             self.handle_access_config()
+        elif path == "/api/auth/session":
+            self.handle_auth_session()
         elif path == "/api/reference-data":
             self.handle_reference_data()
         elif re.match(r"^/api/projects/[^/]+$", path):
@@ -1849,6 +1940,12 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/projects":
             self.handle_create_project()
+        elif path == "/api/auth/register":
+            self.handle_register()
+        elif path == "/api/auth/login":
+            self.handle_login()
+        elif path == "/api/auth/logout":
+            self.handle_logout()
         elif re.match(r"^/api/projects/[^/]+/uploads$", path):
             self.handle_upload_file(path.split("/")[-2])
         elif re.match(r"^/api/projects/[^/]+/uploads/[^/]+/extract$", path):
@@ -1876,7 +1973,17 @@ class AppHandler(BaseHTTPRequestHandler):
         return json.loads(raw.decode("utf-8"))
 
     def require_access(self) -> bool:
-        return True
+        user = self.current_user()
+        if user:
+            return True
+        self.respond_json(
+            {
+                "error": "로그인이 필요합니다.",
+                "login_required": True,
+            },
+            HTTPStatus.UNAUTHORIZED,
+        )
+        return False
 
     def read_upload(self) -> tuple[str, str, bytes]:
         length = int(self.headers.get("Content-Length") or "0")
@@ -1900,10 +2007,53 @@ class AppHandler(BaseHTTPRequestHandler):
             return filename, part.get_content_type(), content
         raise ValueError("No file field was provided.")
 
-    def respond_json(self, payload: dict | list, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def cookie_token(self) -> str:
+        cookie_header = self.headers.get("Cookie", "")
+        if not cookie_header:
+            return ""
+        cookie = SimpleCookie()
+        try:
+            cookie.load(cookie_header)
+        except Exception:
+            return ""
+        morsel = cookie.get(SESSION_COOKIE)
+        return morsel.value if morsel else ""
+
+    def current_user(self) -> dict | None:
+        token = self.cookie_token()
+        if not token:
+            return None
+        token_hash = session_token_hash(token)
+        now = utc_now()
+        with connect() as conn:
+            row = conn.execute(
+                """
+                SELECT u.id, u.email, u.created_at
+                FROM user_sessions s
+                JOIN app_users u ON u.id = s.user_id
+                WHERE s.token_hash = ? AND s.expires_at > ?
+                """,
+                (token_hash, now),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def session_cookie_header(self, token: str, max_age: int = SESSION_MAX_AGE_SECONDS) -> str:
+        return f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}"
+
+    def clear_session_cookie_header(self) -> str:
+        return f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+
+    def respond_json(
+        self,
+        payload: dict | list,
+        status: HTTPStatus = HTTPStatus.OK,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status.value)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1941,6 +2091,92 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_access_config(self) -> None:
         self.respond_json(access_config())
+
+    def handle_auth_session(self) -> None:
+        user = self.current_user()
+        self.respond_json({"authenticated": bool(user), "user": user_public_dict(user) if user else None})
+
+    def create_session(self, conn, user_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        now = utc_now()
+        expires_at = datetime.fromtimestamp(
+            datetime.now(timezone.utc).timestamp() + SESSION_MAX_AGE_SECONDS,
+            tz=timezone.utc,
+        ).isoformat()
+        conn.execute(
+            """
+            INSERT INTO user_sessions (id, user_id, token_hash, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (str(uuid.uuid4()), user_id, session_token_hash(token), now, expires_at),
+        )
+        return token
+
+    def handle_register(self) -> None:
+        payload = self.read_json()
+        email = normalize_email(payload.get("email", ""))
+        password = str(payload.get("password") or "")
+        if not email or "@" not in email:
+            self.respond_json({"error": "올바른 이메일을 입력하세요."}, HTTPStatus.BAD_REQUEST)
+            return
+        if len(password) < 6:
+            self.respond_json({"error": "비밀번호는 6자 이상이어야 합니다."}, HTTPStatus.BAD_REQUEST)
+            return
+        now = utc_now()
+        user = {
+            "id": str(uuid.uuid4()),
+            "email": email,
+            "password_hash": hash_password(password),
+            "created_at": now,
+        }
+        try:
+            with connect() as conn:
+                existing = conn.execute("SELECT id FROM app_users WHERE email = ?", (email,)).fetchone()
+                if existing:
+                    self.respond_json({"error": "이미 가입된 이메일입니다."}, HTTPStatus.CONFLICT)
+                    return
+                conn.execute(
+                    """
+                    INSERT INTO app_users (id, email, password_hash, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (user["id"], user["email"], user["password_hash"], user["created_at"]),
+                )
+                token = self.create_session(conn, user["id"])
+        except Exception as exc:
+            self.respond_json({"error": f"회원가입 처리에 실패했습니다: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self.respond_json(
+            {"authenticated": True, "user": user_public_dict(user)},
+            HTTPStatus.CREATED,
+            {"Set-Cookie": self.session_cookie_header(token)},
+        )
+
+    def handle_login(self) -> None:
+        payload = self.read_json()
+        email = normalize_email(payload.get("email", ""))
+        password = str(payload.get("password") or "")
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM app_users WHERE email = ?", (email,)).fetchone()
+            user = row_to_dict(row) if row else None
+            if not user or not verify_password(password, user["password_hash"]):
+                self.respond_json({"error": "이메일 또는 비밀번호가 올바르지 않습니다."}, HTTPStatus.UNAUTHORIZED)
+                return
+            token = self.create_session(conn, user["id"])
+        self.respond_json(
+            {"authenticated": True, "user": user_public_dict(user)},
+            headers={"Set-Cookie": self.session_cookie_header(token)},
+        )
+
+    def handle_logout(self) -> None:
+        token = self.cookie_token()
+        if token:
+            with connect() as conn:
+                conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (session_token_hash(token),))
+        self.respond_json(
+            {"authenticated": False, "user": None},
+            headers={"Set-Cookie": self.clear_session_cookie_header()},
+        )
 
     def handle_reference_data(self) -> None:
         tables = [
@@ -2423,9 +2659,24 @@ INDEX_HTML = """<!doctype html>
       <span class="status-chip">업로드</span>
       <span class="status-chip">검증</span>
       <span class="status-chip">리포트</span>
+      <span id="userStatus" class="status-chip">로그인 확인 중</span>
+      <button id="logoutBtn" class="ghost hidden">로그아웃</button>
       <button id="sampleBtn" class="secondary">예시 입력</button>
     </div>
   </header>
+
+  <section id="authPanel" class="access-panel">
+    <div>
+      <h2>사용자 로그인</h2>
+      <p id="authMessage">테스트할 이메일과 비밀번호로 로그인하거나 새 계정을 만드세요.</p>
+    </div>
+    <div class="access-actions">
+      <input id="loginEmail" type="email" autocomplete="email" placeholder="이메일">
+      <input id="loginPassword" type="password" autocomplete="current-password" placeholder="비밀번호">
+      <button id="loginBtn" class="primary">로그인</button>
+      <button id="registerBtn" class="secondary">회원가입</button>
+    </div>
+  </section>
 
   <section id="accessPanel" class="access-panel hidden">
     <div>
@@ -2439,7 +2690,7 @@ INDEX_HTML = """<!doctype html>
     </div>
   </section>
 
-  <main class="layout">
+  <main id="appShell" class="layout hidden">
     <aside class="sidebar panel">
       <div class="panel-head">
         <h2>프로젝트</h2>
@@ -2695,7 +2946,7 @@ body {
 .access-actions {
   min-width: min(420px, 100%);
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) auto auto;
+  grid-template-columns: minmax(150px, 1fr) minmax(140px, 1fr) auto auto;
   gap: 8px;
 }
 
@@ -3462,6 +3713,7 @@ let extractions = [];
 let hasDraft = false;
 let projects = [];
 let accessRequired = false;
+let currentUser = null;
 
 const $ = (selector) => document.querySelector(selector);
 const accessStorageKey = "gtfAccessCode";
@@ -3492,12 +3744,7 @@ function savedAccessCode() {
 }
 
 function authHeaders(baseHeaders = {}) {
-  const headers = { ...baseHeaders };
-  const code = savedAccessCode();
-  if (code) {
-    headers["X-GTF-Access-Code"] = code;
-  }
-  return headers;
+  return { ...baseHeaders };
 }
 
 function renderAccessPanel(message = "") {
@@ -3511,9 +3758,24 @@ function renderAccessPanel(message = "") {
 }
 
 function handleAccessError(data) {
-  if (data && data.access_required) {
+  if (data && data.login_required) {
+    currentUser = null;
+    renderAuthPanel(data.error || "로그인이 필요합니다.");
+  } else if (data && data.access_required) {
     accessRequired = true;
     renderAccessPanel(data.error || "접근 코드가 필요합니다.");
+  }
+}
+
+function renderAuthPanel(message = "") {
+  const isLoggedIn = Boolean(currentUser);
+  $("#authPanel").classList.toggle("hidden", isLoggedIn);
+  $("#appShell").classList.toggle("hidden", !isLoggedIn);
+  $("#logoutBtn").classList.toggle("hidden", !isLoggedIn);
+  $("#sampleBtn").disabled = !isLoggedIn;
+  $("#userStatus").textContent = isLoggedIn ? currentUser.email : "로그인 필요";
+  if (!isLoggedIn) {
+    $("#authMessage").textContent = message || "테스트할 이메일과 비밀번호로 로그인하거나 새 계정을 만드세요.";
   }
 }
 
@@ -3706,6 +3968,36 @@ async function refreshAccessConfig() {
   return config;
 }
 
+async function refreshSession() {
+  const res = await fetch("/api/auth/session", { credentials: "same-origin" });
+  const data = await res.json().catch(() => ({}));
+  currentUser = data.authenticated ? data.user : null;
+  renderAuthPanel();
+  return currentUser;
+}
+
+async function submitAuth(mode) {
+  const email = $("#loginEmail").value.trim();
+  const password = $("#loginPassword").value;
+  if (!email || !password) {
+    renderAuthPanel("이메일과 비밀번호를 입력하세요.");
+    return;
+  }
+  try {
+    const data = await api(`/api/auth/${mode}`, {
+      method: "POST",
+      body: JSON.stringify({ email, password })
+    });
+    currentUser = data.user;
+    $("#loginPassword").value = "";
+    renderAuthPanel();
+    resetWorkspace();
+    await refreshProtectedData();
+  } catch (error) {
+    renderAuthPanel(error.message || "로그인 처리에 실패했습니다.");
+  }
+}
+
 async function refreshProtectedData() {
   await refreshProjects();
 }
@@ -3741,7 +4033,8 @@ async function api(path, options = {}) {
   const headers = authHeaders({ "Content-Type": "application/json", ...(options.headers || {}) });
   const res = await fetch(path, {
     ...options,
-    headers
+    headers,
+    credentials: "same-origin"
   });
   const data = await res.json().catch(() => ({}));
   handleAccessError(data);
@@ -3755,6 +4048,7 @@ async function uploadApi(path, file) {
   const res = await fetch(path, {
     method: "POST",
     headers: authHeaders(),
+    credentials: "same-origin",
     body: form
   });
   const data = await res.json().catch(() => ({}));
@@ -3764,7 +4058,7 @@ async function uploadApi(path, file) {
 }
 
 async function downloadApi(path, filename) {
-  const res = await fetch(path, { headers: authHeaders() });
+  const res = await fetch(path, { headers: authHeaders(), credentials: "same-origin" });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     handleAccessError(data);
@@ -4180,6 +4474,20 @@ $("#clearAccessCodeBtn").addEventListener("click", () => {
   renderAccessPanel("접근 코드가 초기화되었습니다.");
 });
 
+$("#loginBtn").addEventListener("click", () => submitAuth("login"));
+$("#registerBtn").addEventListener("click", () => submitAuth("register"));
+$("#loginPassword").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") submitAuth("login");
+});
+$("#logoutBtn").addEventListener("click", async () => {
+  await api("/api/auth/logout", { method: "POST", body: "{}" });
+  currentUser = null;
+  projects = [];
+  resetWorkspace();
+  renderProjects();
+  renderAuthPanel("로그아웃되었습니다.");
+});
+
 $("#projectForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -4335,12 +4643,16 @@ $("#exportReportBtn").addEventListener("click", () => {
   downloadApi(`/api/projects/${activeProjectId}/exports/basis-report.txt`, "gtf_basis_report.txt");
 });
 
-$("#csvInput").value = csvSample();
+$("#csvInput").value = "";
 updateProgress(null);
 updateMetrics();
 
 async function initApp() {
   await refreshAccessConfig();
+  await refreshSession();
+  if (!currentUser) {
+    return;
+  }
   if (accessRequired && !savedAccessCode()) {
     renderAccessPanel("운영자가 발급한 접근 코드를 입력하면 프로젝트 데이터를 불러옵니다.");
     return;

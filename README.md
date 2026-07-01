@@ -1,175 +1,144 @@
-# GTF Accounting Conversion MVP
+# GTF 회계기준 변환 서비스
 
-K-GAAP financial statement conversion workflow for Korean startups and SMEs preparing overseas fundraising, IFRS reporting, or listing readiness.
+한국 스타트업·중소기업의 K-GAAP 재무제표를 IFRS 검토 초안으로 변환하기 위한 웹 서비스입니다. PDF, Excel, CSV, 이미지 파일을 업로드하거나 계정 데이터를 수동 입력하면 계정 매핑, 판단 필요 항목 분류, 체크리스트 입력, 변환 초안 생성, 검토 로그 기록까지 한 화면에서 처리합니다.
 
-This MVP is intentionally a review-first system. It identifies likely mapping and judgment items, generates conversion drafts, and preserves an audit trail. Final accounting policy decisions remain with company reviewers, accountants, and auditors.
+이 서비스는 회계처리를 자동 확정하는 시스템이 아닙니다. 리스, 개발비, 수익인식, 금융상품, 충당부채처럼 판단이 필요한 항목을 식별하고 변환 초안을 제시하며, 최종 회계정책 판단과 승인은 회사 담당자 또는 회계 전문가가 수행하는 구조입니다.
 
-## Features
+## 주요 기능
 
-- Upload K-GAAP financial statement files or paste extracted trial balance rows
-- Preserve uploaded PDF, Excel, CSV, and image source files for OCR handoff
-- Store uploaded source file bytes in the SQL database so Render restarts do not break extraction
-- Create extraction results from uploaded files before accepting rows into the mapping workflow
-- Show OCR provider/model/API-key readiness before extraction
-- Normalize account names into internal standard account codes
-- Split simple 1:1 mappings from judgment-required areas
-- Collect checklist inputs for leases, development costs, revenue recognition, financial instruments, and provisions
-- Generate IFRS conversion draft entries and disclosure notes
-- Record human review decisions for approval or requested changes
-- Store every project, checklist response, generated output, and audit log in SQLite
-- Web dashboard plus JSON API
-- Saved project list for reopening prior work
+- 사용자 회원가입 및 로그인
+- K-GAAP 재무제표 PDF, Excel, CSV, 이미지 업로드
+- DART 사업보고서형 PDF의 표 직접 추출
+- 업로드 후 자동 분석 실행
+- 수동 계정 입력 및 예시 입력
+- 내부 표준계정코드 기반 계정명 정규화
+- K-GAAP 계정명 → 내부 코드 → IFRS 표시 라인 매핑
+- 단순 매핑 항목과 판단 필요 항목 분리
+- 리스, 개발비, 수익인식, 금융상품, 충당부채 체크리스트 입력
+- IFRS 변환 초안, 조정분개, 주석 초안 생성
+- OpenAI 판단 보조 결과 카드 표시
+- 검토 및 승인/수정 요청 기록
+- 감사 로그 및 근거 리포트 다운로드
 
-## Run Locally
+## 실행 방법
 
 ```bash
 python3 server.py
 ```
 
-Then open:
+기본 주소:
 
 ```text
 http://127.0.0.1:4173
 ```
 
-To use a different port:
+다른 포트로 실행:
 
 ```bash
-PORT=8080 python3 server.py
+PORT=4179 python3 server.py
 ```
 
-## Deploy
+## 사용 흐름
 
-This app runs on Python 3.11+. SQLite local mode uses the Python standard library; Postgres/Neon deployment uses `psycopg`.
+1. 웹 화면에서 이메일과 비밀번호로 회원가입 또는 로그인합니다.
+2. 새 변환 프로젝트를 생성합니다.
+3. PDF, Excel, CSV, 이미지 파일을 업로드합니다.
+4. 업로드 후 자동 분석 결과를 확인합니다.
+5. 추출 결과를 계정에 반영합니다.
+6. 매핑 및 판단 필요 항목을 검토합니다.
+7. 체크리스트를 입력합니다.
+8. 변환 초안을 생성합니다.
+9. 조정분개, 판단 근거, 주석 초안, OpenAI 보조 결과를 검토합니다.
+10. 검토자 메모를 남기고 승인 또는 수정 요청을 기록합니다.
 
-Common deployment command:
+수동 입력 영역은 기본값 없이 비어 있습니다. 테스트용 데이터가 필요하면 상단의 `예시 입력` 버튼을 누르면 됩니다.
+
+## 배포
+
+Render 배포 기준 실행 명령:
 
 ```bash
-PORT=$PORT python3 server.py
+HOST=0.0.0.0 python3 server.py
 ```
 
-For platforms that require binding to a public interface:
+포함된 배포 파일:
 
-```bash
-HOST=0.0.0.0 PORT=$PORT python3 server.py
-```
+- `Procfile`: Heroku 스타일 실행 명령
+- `render.yaml`: Render 웹 서비스 설정
+- `runtime.txt`: Python 런타임 버전
+- `requirements.txt`: Postgres 및 PDF 파서 의존성
+- `.env.example`: 로컬 환경변수 예시
 
-Included deployment files:
-
-- `Procfile`: process command for Heroku-style platforms
-- `render.yaml`: Render web service blueprint
-- `runtime.txt`: Python runtime pin
-- `requirements.txt`: Postgres driver dependency for Neon/Postgres deployment
-- `.env.example`: local environment variable template
-
-Health check:
+헬스 체크:
 
 ```text
 GET /healthz
 ```
 
-For production, use a managed Postgres database instead of the local SQLite file. `render.yaml` is configured to require Postgres by default.
+## 환경변수
 
-Recommended when Supabase is unavailable:
-
-- Neon Postgres for SQL data
-- S3-compatible object storage such as Cloudflare R2 for uploaded files
-
-Postgres setup files:
-
-- `postgres/README.md`
-- `postgres/schema.sql`
-- `supabase/schema.sql`
-- `supabase/seed_reference_data.sql`
-- `supabase/README.md`
-
-Use `postgres/schema.sql` for Neon or other managed Postgres providers. Use `supabase/schema.sql` only when deploying specifically to Supabase.
-
-Set these deployment variables when switching the persistence layer to Neon/Postgres:
+서버 환경변수 또는 로컬 `.env`, `.env.local` 파일로 설정합니다. 고객용 프론트엔드에는 API 키를 입력하지 않습니다.
 
 ```bash
 DATABASE_BACKEND=postgres
 DATABASE_URL=postgresql://...
-```
-
-The app includes an initial psycopg adapter for Postgres. Run `postgres/schema.sql` and `supabase/seed_reference_data.sql` in the managed Postgres provider before setting `DATABASE_BACKEND=postgres`.
-
-`/healthz` exposes `database_config` so you can confirm whether the deployment is running in SQLite mode or Postgres mode.
-
-## OCR Settings
-
-The MVP reads OCR readiness from environment variables:
-
-로컬에서 계속 사용할 OCR 키는 프로젝트 루트의 `.env` 또는 `.env.local`에 저장할 수 있습니다. 이 파일들은 `.gitignore`에 포함되어 저장소에는 올라가지 않습니다.
-
-```bash
 GEMINI_API_KEY=...
 OCR_PROVIDER=gemini
 GEMINI_OCR_MODEL=gemini-3.5-flash
 OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-4.1-mini
-APP_ACCESS_CODE=...
 ```
 
-환경변수로 직접 실행할 수도 있습니다.
+현재 로그인은 앱 자체의 사용자 계정과 세션 쿠키로 동작합니다. 예전 접근 코드 방식은 테스트 편의를 위해 비활성화되어 있습니다.
 
-```bash
-GEMINI_API_KEY=... OPENAI_API_KEY=... OCR_PROVIDER=gemini GEMINI_OCR_MODEL=gemini-3.5-flash python3 server.py
-```
+## 데이터베이스
 
-고객용 웹 UI에서는 OCR 키를 입력하지 않습니다. OCR 키와 모델은 운영자가 서버 환경변수 또는 `.env` 파일로 설정하고, 화면에는 연결 준비 상태만 표시합니다.
-
-`GEMINI_API_KEY`가 없으면 PDF와 이미지는 샘플 추출 결과를 사용하며, 검토자가 확인하는 흐름은 그대로 유지됩니다.
-
-OpenAI 판단 보조도 같은 방식으로 서버에서만 설정합니다. `OPENAI_API_KEY`가 있으면 판단 필요 항목에 대해 기준 근거 요약과 추가 질문 초안을 생성하고, 없으면 변환 초안은 그대로 생성하되 사람 검토 단계로 넘깁니다. 최종 회계정책 판단과 승인은 담당자 또는 회계 전문가가 수행합니다.
-
-배포 URL을 공개할 때는 `APP_ACCESS_CODE`를 설정하세요. 값이 설정되면 프로젝트, 업로드, 변환, 승인, 다운로드 API는 웹 UI에서 접근 코드를 입력한 사용자에게만 열립니다. 값이 없으면 로컬 개발처럼 공개 모드로 동작합니다.
-
-## Database Layout
-
-Local SQLite file:
+로컬 SQLite:
 
 ```text
 data/gtf.sqlite3
 ```
 
-Operational workflow tables:
+운영 배포에서는 Neon 등 관리형 Postgres 사용을 권장합니다.
 
-- `projects`: 회사, 기준, 기간, 진행 상태
-- `uploads`: 업로드 원본 파일 메타데이터와 DB 보관 원본 바이트
-- `extractions`: OCR/Excel/CSV 추출 결과
+주요 업무 테이블:
+
+- `app_users`: 로그인 사용자
+- `user_sessions`: 로그인 세션
+- `projects`: 변환 프로젝트
+- `uploads`: 업로드 원본 파일과 파일 바이트
+- `extractions`: PDF/OCR/Excel/CSV 추출 결과
 - `statements`: 매핑된 계정 행과 체크리스트
 - `conversions`: 변환 초안 JSON
-- `reviews`: 사람 검토 및 승인 이력
-- `audit_logs`: 입력값, 적용 룰, 검증, 변환, 승인 감사 로그
+- `reviews`: 검토 및 승인 이력
+- `audit_logs`: 입력값, 적용 룰, 변환, 검토 감사 로그
 
-Reference data tables:
+기준정보 테이블:
 
-- `standard_accounts`: 내부 표준계정코드 DB
-- `kgaap_accounts`: K-GAAP 계정명/별칭 DB
-- `ifrs_accounts`: IFRS 계정 및 기준서 요약 DB
-- `mapping_rules`: K-GAAP → IFRS 변환 룰 DB
-- `checklist_items`: 판단 필요 항목별 체크리스트 DB
-- `standards_references`: 기준서 참조 DB
-- `financial_statement_templates`: DART 연동 전 자체 재무제표 표시 양식 DB
+- `standard_accounts`: 내부 표준계정코드
+- `kgaap_accounts`: K-GAAP 계정명/별칭
+- `ifrs_accounts`: IFRS 계정 및 기준 요약
+- `mapping_rules`: 변환 룰
+- `checklist_items`: 판단 필요 항목 체크리스트
+- `standards_references`: 기준서 참조
+- `financial_statement_templates`: IFRS 표시 양식
 
-The app seeds the local reference tables from the MVP defaults at startup. In production, run `postgres/schema.sql` and `supabase/seed_reference_data.sql` in the managed Postgres provider, then manage those tables as controlled master data.
+## PDF 처리 방식
 
-Uploaded files are also written to the local `data/uploads` directory for parsing speed. In Postgres mode, the same file bytes are stored in `uploads.file_bytes`, and the app can restore the local file before OCR/extraction if Render restarts or the ephemeral disk is cleared. For larger production traffic, move this column to S3-compatible object storage such as Cloudflare R2 and keep only the storage path in SQL.
+텍스트와 표 구조가 살아 있는 DART 사업보고서형 PDF는 OCR 전에 `pdfplumber`로 표를 직접 분석합니다. 재무제표 본문 구간을 우선 추출하고, 현금흐름표·자본변동표성 행은 제외하여 변환 가능한 핵심 계정만 매핑합니다.
+
+이미지 스캔 PDF 또는 표 직접 추출이 어려운 파일은 Gemini OCR 경로로 전환할 수 있습니다. 이때 `GEMINI_API_KEY`가 서버에 설정되어 있어야 합니다.
 
 ## API
 
+- `GET /api/auth/session`
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
 - `GET /api/projects`
-- `GET /healthz`
-- `GET /api/ocr-config`
-- `GET /api/ai-config`
-- `GET /api/access-config`
-- `GET /api/reference-data`
 - `POST /api/projects`
 - `GET /api/projects/{id}`
-- `GET /api/projects/{id}/uploads`
 - `POST /api/projects/{id}/uploads`
-- `GET /api/projects/{id}/extractions`
 - `POST /api/projects/{id}/uploads/{upload_id}/extract`
 - `POST /api/projects/{id}/extractions/{extraction_id}/accept`
 - `POST /api/projects/{id}/statements`
@@ -180,6 +149,9 @@ Uploaded files are also written to the local `data/uploads` directory for parsin
 - `GET /api/projects/{id}/exports/adjustments.csv`
 - `GET /api/projects/{id}/exports/basis-report.txt`
 
-## Notes
+## 주의 사항
 
-The OCR and LLM provider integrations are represented as boundaries in this MVP. DART can be added later; until then, conversion drafts use the internal financial statement template DB for presentation lines. Keep human approval as a required workflow step.
+- 변환 결과는 검토 초안이며 최종 재무제표가 아닙니다.
+- 회계정책 판단, 할인율, 리스기간, 자산화 요건, 수익인식 방식 등은 사람이 검토해야 합니다.
+- 배포 환경에서는 API 키를 코드에 저장하지 말고 Render 환경변수로 관리해야 합니다.
+- 대량 파일 업로드 또는 장기 보관이 필요하면 파일 바이트를 DB에 직접 저장하는 방식 대신 S3 호환 스토리지 사용을 권장합니다.
