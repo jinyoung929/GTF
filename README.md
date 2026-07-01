@@ -93,6 +93,8 @@ DATABASE_URL=postgresql://...
 
 The current code path still uses SQLite for local MVP execution. The Postgres schema is ready; the next implementation step is adding the Postgres repository/storage adapter.
 
+`/healthz` exposes `database_config` so you can confirm whether the deployment is still running in SQLite mode or is ready for the Postgres adapter.
+
 ## OCR Settings
 
 The MVP reads OCR readiness from environment variables:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import base64
 import io
+import importlib.util
 import json
 import mimetypes
 import os
@@ -158,7 +159,27 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def database_config() -> dict:
+    backend = os.environ.get("DATABASE_BACKEND", "sqlite").strip().lower() or "sqlite"
+    database_url = os.environ.get("DATABASE_URL") or os.environ.get("NEON_DATABASE_URL") or ""
+    postgres_driver_ready = importlib.util.find_spec("psycopg") is not None
+    return {
+        "backend": backend,
+        "sqlite_path": str(DB_PATH),
+        "sqlite_ready": DB_PATH.exists(),
+        "database_url_ready": bool(database_url),
+        "postgres_driver_ready": postgres_driver_ready,
+        "postgres_ready": backend == "postgres" and bool(database_url) and postgres_driver_ready,
+    }
+
+
 def connect() -> sqlite3.Connection:
+    config = database_config()
+    if config["backend"] != "sqlite":
+        raise RuntimeError(
+            "DATABASE_BACKEND=postgres is configured, but the Postgres repository adapter is not implemented yet. "
+            "Use DATABASE_BACKEND=sqlite until the adapter step is complete."
+        )
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -1071,6 +1092,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "service": "gtf-accounting-conversion",
                     "time": utc_now(),
                     "database": DB_PATH.exists(),
+                    "database_config": database_config(),
                     "ocr": ocr_config(),
                 }
             )
