@@ -295,6 +295,13 @@ def parse_json_field(value, fallback):
     return value
 
 
+def upload_public_dict(row_or_upload) -> dict:
+    upload = row_to_dict(row_or_upload) if hasattr(row_or_upload, "keys") else dict(row_or_upload)
+    upload.pop("file_bytes", None)
+    upload["db_file_ready"] = bool(row_or_upload["file_bytes"]) if hasattr(row_or_upload, "keys") and "file_bytes" in row_or_upload.keys() else bool(row_or_upload.get("file_bytes"))
+    return upload
+
+
 def postgres_param(value):
     if isinstance(value, str):
         stripped = value.strip()
@@ -354,6 +361,7 @@ def init_db() -> None:
     if database_config()["backend"] == "postgres":
         with connect() as conn:
             conn.execute("SELECT 1")
+            conn.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_bytes bytea")
         return
     with connect() as conn:
         conn.executescript(
@@ -391,6 +399,7 @@ def init_db() -> None:
                 stored_name TEXT NOT NULL,
                 content_type TEXT NOT NULL,
                 size_bytes INTEGER NOT NULL,
+                file_bytes BLOB,
                 extraction_status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(project_id) REFERENCES projects(id)
@@ -515,6 +524,9 @@ def init_db() -> None:
             );
             """
         )
+        upload_columns = [row["name"] for row in conn.execute("PRAGMA table_info(uploads)").fetchall()]
+        if "file_bytes" not in upload_columns:
+            conn.execute("ALTER TABLE uploads ADD COLUMN file_bytes BLOB")
         seed_reference_data(conn)
 
 
@@ -1332,8 +1344,24 @@ def call_gemini_ocr(file_path: Path, mime_type: str, model: str) -> tuple[list[d
     return rows, issues
 
 
-def extract_rows_from_upload(upload: dict) -> tuple[list[dict], list[str], str]:
+def upload_file_path(upload: dict) -> Path:
     stored_path = UPLOAD_DIR / upload["stored_name"]
+    if stored_path.exists():
+        return stored_path
+    file_bytes = upload.get("file_bytes")
+    if isinstance(file_bytes, memoryview):
+        file_bytes = file_bytes.tobytes()
+    if isinstance(file_bytes, bytes):
+        stored_path.write_bytes(file_bytes)
+        return stored_path
+    raise FileNotFoundError("업로드 원본 파일을 로컬 디스크 또는 DB에서 찾지 못했습니다.")
+
+
+def extract_rows_from_upload(upload: dict) -> tuple[list[dict], list[str], str]:
+    try:
+        stored_path = upload_file_path(upload)
+    except FileNotFoundError as exc:
+        return [], [str(exc)], "missing_upload_file"
     suffix = Path(upload["original_name"]).suffix.lower()
     content_type = upload["content_type"].lower()
     config = ocr_config()
@@ -1821,7 +1849,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 for row in conn.execute("SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,))
             ]
             uploads = [
-                row_to_dict(row)
+                upload_public_dict(row)
                 for row in conn.execute("SELECT * FROM uploads WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
             ]
             extractions = [
@@ -1853,7 +1881,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "SELECT * FROM uploads WHERE project_id = ? ORDER BY created_at DESC",
                 (project_id,),
             ).fetchall()
-        self.respond_json([row_to_dict(row) for row in rows])
+        self.respond_json([upload_public_dict(row) for row in rows])
 
     def handle_get_extractions(self, project_id: str) -> None:
         with connect() as conn:
@@ -1890,6 +1918,7 @@ class AppHandler(BaseHTTPRequestHandler):
             "stored_name": stored_name,
             "content_type": content_type,
             "size_bytes": len(content),
+            "file_bytes": content,
             "extraction_status": "pending_ocr",
             "created_at": utc_now(),
         }
@@ -1897,9 +1926,9 @@ class AppHandler(BaseHTTPRequestHandler):
             conn.execute(
                 """
                 INSERT INTO uploads (
-                    id, project_id, original_name, stored_name, content_type, size_bytes, extraction_status, created_at
+                    id, project_id, original_name, stored_name, content_type, size_bytes, file_bytes, extraction_status, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     upload["id"],
@@ -1908,6 +1937,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     upload["stored_name"],
                     upload["content_type"],
                     upload["size_bytes"],
+                    upload["file_bytes"],
                     upload["extraction_status"],
                     upload["created_at"],
                 ),
@@ -1925,7 +1955,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "next_step": "Gemini OCR extraction",
                 },
             )
-        self.respond_json(upload, HTTPStatus.CREATED)
+        self.respond_json(upload_public_dict(upload), HTTPStatus.CREATED)
 
     def handle_extract_upload(self, project_id: str, upload_id: str) -> None:
         with connect() as conn:

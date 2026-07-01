@@ -8,6 +8,7 @@ This MVP is intentionally a review-first system. It identifies likely mapping an
 
 - Upload K-GAAP financial statement files or paste extracted trial balance rows
 - Preserve uploaded PDF, Excel, CSV, and image source files for OCR handoff
+- Store uploaded source file bytes in the SQL database so Render restarts do not break extraction
 - Create extraction results from uploaded files before accepting rows into the mapping workflow
 - Show OCR provider/model/API-key readiness before extraction
 - Normalize account names into internal standard account codes
@@ -135,7 +136,7 @@ data/gtf.sqlite3
 Operational workflow tables:
 
 - `projects`: 회사, 기준, 기간, 진행 상태
-- `uploads`: 업로드 원본 파일 메타데이터
+- `uploads`: 업로드 원본 파일 메타데이터와 DB 보관 원본 바이트
 - `extractions`: OCR/Excel/CSV 추출 결과
 - `statements`: 매핑된 계정 행과 체크리스트
 - `conversions`: 변환 초안 JSON
@@ -153,6 +154,8 @@ Reference data tables:
 - `financial_statement_templates`: DART 연동 전 자체 재무제표 표시 양식 DB
 
 The app seeds the local reference tables from the MVP defaults at startup. In production, run `postgres/schema.sql` and `supabase/seed_reference_data.sql` in the managed Postgres provider, then manage those tables as controlled master data.
+
+Uploaded files are also written to the local `data/uploads` directory for parsing speed. In Postgres mode, the same file bytes are stored in `uploads.file_bytes`, and the app can restore the local file before OCR/extraction if Render restarts or the ephemeral disk is cleared. For larger production traffic, move this column to S3-compatible object storage such as Cloudflare R2 and keep only the storage path in SQL.
 
 ## API
 

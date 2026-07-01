@@ -23,6 +23,7 @@ create table if not exists public.uploads (
   storage_path text,
   content_type text not null,
   size_bytes bigint not null,
+  file_bytes bytea,
   extraction_status text not null,
   created_at timestamptz not null default now()
 );
