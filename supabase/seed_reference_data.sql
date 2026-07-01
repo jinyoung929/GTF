@@ -105,7 +105,7 @@ on conflict (id) do update set
 delete from public.checklist_items;
 insert into public.checklist_items (id, account_key, item_key, label, input_type, required, display_order)
 select
-  account_key || '_' || item ->> 'key',
+  account_key || '_' || (item ->> 'key'),
   account_key,
   item ->> 'key',
   item ->> 'label',
