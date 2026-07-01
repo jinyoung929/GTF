@@ -30,6 +30,8 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "gtf.sqlite3"
 ENV_PATHS = (ROOT / ".env", ROOT / ".env.local")
 GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024
+CLAUDE_API_ENDPOINT = "https://api.anthropic.com/v1/messages"
+CLAUDE_DEFAULT_MODEL = "claude-sonnet-5"
 
 
 def load_local_env() -> None:
@@ -978,6 +980,20 @@ def ocr_config() -> dict:
     }
 
 
+def claude_config() -> dict:
+    model = os.environ.get("CLAUDE_MODEL", CLAUDE_DEFAULT_MODEL).strip() or CLAUDE_DEFAULT_MODEL
+    api_key_source = "environment" if os.environ.get("CLAUDE_API_KEY") else "none"
+    api_key_ready = api_key_source != "none"
+    return {
+        "provider": "claude",
+        "model": model,
+        "api_key_ready": api_key_ready,
+        "api_key_source": api_key_source,
+        "mode": "connected" if api_key_ready else "not_configured",
+        "human_review_required": True,
+    }
+
+
 def supported_ocr_mime(path: Path, content_type: str) -> str | None:
     suffix = path.suffix.lower()
     if suffix == ".pdf" or "pdf" in content_type:
@@ -1014,6 +1030,175 @@ def gemini_response_text(response: dict) -> str:
     parts = candidates[0].get("content", {}).get("parts") or []
     texts = [part.get("text", "") for part in parts if isinstance(part.get("text"), str)]
     return "\n".join(texts).strip()
+
+
+def claude_response_text(response: dict) -> str:
+    content = response.get("content") or []
+    texts = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+            texts.append(part["text"])
+    return "\n".join(texts).strip()
+
+
+def call_claude_judgment(project: dict, entries: list[dict], judgment_items: list[dict]) -> dict:
+    config = claude_config()
+    if not judgment_items:
+        return {
+            "provider": "claude",
+            "model": config["model"],
+            "status": "skipped",
+            "items": [],
+            "overall_note": "판단 필요 항목이 없어 Claude 판단 보조를 건너뛰었습니다.",
+            "human_review_required": True,
+        }
+    api_key = os.environ.get("CLAUDE_API_KEY", "").strip()
+    if not api_key:
+        return {
+            "provider": "claude",
+            "model": config["model"],
+            "status": "not_configured",
+            "items": [],
+            "overall_note": "CLAUDE_API_KEY가 서버 환경변수에 설정되지 않아 규정 근거 요약은 생성하지 않았습니다.",
+            "issues": ["CLAUDE_API_KEY가 서버 환경변수에 설정되지 않았습니다."],
+            "human_review_required": True,
+        }
+
+    compact_entries = [
+        {
+            "source_account": entry.get("source_account"),
+            "standard_code": entry.get("standard_code"),
+            "target_account": entry.get("target_account"),
+            "statement_line_item": entry.get("statement_line_item"),
+            "mapping_type": entry.get("mapping_type"),
+            "basis": entry.get("basis"),
+            "calculation": entry.get("calculation"),
+        }
+        for entry in entries
+        if entry.get("mapping_type") == "judgment"
+    ]
+    prompt = {
+        "project": {
+            "company_name": project.get("company_name"),
+            "period": project.get("period"),
+            "source_standard": project.get("source_standard"),
+            "target_standard": project.get("target_standard"),
+        },
+        "judgment_entries": compact_entries,
+        "checklist_inputs": judgment_items,
+        "response_contract": {
+            "items": [
+                {
+                    "account": "계정명",
+                    "risk_level": "low|medium|high",
+                    "classification_hint": "검토자가 확인할 분류 방향",
+                    "additional_questions": ["추가로 확인할 질문"],
+                    "review_note": "사람 검토자가 볼 짧은 검토 메모",
+                    "basis_summary": "적용 기준과 판단 근거 요약",
+                }
+            ],
+            "overall_note": "전체 검토 메모",
+        },
+    }
+    payload = {
+        "model": config["model"],
+        "max_tokens": 1200,
+        "system": (
+            "너는 K-GAAP 재무제표를 IFRS 초안으로 변환하는 회계 검토 보조자다. "
+            "최종 회계처리를 확정하지 말고, 사용자가 입력한 체크리스트와 변환 초안을 바탕으로 "
+            "판단 필요 항목, 추가 질문, 기준 근거 요약만 한국어로 제시한다. "
+            "반드시 사람이 최종 검토하고 승인해야 한다는 전제를 유지한다. JSON만 반환한다."
+        ),
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "다음 변환 초안의 판단 필요 항목을 검토해 JSON만 반환하세요. "
+                    "마크다운과 설명 문장은 쓰지 마세요.\n"
+                    + json.dumps(prompt, ensure_ascii=False)
+                ),
+            }
+        ],
+    }
+    request = url_request.Request(
+        CLAUDE_API_ENDPOINT,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+
+    try:
+        with url_request.urlopen(request, timeout=45) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except url_error.HTTPError as exc:
+        message = exc.read().decode("utf-8", errors="replace")[:500]
+        return {
+            "provider": "claude",
+            "model": config["model"],
+            "status": "failed",
+            "items": [],
+            "overall_note": "Claude 판단 보조 요청이 실패했습니다. 변환 초안은 저장되며 사람이 검토해야 합니다.",
+            "issues": [f"Claude 요청 실패: HTTP {exc.code}", message],
+            "human_review_required": True,
+        }
+    except url_error.URLError as exc:
+        return {
+            "provider": "claude",
+            "model": config["model"],
+            "status": "failed",
+            "items": [],
+            "overall_note": "Claude 판단 보조 네트워크 오류가 발생했습니다.",
+            "issues": [f"Claude 네트워크 오류: {exc.reason}"],
+            "human_review_required": True,
+        }
+    except TimeoutError:
+        return {
+            "provider": "claude",
+            "model": config["model"],
+            "status": "failed",
+            "items": [],
+            "overall_note": "Claude 판단 보조 요청 시간이 초과되었습니다.",
+            "issues": ["Claude 요청 시간이 초과되었습니다."],
+            "human_review_required": True,
+        }
+
+    text = claude_response_text(response_payload)
+    if not text:
+        return {
+            "provider": "claude",
+            "model": config["model"],
+            "status": "failed",
+            "items": [],
+            "overall_note": "Claude 응답에서 검토 텍스트를 찾지 못했습니다.",
+            "issues": ["Claude 응답 텍스트가 비어 있습니다."],
+            "human_review_required": True,
+        }
+    try:
+        parsed = extract_json_object(text)
+    except json.JSONDecodeError:
+        return {
+            "provider": "claude",
+            "model": config["model"],
+            "status": "failed",
+            "items": [],
+            "overall_note": "Claude 응답을 JSON으로 해석하지 못했습니다.",
+            "issues": ["Claude 응답 JSON 해석 실패", text[:500]],
+            "human_review_required": True,
+        }
+
+    items = parsed.get("items") if isinstance(parsed.get("items"), list) else []
+    return {
+        "provider": "claude",
+        "model": config["model"],
+        "status": "connected",
+        "items": items,
+        "overall_note": str(parsed.get("overall_note") or "사람 검토와 승인이 필요합니다."),
+        "human_review_required": True,
+    }
 
 
 def call_gemini_ocr(file_path: Path, mime_type: str, model: str) -> tuple[list[dict], list[str]]:
@@ -1248,6 +1433,10 @@ def label_backend(value: str) -> str:
         "approved": "승인 완료",
         "changes_requested": "수정 요청",
         "draft_generated": "초안 생성",
+        "connected": "연결 완료",
+        "not_configured": "키 미설정",
+        "failed": "실패",
+        "skipped": "건너뜀",
     }
     return labels.get(value, value or "-")
 
@@ -1302,6 +1491,27 @@ def conversion_basis_report(conversion: dict) -> str:
     for item in judgment_items:
         lines.append(f"- {item.get('account', '-')}: {localize_export_text(item.get('basis'))}")
     lines.append("")
+    lines.append("[Claude 판단 보조]")
+    ai_assistance = conversion.get("ai_assistance") or {}
+    lines.append(f"상태: {label_backend(ai_assistance.get('status', '-'))}")
+    lines.append(f"모델: {ai_assistance.get('model', '-')}")
+    if ai_assistance.get("overall_note"):
+        lines.append(f"전체 메모: {localize_export_text(ai_assistance.get('overall_note'))}")
+    ai_items = ai_assistance.get("items") or []
+    if not ai_items:
+        lines.append("- 없음")
+    for item in ai_items:
+        questions = ", ".join(str(question) for question in item.get("additional_questions", []) if str(question).strip())
+        lines.extend(
+            [
+                f"- {item.get('account', '-')}: {item.get('risk_level', '-')}",
+                f"  분류 힌트: {localize_export_text(item.get('classification_hint'))}",
+                f"  추가 질문: {questions or '-'}",
+                f"  검토 메모: {localize_export_text(item.get('review_note'))}",
+                f"  근거 요약: {localize_export_text(item.get('basis_summary'))}",
+            ]
+        )
+    lines.append("")
     lines.append("[주석 초안]")
     notes = conversion.get("draft_notes", [])
     if not notes:
@@ -1327,6 +1537,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "database": database_ready(),
                     "database_config": database_config(),
                     "ocr": ocr_config(),
+                    "claude": claude_config(),
                 }
             )
         elif path == "/styles.css":
@@ -1789,13 +2000,25 @@ class AppHandler(BaseHTTPRequestHandler):
                 for row in conn.execute("SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,))
             ]
             templates = load_statement_template_map(conn)
-            output = generate_conversion(row_to_dict(project_row), statement_rows, responses, templates)
+            project = row_to_dict(project_row)
+            output = generate_conversion(project, statement_rows, responses, templates)
+            output["ai_assistance"] = call_claude_judgment(project, output["entries"], output["judgment_items"])
             conn.execute(
                 "INSERT INTO conversions (id, project_id, output_json, created_at) VALUES (?, ?, ?, ?)",
                 (str(uuid.uuid4()), project_id, json.dumps(output, ensure_ascii=False), utc_now()),
             )
             conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("draft_generated", utc_now(), project_id))
-            log_event(conn, project_id, "conversion.generated", {"responses": responses, "entry_count": len(output["entries"]), "template": output["statement_template"]})
+            log_event(
+                conn,
+                project_id,
+                "conversion.generated",
+                {
+                    "responses": responses,
+                    "entry_count": len(output["entries"]),
+                    "template": output["statement_template"],
+                    "claude_status": output["ai_assistance"].get("status"),
+                },
+            )
         self.respond_json(output)
 
     def handle_review(self, project_id: str) -> None:
@@ -2699,6 +2922,11 @@ function localizeText(value) {
     .replaceAll("Human review required", "사람 검토 필요");
 }
 
+function riskLabel(value) {
+  const labels = { low: "낮음", medium: "중간", high: "높음" };
+  return labels[value] || value || "-";
+}
+
 const workflowDefinitions = [
   { key: "created", title: "프로젝트", hint: "기본 정보" },
   { key: "source_uploaded", title: "원본", hint: "파일 업로드" },
@@ -2716,6 +2944,9 @@ const statusLabels = {
   draft_generated: "초안 생성",
   approved: "승인 완료",
   changes_requested: "수정 요청",
+  connected: "연결 완료",
+  not_configured: "키 미설정",
+  skipped: "건너뜀",
   pending_ocr: "OCR 대기",
   needs_review: "검토 필요",
   accepted: "반영 완료",
@@ -3062,6 +3293,20 @@ function renderDraft(draft) {
       <span>${escapeHtml(localizeText(note.draft_note))}</span>
     </div>
   `).join("");
+  const ai = draft.ai_assistance || {};
+  const aiCards = (ai.items || []).map((item) => {
+    const questions = (item.additional_questions || []).map((question) => escapeHtml(question)).join("<br>");
+    return `
+      <div class="draft-card">
+        <strong>${escapeHtml(item.account || "-")} · 위험도 ${escapeHtml(riskLabel(item.risk_level))}</strong>
+        <span>${escapeHtml(localizeText(item.classification_hint || "-"))}</span>
+        <span>${escapeHtml(localizeText(item.review_note || "-"))}</span>
+        <span>근거 요약: ${escapeHtml(localizeText(item.basis_summary || "-"))}</span>
+        <span>추가 질문: ${questions || "-"}</span>
+      </div>
+    `;
+  }).join("");
+  const aiStatus = `${labelFor(ai.status || "not_configured")} · ${ai.model || "모델 미설정"}`;
   $("#outputBox").innerHTML = `
     <div class="draft-summary">
       <strong>${escapeHtml(draft.project?.company_name || "-")} · ${escapeHtml(draft.project?.period || "-")}</strong>
@@ -3088,6 +3333,16 @@ function renderDraft(draft) {
     <div class="draft-section">
       <h3>판단 필요 항목</h3>
       <div class="draft-list">${judgmentCards || '<div class="draft-empty">판단 필요 항목이 없습니다.</div>'}</div>
+    </div>
+    <div class="draft-section">
+      <h3>Claude 판단 보조</h3>
+      <div class="draft-list">
+        <div class="draft-card">
+          <strong>${escapeHtml(aiStatus)}</strong>
+          <span>${escapeHtml(localizeText(ai.overall_note || "Claude 판단 보조 결과가 없습니다."))}</span>
+        </div>
+        ${aiCards || '<div class="draft-empty">표시할 판단 보조 결과가 없습니다.</div>'}
+      </div>
     </div>
     <div class="draft-section">
       <h3>주석 초안</h3>
