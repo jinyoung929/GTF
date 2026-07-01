@@ -11,6 +11,7 @@ import re
 import sqlite3
 import uuid
 import zipfile
+from decimal import Decimal
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
@@ -173,13 +174,78 @@ def database_config() -> dict:
     }
 
 
-def connect() -> sqlite3.Connection:
+def normalize_db_value(value):
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, list):
+        return [normalize_db_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: normalize_db_value(item) for key, item in value.items()}
+    return value
+
+
+def parse_json_field(value, fallback):
+    if value is None:
+        return fallback
+    if isinstance(value, (list, dict)):
+        return normalize_db_value(value)
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def postgres_param(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                from psycopg.types.json import Jsonb
+
+                return Jsonb(json.loads(stripped))
+            except (ImportError, json.JSONDecodeError):
+                return value
+    return value
+
+
+class PostgresConnection:
+    def __init__(self, database_url: str):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        self.connection = psycopg.connect(database_url, row_factory=dict_row)
+
+    def __enter__(self):
+        self.connection.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self.connection.__exit__(exc_type, exc, tb)
+
+    def execute(self, sql: str, params: tuple | list = ()):
+        translated = sql.replace("?", "%s")
+        converted = tuple(postgres_param(value) for value in params)
+        cursor = self.connection.cursor()
+        cursor.execute(translated, converted)
+        return cursor
+
+    def executescript(self, _script: str):
+        raise RuntimeError("Postgres schema must be initialized with postgres/schema.sql before starting the app.")
+
+
+def connect():
     config = database_config()
+    if config["backend"] == "postgres":
+        if not config["database_url_ready"]:
+            raise RuntimeError("DATABASE_BACKEND=postgres requires DATABASE_URL or NEON_DATABASE_URL.")
+        if not config["postgres_driver_ready"]:
+            raise RuntimeError("DATABASE_BACKEND=postgres requires psycopg. Run pip install -r requirements.txt.")
+        return PostgresConnection(os.environ.get("DATABASE_URL") or os.environ.get("NEON_DATABASE_URL") or "")
     if config["backend"] != "sqlite":
-        raise RuntimeError(
-            "DATABASE_BACKEND=postgres is configured, but the Postgres repository adapter is not implemented yet. "
-            "Use DATABASE_BACKEND=sqlite until the adapter step is complete."
-        )
+        raise RuntimeError(f"Unsupported DATABASE_BACKEND: {config['backend']}")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -188,6 +254,10 @@ def connect() -> sqlite3.Connection:
 def init_db() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(exist_ok=True)
+    if database_config()["backend"] == "postgres":
+        with connect() as conn:
+            conn.execute("SELECT 1")
+        return
     with connect() as conn:
         conn.executescript(
             """
@@ -459,8 +529,8 @@ def seed_reference_data(conn: sqlite3.Connection) -> None:
         )
 
 
-def row_to_dict(row: sqlite3.Row) -> dict:
-    return {key: row[key] for key in row.keys()}
+def row_to_dict(row) -> dict:
+    return {key: normalize_db_value(row[key]) for key in row.keys()}
 
 
 def log_event(conn: sqlite3.Connection, project_id: str, event_type: str, detail: dict, actor: str = "system") -> None:
@@ -1265,7 +1335,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
                 return
             statements = [
-                dict(row_to_dict(row), checklist=json.loads(row["checklist_json"]))
+                dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
                 for row in conn.execute("SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,))
             ]
             uploads = [
@@ -1273,7 +1343,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 for row in conn.execute("SELECT * FROM uploads WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
             ]
             extractions = [
-                dict(row_to_dict(row), rows=json.loads(row["rows_json"]), issues=json.loads(row["issues_json"]))
+                dict(row_to_dict(row), rows=parse_json_field(row["rows_json"], []), issues=parse_json_field(row["issues_json"], []))
                 for row in conn.execute("SELECT * FROM extractions WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
             ]
             conversion = conn.execute(
@@ -1290,7 +1360,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "statements": statements,
                 "uploads": uploads,
                 "extractions": extractions,
-                "conversion": json.loads(conversion["output_json"]) if conversion else None,
+                "conversion": parse_json_field(conversion["output_json"], None) if conversion else None,
                 "review": row_to_dict(review) if review else None,
             }
         )
@@ -1310,7 +1380,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 (project_id,),
             ).fetchall()
         self.respond_json(
-            [dict(row_to_dict(row), rows=json.loads(row["rows_json"]), issues=json.loads(row["issues_json"])) for row in rows]
+            [dict(row_to_dict(row), rows=parse_json_field(row["rows_json"], []), issues=parse_json_field(row["issues_json"], [])) for row in rows]
         )
 
     def handle_upload_file(self, project_id: str) -> None:
@@ -1445,7 +1515,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.respond_json({"error": "Extraction not found"}, HTTPStatus.NOT_FOUND)
                 return
 
-            rows = json.loads(extraction["rows_json"])
+            rows = parse_json_field(extraction["rows_json"], [])
             records = [build_statement_record(project["period"], row) for row in rows]
             for record in records:
                 conn.execute(
@@ -1539,7 +1609,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
                 return
             statement_rows = [
-                dict(row_to_dict(row), checklist=json.loads(row["checklist_json"]))
+                dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
                 for row in conn.execute("SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,))
             ]
             output = generate_conversion(row_to_dict(project_row), statement_rows, responses)
@@ -1617,7 +1687,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at DESC",
                 (project_id,),
             ).fetchall()
-        logs = [dict(row_to_dict(row), detail=json.loads(row["detail_json"])) for row in rows]
+        logs = [dict(row_to_dict(row), detail=parse_json_field(row["detail_json"], {})) for row in rows]
         self.respond_json(logs)
 
     def handle_export(self, project_id: str, export_name: str) -> None:
@@ -1629,7 +1699,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if not conversion:
             self.respond_json({"error": "Generate a conversion draft before export."}, HTTPStatus.BAD_REQUEST)
             return
-        output = json.loads(conversion["output_json"])
+        output = parse_json_field(conversion["output_json"], {})
         if export_name == "adjustments.csv":
             self.respond_download(conversion_adjustments_csv(output), "text/csv", "gtf_adjustments.csv")
             return
