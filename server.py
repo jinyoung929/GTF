@@ -1034,12 +1034,31 @@ def gemini_response_text(response: dict) -> str:
         return response["output_text"]
     if isinstance(response.get("text"), str):
         return response["text"]
+    texts: list[str] = []
+
+    def collect_text(value) -> None:
+        if isinstance(value, dict):
+            for key in ("output_text", "text"):
+                if isinstance(value.get(key), str) and value[key].strip():
+                    texts.append(value[key])
+            for key in ("model_output", "content", "parts", "steps", "output"):
+                collect_text(value.get(key))
+        elif isinstance(value, list):
+            for item in value:
+                collect_text(item)
+
+    collect_text(response.get("model_output"))
+    collect_text(response.get("steps"))
+    collect_text(response.get("output"))
+    if texts:
+        return "\n".join(texts).strip()
+
     candidates = response.get("candidates") or []
     if not candidates:
         return ""
     parts = candidates[0].get("content", {}).get("parts") or []
-    texts = [part.get("text", "") for part in parts if isinstance(part.get("text"), str)]
-    return "\n".join(texts).strip()
+    candidate_texts = [part.get("text", "") for part in parts if isinstance(part.get("text"), str)]
+    return "\n".join(candidate_texts).strip()
 
 
 def claude_response_text(response: dict) -> str:
@@ -1239,6 +1258,7 @@ def call_gemini_ocr(file_path: Path, mime_type: str, model: str) -> tuple[list[d
     input_type = "document" if mime_type == "application/pdf" else "image"
     payload = {
         "model": model,
+        "store": False,
         "input": [
             {
                 "type": input_type,
@@ -1247,6 +1267,28 @@ def call_gemini_ocr(file_path: Path, mime_type: str, model: str) -> tuple[list[d
             },
             {"type": "text", "text": prompt},
         ],
+        "response_format": {
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "rows": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "account_name": {"type": "string"},
+                                "amount": {"type": "number"},
+                            },
+                            "required": ["account_name", "amount"],
+                        },
+                    },
+                    "issues": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["rows"],
+            },
+        },
     }
     endpoint = "https://generativelanguage.googleapis.com/v1beta/interactions"
     request = url_request.Request(
