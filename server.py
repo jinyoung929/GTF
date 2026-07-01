@@ -1436,6 +1436,17 @@ def extract_rows_from_upload(upload: dict) -> tuple[list[dict], list[str], str]:
         issues = [f"OCR 제공자: {config['provider']} / 모델: {config['model']}", *issues]
         return rows, issues, "gemini_ocr"
 
+    if ocr_mime:
+        return (
+            [],
+            [
+                f"OCR 제공자: {config['provider']} / 모델: {config['model']}",
+                "서버 OCR 키가 설정되지 않아 실제 PDF/이미지 분석을 실행하지 못했습니다.",
+                "관리자가 서버 환경변수 GEMINI_API_KEY를 설정한 뒤 다시 분석하세요.",
+            ],
+            "ocr_not_configured",
+        )
+
     sample_rows = [
         {"account_name": "현금및현금성자산", "amount": 120000000},
         {"account_name": "매출채권", "amount": 88000000},
@@ -2408,7 +2419,7 @@ INDEX_HTML = """<!doctype html>
           <h2>원본 파일</h2>
           <p>PDF, Excel, CSV, 이미지를 업로드하면 추출 결과를 먼저 검토합니다.</p>
         </div>
-        <button id="uploadBtn" class="primary" disabled>업로드</button>
+        <button id="uploadBtn" class="primary" disabled>업로드 및 분석</button>
       </div>
       <label>재무제표 파일
         <input id="fileInput" type="file" accept=".pdf,.xlsx,.xls,.csv,.png,.jpg,.jpeg">
@@ -2612,9 +2623,10 @@ p { margin-top: 4px; color: var(--muted); font-size: 13px; }
 .sidebar {
   grid-column: 1;
   grid-row: 1 / span 4;
-  position: static;
-  max-height: none;
-  overflow: visible;
+  position: sticky;
+  top: 14px;
+  max-height: calc(100vh - 28px);
+  overflow: auto;
 }
 
 .project-panel { grid-column: 2 / 4; }
@@ -3419,6 +3431,7 @@ const statusLabels = {
   not_configured: "키 미설정",
   skipped: "건너뜀",
   pending_ocr: "OCR 대기",
+  analyzing: "분석 중",
   needs_review: "검토 필요",
   accepted: "반영 완료",
   failed: "실패",
@@ -3440,6 +3453,7 @@ const statusLabels = {
   local_xlsx_parser: "Excel 파서",
   unsupported_excel: "지원하지 않는 Excel",
   ocr_placeholder: "OCR 대기 샘플",
+  ocr_not_configured: "분석 설정 필요",
   gemini: "Gemini OCR",
   openai: "OpenAI"
 };
@@ -3892,13 +3906,20 @@ function renderUploads() {
         <strong>${file.original_name}</strong>
         <span>${file.content_type} · ${Number(file.size_bytes).toLocaleString()} bytes · ${labelFor(file.extraction_status)}</span>
         <div class="item-actions">
-          <button class="ghost extract-btn" data-upload-id="${file.id}">추출 실행</button>
+          <button class="secondary extract-btn" data-upload-id="${file.id}" ${file.extraction_status === "analyzing" ? "disabled" : ""}>${uploadActionLabel(file.extraction_status)}</button>
         </div>
       </div>
   `).join("");
   document.querySelectorAll("[data-upload-id]").forEach((button) => {
     button.addEventListener("click", () => extractUpload(button.dataset.uploadId));
   });
+}
+
+function uploadActionLabel(status) {
+  if (status === "analyzing") return "분석 중";
+  if (status === "failed") return "다시 분석";
+  if (status === "needs_review" || status === "accepted") return "재분석";
+  return "분석 실행";
 }
 
 function renderExtractions() {
@@ -4087,15 +4108,27 @@ $("#uploadBtn").addEventListener("click", async () => {
     $("#uploadList").innerHTML = '<div class="file-empty">먼저 PDF, Excel, CSV 또는 이미지 파일을 선택하세요.</div>';
     return;
   }
-  const upload = await uploadApi(`/api/projects/${activeProjectId}/uploads`, file);
-  uploads = [upload, ...uploads];
-  renderUploads();
-  setStatus("source_uploaded");
-  await refreshProjects();
-  await refreshAudit();
+  $("#uploadBtn").disabled = true;
+  $("#uploadBtn").textContent = "업로드 중";
+  try {
+    const upload = await uploadApi(`/api/projects/${activeProjectId}/uploads`, file);
+    uploads = [{ ...upload, extraction_status: "analyzing" }, ...uploads];
+    renderUploads();
+    setStatus("source_uploaded");
+    await refreshProjects();
+    await refreshAudit();
+    await extractUpload(upload.id);
+  } finally {
+    $("#uploadBtn").disabled = !activeProjectId;
+    $("#uploadBtn").textContent = "업로드 및 분석";
+  }
 });
 
 async function extractUpload(uploadId) {
+  uploads = uploads.map((upload) => (
+    upload.id === uploadId ? { ...upload, extraction_status: "analyzing" } : upload
+  ));
+  renderUploads();
   const extraction = await api(`/api/projects/${activeProjectId}/uploads/${uploadId}/extract`, {
     method: "POST",
     body: "{}"
