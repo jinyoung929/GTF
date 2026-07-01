@@ -2302,9 +2302,9 @@ INDEX_HTML = """<!doctype html>
       <p>K-GAAP 재무제표 업로드부터 IFRS 검토 초안, 조정분개, 근거 리포트까지 한 화면에서 처리합니다.</p>
     </div>
     <div class="topbar-actions">
-      <span class="status-chip">OCR</span>
-      <span class="status-chip">OpenAI</span>
-      <span class="status-chip">감사 로그</span>
+      <span class="status-chip">업로드</span>
+      <span class="status-chip">검증</span>
+      <span class="status-chip">리포트</span>
       <button id="sampleBtn" class="secondary">예시 입력</button>
     </div>
   </header>
@@ -2416,65 +2416,7 @@ INDEX_HTML = """<!doctype html>
       <div id="uploadList" class="file-empty">업로드된 파일이 없습니다.</div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>OCR 설정</h2>
-        <span id="ocrModePill" class="pill">확인 중</span>
-      </div>
-      <div class="config-list">
-        <div>
-          <span>제공자</span>
-          <strong id="ocrProvider">-</strong>
-        </div>
-        <div>
-          <span>모델</span>
-          <strong id="ocrModel">-</strong>
-        </div>
-        <div>
-          <span>API 키</span>
-          <strong id="ocrApiKey">-</strong>
-        </div>
-        <div>
-          <span>실패 처리</span>
-          <strong id="ocrFailureMode">-</strong>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2>AI 판단 보조</h2>
-        <span id="aiModePill" class="pill">확인 중</span>
-      </div>
-      <div class="config-list">
-        <div>
-          <span>제공자</span>
-          <strong id="aiProvider">-</strong>
-        </div>
-        <div>
-          <span>모델</span>
-          <strong id="aiModel">-</strong>
-        </div>
-        <div>
-          <span>API 키</span>
-          <strong id="aiApiKey">-</strong>
-        </div>
-        <div>
-          <span>검토 방식</span>
-          <strong id="aiReviewMode">-</strong>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2>기준정보 DB</h2>
-        <span id="referenceDbPill" class="pill">확인 중</span>
-      </div>
-      <div id="referenceDbList" class="config-list"></div>
-    </section>
-
-    <section class="panel">
+    <section class="panel extraction-panel">
       <div class="panel-head">
         <h2>추출 결과</h2>
         <span id="extractionPill" class="pill">대기</span>
@@ -2511,7 +2453,7 @@ INDEX_HTML = """<!doctype html>
       <div id="outputBox" class="draft-empty">아직 생성된 변환 초안이 없습니다.</div>
     </section>
 
-    <section class="panel">
+    <section class="panel review-panel">
       <div class="panel-head">
         <h2>검토 및 승인</h2>
         <span id="reviewPill" class="pill">대기</span>
@@ -2530,7 +2472,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel audit-panel">
       <h2>감사 로그</h2>
       <div id="auditLog" class="log-empty">아직 기록된 이벤트가 없습니다.</div>
     </section>
@@ -2646,7 +2588,8 @@ p { margin-top: 4px; color: var(--muted); font-size: 13px; }
 
 .layout {
   display: grid;
-  grid-template-columns: 280px minmax(320px, 0.9fr) minmax(390px, 1.1fr);
+  grid-template-columns: 280px minmax(340px, 0.95fr) minmax(420px, 1.05fr);
+  grid-auto-flow: row dense;
   align-items: start;
   gap: 14px;
   padding: 14px;
@@ -2667,24 +2610,35 @@ p { margin-top: 4px; color: var(--muted); font-size: 13px; }
 }
 
 .sidebar {
-  position: sticky;
-  top: 16px;
-  max-height: calc(100vh - 32px);
-  overflow: auto;
+  grid-column: 1;
+  grid-row: 1 / span 4;
+  position: static;
+  max-height: none;
+  overflow: visible;
 }
 
-.project-panel { grid-column: span 2; }
+.project-panel { grid-column: 2 / 4; }
 
-.progress-panel { grid-column: span 2; }
+.progress-panel { grid-column: 2 / 4; }
+
+.input-panel { grid-column: 2; }
+
+.upload-panel { grid-column: 3; }
+
+.extraction-panel { grid-column: 2 / 4; }
 
 .result-panel {
-  grid-column: span 2;
+  grid-column: 2 / 4;
 }
 
 .wide {
-  grid-column: span 2;
-  grid-row: span 2;
+  grid-column: 2 / 4;
+  grid-row: auto;
 }
+
+.review-panel { grid-column: 2; }
+
+.audit-panel { grid-column: 3; }
 
 .panel-head {
   display: flex;
@@ -3348,8 +3302,16 @@ pre {
 @media (max-width: 980px) {
   .layout { grid-template-columns: 1fr; }
   .sidebar { position: static; max-height: none; }
-  .project-panel { grid-column: auto; }
-  .progress-panel { grid-column: auto; }
+  .project-panel,
+  .progress-panel,
+  .input-panel,
+  .upload-panel,
+  .extraction-panel,
+  .result-panel,
+  .wide,
+  .review-panel,
+  .audit-panel,
+  .sidebar { grid-column: auto; grid-row: auto; }
   .wide { grid-row: auto; }
   .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -3521,7 +3483,7 @@ function auditDetailRows(log) {
     size_bytes: "파일 크기",
     extraction_id: "추출 ID",
     provider: "처리 방식",
-    ocr_config: "OCR 설정",
+    ocr_config: "추출 방식",
     row_count: "행 수",
     issues: "이슈",
     count: "처리 건수",
@@ -3595,6 +3557,7 @@ function updateMetrics() {
 }
 
 async function refreshOcrConfig() {
+  if (!$("#ocrModePill")) return;
   const config = await api("/api/ocr-config");
   $("#ocrModePill").textContent = config.api_key_ready ? "연결 준비" : "샘플 모드";
   $("#ocrProvider").textContent = labelFor(config.provider) || config.provider;
@@ -3604,6 +3567,7 @@ async function refreshOcrConfig() {
 }
 
 async function refreshAiConfig() {
+  if (!$("#aiModePill")) return;
   const config = await api("/api/ai-config");
   $("#aiModePill").textContent = config.api_key_ready ? "연결 준비" : "키 미설정";
   $("#aiProvider").textContent = labelFor(config.provider) || config.provider;
@@ -3621,15 +3585,11 @@ async function refreshAccessConfig() {
 }
 
 async function refreshProtectedData() {
-  await Promise.all([
-    refreshProjects(),
-    refreshOcrConfig(),
-    refreshAiConfig(),
-    refreshReferenceData(),
-  ]);
+  await refreshProjects();
 }
 
 async function refreshReferenceData() {
+  if (!$("#referenceDbPill")) return;
   const data = await api("/api/reference-data");
   const total = (data.summary || []).reduce((sum, item) => sum + Number(item.count || 0), 0);
   $("#referenceDbPill").textContent = `${total.toLocaleString()}건`;
