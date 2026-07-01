@@ -106,22 +106,22 @@ The MVP reads OCR readiness from environment variables:
 GEMINI_API_KEY=...
 OCR_PROVIDER=gemini
 GEMINI_OCR_MODEL=gemini-3.5-flash
-CLAUDE_API_KEY=...
-CLAUDE_MODEL=claude-sonnet-5
+OPENAI_API_KEY=...
+OPENAI_MODEL=gpt-4.1-mini
 APP_ACCESS_CODE=...
 ```
 
 환경변수로 직접 실행할 수도 있습니다.
 
 ```bash
-GEMINI_API_KEY=... CLAUDE_API_KEY=... OCR_PROVIDER=gemini GEMINI_OCR_MODEL=gemini-3.5-flash python3 server.py
+GEMINI_API_KEY=... OPENAI_API_KEY=... OCR_PROVIDER=gemini GEMINI_OCR_MODEL=gemini-3.5-flash python3 server.py
 ```
 
 고객용 웹 UI에서는 OCR 키를 입력하지 않습니다. OCR 키와 모델은 운영자가 서버 환경변수 또는 `.env` 파일로 설정하고, 화면에는 연결 준비 상태만 표시합니다.
 
 `GEMINI_API_KEY`가 없으면 PDF와 이미지는 샘플 추출 결과를 사용하며, 검토자가 확인하는 흐름은 그대로 유지됩니다.
 
-Claude 판단 보조도 같은 방식으로 서버에서만 설정합니다. `CLAUDE_API_KEY`가 있으면 판단 필요 항목에 대해 기준 근거 요약과 추가 질문 초안을 생성하고, 없으면 변환 초안은 그대로 생성하되 사람 검토 단계로 넘깁니다. 최종 회계정책 판단과 승인은 담당자 또는 회계 전문가가 수행합니다.
+OpenAI 판단 보조도 같은 방식으로 서버에서만 설정합니다. `OPENAI_API_KEY`가 있으면 판단 필요 항목에 대해 기준 근거 요약과 추가 질문 초안을 생성하고, 없으면 변환 초안은 그대로 생성하되 사람 검토 단계로 넘깁니다. 최종 회계정책 판단과 승인은 담당자 또는 회계 전문가가 수행합니다.
 
 배포 URL을 공개할 때는 `APP_ACCESS_CODE`를 설정하세요. 값이 설정되면 프로젝트, 업로드, 변환, 승인, 다운로드 API는 웹 UI에서 접근 코드를 입력한 사용자에게만 열립니다. 값이 없으면 로컬 개발처럼 공개 모드로 동작합니다.
 

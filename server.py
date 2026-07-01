@@ -31,8 +31,8 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "gtf.sqlite3"
 ENV_PATHS = (ROOT / ".env", ROOT / ".env.local")
 GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024
-CLAUDE_API_ENDPOINT = "https://api.anthropic.com/v1/messages"
-CLAUDE_DEFAULT_MODEL = "claude-sonnet-5"
+OPENAI_API_ENDPOINT = "https://api.openai.com/v1/responses"
+OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
 
 
 def load_local_env() -> None:
@@ -993,12 +993,12 @@ def ocr_config() -> dict:
     }
 
 
-def claude_config() -> dict:
-    model = os.environ.get("CLAUDE_MODEL", CLAUDE_DEFAULT_MODEL).strip() or CLAUDE_DEFAULT_MODEL
-    api_key_source = "environment" if os.environ.get("CLAUDE_API_KEY") else "none"
+def ai_config() -> dict:
+    model = os.environ.get("OPENAI_MODEL", OPENAI_DEFAULT_MODEL).strip() or OPENAI_DEFAULT_MODEL
+    api_key_source = "environment" if os.environ.get("OPENAI_API_KEY") else "none"
     api_key_ready = api_key_source != "none"
     return {
-        "provider": "claude",
+        "provider": "openai",
         "model": model,
         "api_key_ready": api_key_ready,
         "api_key_source": api_key_source,
@@ -1079,35 +1079,42 @@ def gemini_response_text(response: dict) -> str:
     return "\n".join(candidate_texts).strip()
 
 
-def claude_response_text(response: dict) -> str:
+def openai_response_text(response: dict) -> str:
+    if isinstance(response.get("output_text"), str):
+        return response["output_text"].strip()
     content = response.get("content") or []
     texts = []
+    output = response.get("output") or []
+    for item in output:
+        for part in item.get("content", []) if isinstance(item, dict) else []:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                texts.append(part["text"])
     for part in content:
-        if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+        if isinstance(part, dict) and isinstance(part.get("text"), str):
             texts.append(part["text"])
     return "\n".join(texts).strip()
 
 
-def call_claude_judgment(project: dict, entries: list[dict], judgment_items: list[dict]) -> dict:
-    config = claude_config()
+def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[dict]) -> dict:
+    config = ai_config()
     if not judgment_items:
         return {
-            "provider": "claude",
+            "provider": "openai",
             "model": config["model"],
             "status": "skipped",
             "items": [],
-            "overall_note": "판단 필요 항목이 없어 Claude 판단 보조를 건너뛰었습니다.",
+            "overall_note": "판단 필요 항목이 없어 OpenAI 판단 보조를 건너뛰었습니다.",
             "human_review_required": True,
         }
-    api_key = os.environ.get("CLAUDE_API_KEY", "").strip()
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         return {
-            "provider": "claude",
+            "provider": "openai",
             "model": config["model"],
             "status": "not_configured",
             "items": [],
-            "overall_note": "CLAUDE_API_KEY가 서버 환경변수에 설정되지 않아 규정 근거 요약은 생성하지 않았습니다.",
-            "issues": ["CLAUDE_API_KEY가 서버 환경변수에 설정되지 않았습니다."],
+            "overall_note": "OPENAI_API_KEY가 서버 환경변수에 설정되지 않아 규정 근거 요약은 생성하지 않았습니다.",
+            "issues": ["OPENAI_API_KEY가 서버 환경변수에 설정되지 않았습니다."],
             "human_review_required": True,
         }
 
@@ -1149,31 +1156,73 @@ def call_claude_judgment(project: dict, entries: list[dict], judgment_items: lis
     }
     payload = {
         "model": config["model"],
-        "max_tokens": 1200,
-        "system": (
+        "max_output_tokens": 1200,
+        "instructions": (
             "너는 K-GAAP 재무제표를 IFRS 초안으로 변환하는 회계 검토 보조자다. "
             "최종 회계처리를 확정하지 말고, 사용자가 입력한 체크리스트와 변환 초안을 바탕으로 "
             "판단 필요 항목, 추가 질문, 기준 근거 요약만 한국어로 제시한다. "
             "반드시 사람이 최종 검토하고 승인해야 한다는 전제를 유지한다. JSON만 반환한다."
         ),
-        "messages": [
+        "input": [
             {
                 "role": "user",
-                "content": (
-                    "다음 변환 초안의 판단 필요 항목을 검토해 JSON만 반환하세요. "
-                    "마크다운과 설명 문장은 쓰지 마세요.\n"
-                    + json.dumps(prompt, ensure_ascii=False)
-                ),
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "다음 변환 초안의 판단 필요 항목을 검토해 JSON만 반환하세요. "
+                            "마크다운과 설명 문장은 쓰지 마세요.\n"
+                            + json.dumps(prompt, ensure_ascii=False)
+                        ),
+                    }
+                ],
             }
         ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "gtf_judgment_assistance",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "account": {"type": "string"},
+                                    "risk_level": {"type": "string"},
+                                    "classification_hint": {"type": "string"},
+                                    "additional_questions": {"type": "array", "items": {"type": "string"}},
+                                    "review_note": {"type": "string"},
+                                    "basis_summary": {"type": "string"},
+                                },
+                                "required": [
+                                    "account",
+                                    "risk_level",
+                                    "classification_hint",
+                                    "additional_questions",
+                                    "review_note",
+                                    "basis_summary",
+                                ],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "overall_note": {"type": "string"},
+                    },
+                    "required": ["items", "overall_note"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+        },
     }
     request = url_request.Request(
-        CLAUDE_API_ENDPOINT,
+        OPENAI_API_ENDPOINT,
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
+            "Authorization": f"Bearer {api_key}",
         },
         method="POST",
     )
@@ -1184,62 +1233,62 @@ def call_claude_judgment(project: dict, entries: list[dict], judgment_items: lis
     except url_error.HTTPError as exc:
         message = exc.read().decode("utf-8", errors="replace")[:500]
         return {
-            "provider": "claude",
+            "provider": "openai",
             "model": config["model"],
             "status": "failed",
             "items": [],
-            "overall_note": "Claude 판단 보조 요청이 실패했습니다. 변환 초안은 저장되며 사람이 검토해야 합니다.",
-            "issues": [f"Claude 요청 실패: HTTP {exc.code}", message],
+            "overall_note": "OpenAI 판단 보조 요청이 실패했습니다. 변환 초안은 저장되며 사람이 검토해야 합니다.",
+            "issues": [f"OpenAI 요청 실패: HTTP {exc.code}", message],
             "human_review_required": True,
         }
     except url_error.URLError as exc:
         return {
-            "provider": "claude",
+            "provider": "openai",
             "model": config["model"],
             "status": "failed",
             "items": [],
-            "overall_note": "Claude 판단 보조 네트워크 오류가 발생했습니다.",
-            "issues": [f"Claude 네트워크 오류: {exc.reason}"],
+            "overall_note": "OpenAI 판단 보조 네트워크 오류가 발생했습니다.",
+            "issues": [f"OpenAI 네트워크 오류: {exc.reason}"],
             "human_review_required": True,
         }
     except TimeoutError:
         return {
-            "provider": "claude",
+            "provider": "openai",
             "model": config["model"],
             "status": "failed",
             "items": [],
-            "overall_note": "Claude 판단 보조 요청 시간이 초과되었습니다.",
-            "issues": ["Claude 요청 시간이 초과되었습니다."],
+            "overall_note": "OpenAI 판단 보조 요청 시간이 초과되었습니다.",
+            "issues": ["OpenAI 요청 시간이 초과되었습니다."],
             "human_review_required": True,
         }
 
-    text = claude_response_text(response_payload)
+    text = openai_response_text(response_payload)
     if not text:
         return {
-            "provider": "claude",
+            "provider": "openai",
             "model": config["model"],
             "status": "failed",
             "items": [],
-            "overall_note": "Claude 응답에서 검토 텍스트를 찾지 못했습니다.",
-            "issues": ["Claude 응답 텍스트가 비어 있습니다."],
+            "overall_note": "OpenAI 응답에서 검토 텍스트를 찾지 못했습니다.",
+            "issues": ["OpenAI 응답 텍스트가 비어 있습니다."],
             "human_review_required": True,
         }
     try:
         parsed = extract_json_object(text)
     except json.JSONDecodeError:
         return {
-            "provider": "claude",
+            "provider": "openai",
             "model": config["model"],
             "status": "failed",
             "items": [],
-            "overall_note": "Claude 응답을 JSON으로 해석하지 못했습니다.",
-            "issues": ["Claude 응답 JSON 해석 실패", text[:500]],
+            "overall_note": "OpenAI 응답을 JSON으로 해석하지 못했습니다.",
+            "issues": ["OpenAI 응답 JSON 해석 실패", text[:500]],
             "human_review_required": True,
         }
 
     items = parsed.get("items") if isinstance(parsed.get("items"), list) else []
     return {
-        "provider": "claude",
+        "provider": "openai",
         "model": config["model"],
         "status": "connected",
         "items": items,
@@ -1578,7 +1627,7 @@ def conversion_basis_report(conversion: dict) -> str:
     for item in judgment_items:
         lines.append(f"- {item.get('account', '-')}: {localize_export_text(item.get('basis'))}")
     lines.append("")
-    lines.append("[Claude 판단 보조]")
+    lines.append("[OpenAI 판단 보조]")
     ai_assistance = conversion.get("ai_assistance") or {}
     lines.append(f"상태: {label_backend(ai_assistance.get('status', '-'))}")
     lines.append(f"모델: {ai_assistance.get('model', '-')}")
@@ -1632,7 +1681,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "database": database_ready(),
                     "database_config": database_config(),
                     "ocr": ocr_config(),
-                    "claude": claude_config(),
+                    "ai": ai_config(),
                 }
             )
         elif path == "/styles.css":
@@ -1770,7 +1819,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.respond_json(ocr_config())
 
     def handle_ai_config(self) -> None:
-        self.respond_json(claude_config())
+        self.respond_json(ai_config())
 
     def handle_access_config(self) -> None:
         self.respond_json(access_config())
@@ -2127,7 +2176,7 @@ class AppHandler(BaseHTTPRequestHandler):
             templates = load_statement_template_map(conn)
             project = row_to_dict(project_row)
             output = generate_conversion(project, statement_rows, responses, templates)
-            output["ai_assistance"] = call_claude_judgment(project, output["entries"], output["judgment_items"])
+            output["ai_assistance"] = call_ai_judgment(project, output["entries"], output["judgment_items"])
             conn.execute(
                 "INSERT INTO conversions (id, project_id, output_json, created_at) VALUES (?, ?, ?, ?)",
                 (str(uuid.uuid4()), project_id, json.dumps(output, ensure_ascii=False), utc_now()),
@@ -2141,7 +2190,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "responses": responses,
                     "entry_count": len(output["entries"]),
                     "template": output["statement_template"],
-                    "claude_status": output["ai_assistance"].get("status"),
+                    "ai_status": output["ai_assistance"].get("status"),
                 },
             )
         self.respond_json(output)
@@ -3247,6 +3296,7 @@ function auditDetailRows(log) {
     total_amount: "합계",
     judgment_count: "판단 필요",
     simple_count: "단순 매핑",
+    ai_status: "AI 상태",
     claude_status: "Claude 상태"
   };
   const preferred = [
@@ -3605,11 +3655,11 @@ function renderDraft(draft) {
       <div class="draft-list">${judgmentCards || '<div class="draft-empty">판단 필요 항목이 없습니다.</div>'}</div>
     </div>
     <div class="draft-section">
-      <h3>Claude 판단 보조</h3>
+      <h3>OpenAI 판단 보조</h3>
       <div class="draft-list">
         <div class="draft-card">
           <strong>${escapeHtml(aiStatus)}</strong>
-          <span>${escapeHtml(localizeText(ai.overall_note || "Claude 판단 보조 결과가 없습니다."))}</span>
+          <span>${escapeHtml(localizeText(ai.overall_note || "OpenAI 판단 보조 결과가 없습니다."))}</span>
           ${aiIssues ? `<ul class="issues">${aiIssues}</ul>` : ""}
         </div>
         ${aiCards || '<div class="draft-empty">표시할 판단 보조 결과가 없습니다.</div>'}
