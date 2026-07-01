@@ -1035,13 +1035,17 @@ def gemini_response_text(response: dict) -> str:
     if isinstance(response.get("text"), str):
         return response["text"]
     texts: list[str] = []
+    json_like_texts: list[str] = []
 
     def collect_text(value) -> None:
         if isinstance(value, dict):
             for key in ("output_text", "text"):
                 if isinstance(value.get(key), str) and value[key].strip():
                     texts.append(value[key])
-            for key in ("model_output", "content", "parts", "steps", "output"):
+            for item in value.values():
+                if isinstance(item, str) and '"rows"' in item and "account_name" in item:
+                    json_like_texts.append(item)
+            for key in ("model_output", "content", "parts", "steps", "output", "outputs"):
                 collect_text(value.get(key))
         elif isinstance(value, list):
             for item in value:
@@ -1052,6 +1056,8 @@ def gemini_response_text(response: dict) -> str:
     collect_text(response.get("output"))
     if texts:
         return "\n".join(texts).strip()
+    if json_like_texts:
+        return "\n".join(json_like_texts).strip()
 
     candidates = response.get("candidates") or []
     if not candidates:
@@ -1311,7 +1317,8 @@ def call_gemini_ocr(file_path: Path, mime_type: str, model: str) -> tuple[list[d
 
     text = gemini_response_text(response_payload)
     if not text:
-        return [], ["Gemini OCR 응답에서 추출 텍스트를 찾지 못했습니다."]
+        response_keys = ", ".join(sorted(response_payload.keys())) or "없음"
+        return [], [f"Gemini OCR 응답에서 추출 텍스트를 찾지 못했습니다. 응답 키: {response_keys}"]
     try:
         parsed_payload = extract_json_object(text)
     except json.JSONDecodeError:
