@@ -1120,11 +1120,10 @@ def ai_config() -> dict:
 
 
 def access_config() -> dict:
-    enabled = bool(os.environ.get("APP_ACCESS_CODE", "").strip())
     return {
-        "enabled": enabled,
+        "enabled": False,
         "header": "X-GTF-Access-Code",
-        "mode": "protected" if enabled else "open",
+        "mode": "open",
     }
 
 
@@ -1877,20 +1876,7 @@ class AppHandler(BaseHTTPRequestHandler):
         return json.loads(raw.decode("utf-8"))
 
     def require_access(self) -> bool:
-        required_code = os.environ.get("APP_ACCESS_CODE", "").strip()
-        if not required_code:
-            return True
-        provided_code = self.headers.get("X-GTF-Access-Code", "").strip()
-        if provided_code and hmac.compare_digest(provided_code, required_code):
-            return True
-        self.respond_json(
-            {
-                "error": "접근 코드가 필요합니다.",
-                "access_required": True,
-            },
-            HTTPStatus.UNAUTHORIZED,
-        )
-        return False
+        return True
 
     def read_upload(self) -> tuple[str, str, bytes]:
         length = int(self.headers.get("Content-Length") or "0")
