@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import base64
+import hmac
 import io
 import importlib.util
 import json
@@ -994,6 +995,15 @@ def claude_config() -> dict:
     }
 
 
+def access_config() -> dict:
+    enabled = bool(os.environ.get("APP_ACCESS_CODE", "").strip())
+    return {
+        "enabled": enabled,
+        "header": "X-GTF-Access-Code",
+        "mode": "protected" if enabled else "open",
+    }
+
+
 def supported_ocr_mime(path: Path, content_type: str) -> str | None:
     suffix = path.suffix.lower()
     if suffix == ".pdf" or "pdf" in content_type:
@@ -1528,9 +1538,12 @@ def conversion_basis_report(conversion: dict) -> str:
 
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "GTFServer/0.1"
+    public_paths = {"/", "/styles.css", "/app.js", "/healthz", "/api/access-config"}
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path not in self.public_paths and not self.require_access():
+            return
         if path == "/":
             self.respond_html(INDEX_HTML)
         elif path == "/healthz":
@@ -1555,6 +1568,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_ocr_config()
         elif path == "/api/ai-config":
             self.handle_ai_config()
+        elif path == "/api/access-config":
+            self.handle_access_config()
         elif path == "/api/reference-data":
             self.handle_reference_data()
         elif re.match(r"^/api/projects/[^/]+$", path):
@@ -1573,6 +1588,8 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path not in self.public_paths and not self.require_access():
+            return
         if path == "/api/projects":
             self.handle_create_project()
         elif re.match(r"^/api/projects/[^/]+/uploads$", path):
@@ -1600,6 +1617,22 @@ class AppHandler(BaseHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
+
+    def require_access(self) -> bool:
+        required_code = os.environ.get("APP_ACCESS_CODE", "").strip()
+        if not required_code:
+            return True
+        provided_code = self.headers.get("X-GTF-Access-Code", "").strip()
+        if provided_code and hmac.compare_digest(provided_code, required_code):
+            return True
+        self.respond_json(
+            {
+                "error": "접근 코드가 필요합니다.",
+                "access_required": True,
+            },
+            HTTPStatus.UNAUTHORIZED,
+        )
+        return False
 
     def read_upload(self) -> tuple[str, str, bytes]:
         length = int(self.headers.get("Content-Length") or "0")
@@ -1661,6 +1694,9 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_ai_config(self) -> None:
         self.respond_json(claude_config())
+
+    def handle_access_config(self) -> None:
+        self.respond_json(access_config())
 
     def handle_reference_data(self) -> None:
         tables = [
@@ -2139,6 +2175,18 @@ INDEX_HTML = """<!doctype html>
     <button id="sampleBtn" class="ghost">예시 입력</button>
   </header>
 
+  <section id="accessPanel" class="access-panel hidden">
+    <div>
+      <h2>접근 코드</h2>
+      <p id="accessMessage">운영자가 발급한 접근 코드를 입력하세요.</p>
+    </div>
+    <div class="access-actions">
+      <input id="accessCodeInput" type="password" autocomplete="current-password" placeholder="접근 코드">
+      <button id="saveAccessCodeBtn" class="primary">저장</button>
+      <button id="clearAccessCodeBtn" class="ghost">초기화</button>
+    </div>
+  </section>
+
   <main class="layout">
     <aside class="sidebar panel">
       <div class="panel-head">
@@ -2375,6 +2423,29 @@ body {
   gap: 20px;
   border-bottom: 1px solid var(--line);
   background: #fff;
+}
+
+.hidden { display: none !important; }
+
+.access-panel {
+  margin: 16px 16px 0;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid #d8c08f;
+  border-radius: 8px;
+  background: #fff8e8;
+}
+
+.access-panel p { color: #785315; }
+
+.access-actions {
+  min-width: min(420px, 100%);
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto auto;
+  gap: 8px;
 }
 
 h1, h2, p { margin: 0; }
@@ -2917,6 +2988,8 @@ pre {
 
 @media (max-width: 640px) {
   .topbar { align-items: flex-start; flex-direction: column; padding: 16px; }
+  .access-panel { align-items: stretch; flex-direction: column; margin: 10px 10px 0; }
+  .access-actions { grid-template-columns: 1fr; }
   .layout { padding: 10px; }
   .grid { grid-template-columns: 1fr; }
   .form-actions { justify-content: stretch; }
@@ -2939,8 +3012,10 @@ let uploads = [];
 let extractions = [];
 let hasDraft = false;
 let projects = [];
+let accessRequired = false;
 
 const $ = (selector) => document.querySelector(selector);
+const accessStorageKey = "gtfAccessCode";
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -2961,6 +3036,36 @@ function localizeText(value) {
 function riskLabel(value) {
   const labels = { low: "낮음", medium: "중간", high: "높음" };
   return labels[value] || value || "-";
+}
+
+function savedAccessCode() {
+  return sessionStorage.getItem(accessStorageKey) || "";
+}
+
+function authHeaders(baseHeaders = {}) {
+  const headers = { ...baseHeaders };
+  const code = savedAccessCode();
+  if (code) {
+    headers["X-GTF-Access-Code"] = code;
+  }
+  return headers;
+}
+
+function renderAccessPanel(message = "") {
+  const panel = $("#accessPanel");
+  if (!panel) return;
+  panel.classList.toggle("hidden", !accessRequired);
+  if (!accessRequired) return;
+  const hasCode = Boolean(savedAccessCode());
+  $("#accessMessage").textContent = message || (hasCode ? "접근 코드가 저장되었습니다. API 요청에 자동 적용됩니다." : "운영자가 발급한 접근 코드를 입력하세요.");
+  $("#accessCodeInput").value = hasCode ? savedAccessCode() : "";
+}
+
+function handleAccessError(data) {
+  if (data && data.access_required) {
+    accessRequired = true;
+    renderAccessPanel(data.error || "접근 코드가 필요합니다.");
+  }
 }
 
 const workflowDefinitions = [
@@ -3137,6 +3242,23 @@ async function refreshAiConfig() {
   $("#aiReviewMode").textContent = config.human_review_required ? "사람 최종 검토" : "자동 확정";
 }
 
+async function refreshAccessConfig() {
+  const res = await fetch("/api/access-config");
+  const config = await res.json();
+  accessRequired = Boolean(config.enabled);
+  renderAccessPanel();
+  return config;
+}
+
+async function refreshProtectedData() {
+  await Promise.all([
+    refreshProjects(),
+    refreshOcrConfig(),
+    refreshAiConfig(),
+    refreshReferenceData(),
+  ]);
+}
+
 async function refreshReferenceData() {
   const data = await api("/api/reference-data");
   const total = (data.summary || []).reduce((sum, item) => sum + Number(item.count || 0), 0);
@@ -3164,11 +3286,13 @@ function csvSample() {
 }
 
 async function api(path, options = {}) {
+  const headers = authHeaders({ "Content-Type": "application/json", ...(options.headers || {}) });
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options
+    ...options,
+    headers
   });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
+  handleAccessError(data);
   if (!res.ok) throw new Error(data.error || "Request failed");
   return data;
 }
@@ -3178,11 +3302,31 @@ async function uploadApi(path, file) {
   form.append("file", file);
   const res = await fetch(path, {
     method: "POST",
+    headers: authHeaders(),
     body: form
   });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
+  handleAccessError(data);
   if (!res.ok) throw new Error(data.error || "Upload failed");
   return data;
+}
+
+async function downloadApi(path, filename) {
+  const res = await fetch(path, { headers: authHeaders() });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    handleAccessError(data);
+    throw new Error(data.error || "Download failed");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function setStatus(text) {
@@ -3548,6 +3692,27 @@ $("#sampleBtn").addEventListener("click", () => {
   $("#csvInput").value = csvSample();
 });
 
+$("#saveAccessCodeBtn").addEventListener("click", async () => {
+  const code = $("#accessCodeInput").value.trim();
+  if (!code) {
+    renderAccessPanel("접근 코드를 입력하세요.");
+    return;
+  }
+  sessionStorage.setItem(accessStorageKey, code);
+  renderAccessPanel("접근 코드가 저장되었습니다. 데이터를 다시 불러옵니다.");
+  try {
+    await refreshProtectedData();
+    renderAccessPanel("접근 코드가 확인되었습니다.");
+  } catch (error) {
+    renderAccessPanel(error.message || "접근 코드 확인에 실패했습니다.");
+  }
+});
+
+$("#clearAccessCodeBtn").addEventListener("click", () => {
+  sessionStorage.removeItem(accessStorageKey);
+  renderAccessPanel("접근 코드가 초기화되었습니다.");
+});
+
 $("#projectForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -3684,20 +3849,31 @@ $("#requestChangesBtn").addEventListener("click", () => submitReview("changes_re
 $("#refreshProjectsBtn").addEventListener("click", refreshProjects);
 $("#exportCsvBtn").addEventListener("click", () => {
   if (!activeProjectId || !hasDraft) return;
-  window.location.href = `/api/projects/${activeProjectId}/exports/adjustments.csv`;
+  downloadApi(`/api/projects/${activeProjectId}/exports/adjustments.csv`, "gtf_adjustments.csv");
 });
 $("#exportReportBtn").addEventListener("click", () => {
   if (!activeProjectId || !hasDraft) return;
-  window.location.href = `/api/projects/${activeProjectId}/exports/basis-report.txt`;
+  downloadApi(`/api/projects/${activeProjectId}/exports/basis-report.txt`, "gtf_basis_report.txt");
 });
 
 $("#csvInput").value = csvSample();
 updateProgress(null);
 updateMetrics();
-refreshProjects();
-refreshOcrConfig();
-refreshAiConfig();
-refreshReferenceData();
+
+async function initApp() {
+  await refreshAccessConfig();
+  if (accessRequired && !savedAccessCode()) {
+    renderAccessPanel("운영자가 발급한 접근 코드를 입력하면 프로젝트 데이터를 불러옵니다.");
+    return;
+  }
+  try {
+    await refreshProtectedData();
+  } catch (error) {
+    renderAccessPanel(error.message || "초기 데이터를 불러오지 못했습니다.");
+  }
+}
+
+initApp();
 """
 
 

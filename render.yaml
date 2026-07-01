@@ -17,6 +17,8 @@ services:
         sync: false
       - key: CLAUDE_MODEL
         value: claude-sonnet-5
+      - key: APP_ACCESS_CODE
+        sync: false
       - key: DATABASE_BACKEND
         value: postgres
       - key: DATABASE_URL
