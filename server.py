@@ -1497,6 +1497,11 @@ def conversion_basis_report(conversion: dict) -> str:
     lines.append(f"모델: {ai_assistance.get('model', '-')}")
     if ai_assistance.get("overall_note"):
         lines.append(f"전체 메모: {localize_export_text(ai_assistance.get('overall_note'))}")
+    ai_issues = ai_assistance.get("issues") or []
+    if ai_issues:
+        lines.append("실패/주의 사항:")
+        for issue in ai_issues:
+            lines.append(f"  - {localize_export_text(issue)}")
     ai_items = ai_assistance.get("items") or []
     if not ai_items:
         lines.append("- 없음")
@@ -1548,6 +1553,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_list_projects()
         elif path == "/api/ocr-config":
             self.handle_ocr_config()
+        elif path == "/api/ai-config":
+            self.handle_ai_config()
         elif path == "/api/reference-data":
             self.handle_reference_data()
         elif re.match(r"^/api/projects/[^/]+$", path):
@@ -1651,6 +1658,9 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_ocr_config(self) -> None:
         self.respond_json(ocr_config())
+
+    def handle_ai_config(self) -> None:
+        self.respond_json(claude_config())
 
     def handle_reference_data(self) -> None:
         tables = [
@@ -2233,6 +2243,31 @@ INDEX_HTML = """<!doctype html>
         <div>
           <span>실패 처리</span>
           <strong id="ocrFailureMode">-</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>AI 판단 보조</h2>
+        <span id="aiModePill" class="pill">확인 중</span>
+      </div>
+      <div class="config-list">
+        <div>
+          <span>제공자</span>
+          <strong id="aiProvider">-</strong>
+        </div>
+        <div>
+          <span>모델</span>
+          <strong id="aiModel">-</strong>
+        </div>
+        <div>
+          <span>API 키</span>
+          <strong id="aiApiKey">-</strong>
+        </div>
+        <div>
+          <span>검토 방식</span>
+          <strong id="aiReviewMode">-</strong>
         </div>
       </div>
     </section>
@@ -2919,7 +2954,8 @@ function escapeHtml(value) {
 function localizeText(value) {
   return String(value ?? "-")
     .replaceAll("review required", "추가 검토 필요")
-    .replaceAll("Human review required", "사람 검토 필요");
+    .replaceAll("Human review required", "사람 검토 필요")
+    .replaceAll("Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.", "Anthropic API 크레딧이 부족합니다. Anthropic 콘솔의 Plans & Billing에서 크레딧을 충전해야 합니다.");
 }
 
 function riskLabel(value) {
@@ -3026,7 +3062,8 @@ function auditDetailRows(log) {
     checks: "검증 항목",
     total_amount: "합계",
     judgment_count: "판단 필요",
-    simple_count: "단순 매핑"
+    simple_count: "단순 매핑",
+    claude_status: "Claude 상태"
   };
   const preferred = [
     "company_name", "period", "source_standard", "target_standard", "original_name",
@@ -3089,6 +3126,15 @@ async function refreshOcrConfig() {
   $("#ocrModel").textContent = config.model;
   $("#ocrApiKey").textContent = config.api_key_ready ? "서버 설정됨" : "관리자 설정 필요";
   $("#ocrFailureMode").textContent = config.manual_review_on_failure ? "수동 검토" : "자동 실패";
+}
+
+async function refreshAiConfig() {
+  const config = await api("/api/ai-config");
+  $("#aiModePill").textContent = config.api_key_ready ? "연결 준비" : "키 미설정";
+  $("#aiProvider").textContent = labelFor(config.provider) || config.provider;
+  $("#aiModel").textContent = config.model;
+  $("#aiApiKey").textContent = config.api_key_ready ? "서버 설정됨" : "관리자 설정 필요";
+  $("#aiReviewMode").textContent = config.human_review_required ? "사람 최종 검토" : "자동 확정";
 }
 
 async function refreshReferenceData() {
@@ -3306,6 +3352,7 @@ function renderDraft(draft) {
       </div>
     `;
   }).join("");
+  const aiIssues = (ai.issues || []).map((issue) => `<li>${escapeHtml(localizeText(issue))}</li>`).join("");
   const aiStatus = `${labelFor(ai.status || "not_configured")} · ${ai.model || "모델 미설정"}`;
   $("#outputBox").innerHTML = `
     <div class="draft-summary">
@@ -3340,6 +3387,7 @@ function renderDraft(draft) {
         <div class="draft-card">
           <strong>${escapeHtml(aiStatus)}</strong>
           <span>${escapeHtml(localizeText(ai.overall_note || "Claude 판단 보조 결과가 없습니다."))}</span>
+          ${aiIssues ? `<ul class="issues">${aiIssues}</ul>` : ""}
         </div>
         ${aiCards || '<div class="draft-empty">표시할 판단 보조 결과가 없습니다.</div>'}
       </div>
@@ -3648,6 +3696,7 @@ updateProgress(null);
 updateMetrics();
 refreshProjects();
 refreshOcrConfig();
+refreshAiConfig();
 refreshReferenceData();
 """
 
