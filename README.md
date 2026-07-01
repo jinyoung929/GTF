@@ -77,11 +77,12 @@ Recommended when Supabase is unavailable:
 Postgres setup files:
 
 - `postgres/README.md`
+- `postgres/schema.sql`
 - `supabase/schema.sql`
 - `supabase/seed_reference_data.sql`
 - `supabase/README.md`
 
-The `supabase/schema.sql` file is regular Postgres SQL and can be reused on Neon. If a provider does not support Supabase-style RLS statements, remove the `alter table ... enable row level security;` lines before running it.
+Use `postgres/schema.sql` for Neon or other managed Postgres providers. Use `supabase/schema.sql` only when deploying specifically to Supabase.
 
 Set these deployment variables when switching the persistence layer to Neon/Postgres:
 
@@ -141,7 +142,7 @@ Reference data tables:
 - `checklist_items`: 판단 필요 항목별 체크리스트 DB
 - `standards_references`: 기준서 참조 DB
 
-The app seeds the local reference tables from the MVP defaults at startup. In production, run `supabase/schema.sql` and `supabase/seed_reference_data.sql` in the managed Postgres provider, then manage those tables as controlled master data.
+The app seeds the local reference tables from the MVP defaults at startup. In production, run `postgres/schema.sql` and `supabase/seed_reference_data.sql` in the managed Postgres provider, then manage those tables as controlled master data.
 
 ## API
 

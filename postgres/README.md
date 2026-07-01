@@ -18,14 +18,14 @@ DATABASE_URL=postgresql://...
 
 ## Schema
 
-The existing SQL files under `supabase/` are standard Postgres-compatible table definitions with only ordinary SQL tables, indexes, JSONB, and RLS statements.
+The generic Postgres schema is in `postgres/schema.sql`.
 
 For Neon, run these files in the SQL editor:
 
-1. `supabase/schema.sql`
+1. `postgres/schema.sql`
 2. `supabase/seed_reference_data.sql`
 
-If the provider does not support Supabase-style RLS commands, remove the `alter table ... enable row level security;` lines before running the schema.
+The seed file is shared with the Supabase path because it uses ordinary Postgres `insert ... on conflict` statements.
 
 ## File Storage
 
