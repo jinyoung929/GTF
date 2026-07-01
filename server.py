@@ -533,6 +533,15 @@ def row_to_dict(row) -> dict:
     return {key: normalize_db_value(row[key]) for key in row.keys()}
 
 
+def database_ready() -> bool:
+    try:
+        with connect() as conn:
+            conn.execute("SELECT 1")
+        return True
+    except Exception:
+        return False
+
+
 def log_event(conn: sqlite3.Connection, project_id: str, event_type: str, detail: dict, actor: str = "system") -> None:
     conn.execute(
         """
@@ -1161,7 +1170,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "service": "gtf-accounting-conversion",
                     "time": utc_now(),
-                    "database": DB_PATH.exists(),
+                    "database": database_ready(),
                     "database_config": database_config(),
                     "ocr": ocr_config(),
                 }
