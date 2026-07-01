@@ -14,7 +14,7 @@ DATABASE_BACKEND=postgres
 DATABASE_URL=postgresql://...
 ```
 
-`NEON_DATABASE_URL` can also be used as an explicit name, but the app should prefer `DATABASE_URL` when the Postgres adapter is added.
+`NEON_DATABASE_URL` can also be used as an explicit name, but `DATABASE_URL` is the preferred deployment variable.
 
 ## Schema
 
@@ -40,16 +40,19 @@ Recommended production split:
 - Postgres: projects, statements, conversions, reviews, audit logs, reference DB
 - Object storage: original uploaded files
 
-## Next Code Step
+## App Runtime
 
-Add a `PostgresRepository` that reads:
+The app includes an initial psycopg adapter. Set:
 
 ```bash
+DATABASE_BACKEND=postgres
 DATABASE_URL
 ```
 
-Then keep SQLite as the local fallback:
+Keep SQLite as the local fallback:
 
 ```bash
 DATABASE_BACKEND=sqlite
 ```
+
+Before enabling `DATABASE_BACKEND=postgres`, run `postgres/schema.sql` and `supabase/seed_reference_data.sql` in the Postgres provider.

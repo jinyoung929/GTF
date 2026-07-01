@@ -39,7 +39,7 @@ PORT=8080 python3 server.py
 
 ## Deploy
 
-This app has no runtime dependency beyond Python 3.11+.
+This app runs on Python 3.11+. SQLite local mode uses the Python standard library; Postgres/Neon deployment uses `psycopg`.
 
 Common deployment command:
 
@@ -58,7 +58,7 @@ Included deployment files:
 - `Procfile`: process command for Heroku-style platforms
 - `render.yaml`: Render web service blueprint
 - `runtime.txt`: Python runtime pin
-- `requirements.txt`: empty dependency marker because the MVP uses the Python standard library
+- `requirements.txt`: Postgres driver dependency for Neon/Postgres deployment
 - `.env.example`: local environment variable template
 
 Health check:
@@ -67,7 +67,7 @@ Health check:
 GET /healthz
 ```
 
-For production, use a managed Postgres database instead of the local SQLite file.
+For production, use a managed Postgres database instead of the local SQLite file. `render.yaml` is configured to require Postgres by default.
 
 Recommended when Supabase is unavailable:
 
@@ -91,9 +91,9 @@ DATABASE_BACKEND=postgres
 DATABASE_URL=postgresql://...
 ```
 
-The current code path still uses SQLite for local MVP execution. The Postgres schema is ready; the next implementation step is adding the Postgres repository/storage adapter.
+The app includes an initial psycopg adapter for Postgres. Run `postgres/schema.sql` and `supabase/seed_reference_data.sql` in the managed Postgres provider before setting `DATABASE_BACKEND=postgres`.
 
-`/healthz` exposes `database_config` so you can confirm whether the deployment is still running in SQLite mode or is ready for the Postgres adapter.
+`/healthz` exposes `database_config` so you can confirm whether the deployment is running in SQLite mode or Postgres mode.
 
 ## OCR Settings
 

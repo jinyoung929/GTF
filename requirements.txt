@@ -1,3 +1,3 @@
-# Runtime server currently uses the Python standard library for SQLite mode.
-# psycopg is included for the upcoming Neon/Postgres repository adapter.
+# SQLite mode uses only the Python standard library.
+# Postgres/Neon deployments use psycopg.
 psycopg[binary]>=3.2.0
