@@ -387,6 +387,9 @@ def init_db() -> None:
     if database_config()["backend"] == "postgres":
         with connect() as conn:
             conn.execute("SELECT 1")
+            conn.execute("ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_user_id text")
+            conn.execute("ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_test boolean NOT NULL DEFAULT false")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_owner_created_at ON projects(owner_user_id, created_at DESC)")
             conn.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_bytes bytea")
             ensure_auth_tables(conn)
             ensure_admin_user(conn)
@@ -413,6 +416,8 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
+                owner_user_id TEXT,
+                is_test INTEGER NOT NULL DEFAULT 0,
                 company_name TEXT NOT NULL,
                 source_standard TEXT NOT NULL,
                 target_standard TEXT NOT NULL,
@@ -572,6 +577,11 @@ def init_db() -> None:
         upload_columns = [row["name"] for row in conn.execute("PRAGMA table_info(uploads)").fetchall()]
         if "file_bytes" not in upload_columns:
             conn.execute("ALTER TABLE uploads ADD COLUMN file_bytes BLOB")
+        project_columns = [row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()]
+        if "owner_user_id" not in project_columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN owner_user_id TEXT")
+        if "is_test" not in project_columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
         seed_reference_data(conn)
         ensure_admin_user(conn)
         ensure_test_user(conn)
@@ -2311,8 +2321,22 @@ class AppHandler(BaseHTTPRequestHandler):
         self.respond_text(body, "text/html")
 
     def handle_list_projects(self) -> None:
+        user = self.current_user()
+        if not user:
+            self.respond_json([])
+            return
         with connect() as conn:
-            projects = [row_to_dict(row) for row in conn.execute("SELECT * FROM projects ORDER BY created_at DESC")]
+            projects = [
+                row_to_dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT * FROM projects
+                    WHERE owner_user_id = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (user["id"],),
+                )
+            ]
         self.respond_json(projects)
 
     def handle_ocr_config(self) -> None:
@@ -2450,9 +2474,15 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_create_project(self) -> None:
         payload = self.read_json()
+        user = self.current_user()
+        if not user:
+            self.respond_json({"error": "로그인이 필요합니다."}, HTTPStatus.UNAUTHORIZED)
+            return
         now = utc_now()
         project = {
             "id": str(uuid.uuid4()),
+            "owner_user_id": user["id"],
+            "is_test": user["id"] == TEST_USER_ID,
             "company_name": payload.get("company_name") or "Untitled company",
             "source_standard": payload.get("source_standard") or "K-GAAP",
             "target_standard": payload.get("target_standard") or "IFRS",
@@ -2464,17 +2494,38 @@ class AppHandler(BaseHTTPRequestHandler):
         with connect() as conn:
             conn.execute(
                 """
-                INSERT INTO projects (id, company_name, source_standard, target_standard, period, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO projects (
+                    id, owner_user_id, is_test, company_name, source_standard,
+                    target_standard, period, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                tuple(project.values()),
+                (
+                    project["id"],
+                    project["owner_user_id"],
+                    project["is_test"],
+                    project["company_name"],
+                    project["source_standard"],
+                    project["target_standard"],
+                    project["period"],
+                    project["status"],
+                    project["created_at"],
+                    project["updated_at"],
+                ),
             )
             log_event(conn, project["id"], "project.created", project)
         self.respond_json(project, HTTPStatus.CREATED)
 
     def handle_get_project(self, project_id: str) -> None:
+        user = self.current_user()
+        if not user:
+            self.respond_json({"error": "로그인이 필요합니다."}, HTTPStatus.UNAUTHORIZED)
+            return
         with connect() as conn:
-            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            project = conn.execute(
+                "SELECT * FROM projects WHERE id = ? AND owner_user_id = ?",
+                (project_id, user["id"]),
+            ).fetchone()
             if not project:
                 self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
                 return

@@ -5,6 +5,8 @@ create extension if not exists pgcrypto;
 
 create table if not exists public.projects (
   id uuid primary key default gen_random_uuid(),
+  owner_user_id text,
+  is_test boolean not null default false,
   company_name text not null,
   source_standard text not null default 'K-GAAP',
   target_standard text not null default 'IFRS',
@@ -151,6 +153,7 @@ create table if not exists public.financial_statement_templates (
 );
 
 create index if not exists idx_uploads_project_id on public.uploads(project_id);
+create index if not exists idx_projects_owner_created_at on public.projects(owner_user_id, created_at desc);
 create index if not exists idx_extractions_project_id on public.extractions(project_id);
 create index if not exists idx_statements_project_id on public.statements(project_id);
 create index if not exists idx_conversions_project_id_created_at on public.conversions(project_id, created_at desc);
