@@ -320,7 +320,7 @@ def admin_config() -> dict:
 
 
 def test_login_config() -> dict:
-    enabled = os.environ.get("TEST_LOGIN_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    enabled = os.environ.get("TEST_LOGIN_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     email = normalize_email(os.environ.get("TEST_LOGIN_EMAIL") or "test@gtf.local")
     return {
         "enabled": enabled,
