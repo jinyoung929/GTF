@@ -39,6 +39,7 @@ OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
 SESSION_COOKIE = "gtf_session"
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
 ADMIN_USER_ID = "admin"
+TEST_USER_ID = "test-user"
 
 
 def load_local_env() -> None:
@@ -318,6 +319,15 @@ def admin_config() -> dict:
     }
 
 
+def test_login_config() -> dict:
+    enabled = os.environ.get("TEST_LOGIN_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    email = normalize_email(os.environ.get("TEST_LOGIN_EMAIL") or "test@gtf.local")
+    return {
+        "enabled": enabled,
+        "email": email,
+    }
+
+
 def postgres_param(value):
     if isinstance(value, str):
         stripped = value.strip()
@@ -380,6 +390,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_bytes bytea")
             ensure_auth_tables(conn)
             ensure_admin_user(conn)
+            ensure_test_user(conn)
         return
     with connect() as conn:
         conn.executescript(
@@ -563,6 +574,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE uploads ADD COLUMN file_bytes BLOB")
         seed_reference_data(conn)
         ensure_admin_user(conn)
+        ensure_test_user(conn)
 
 
 def ensure_auth_tables(conn) -> None:
@@ -621,6 +633,30 @@ def ensure_admin_user(conn) -> None:
     conn.execute(
         "INSERT INTO app_users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
         (ADMIN_USER_ID, config["email"], password_hash, now),
+    )
+
+
+def ensure_test_user(conn) -> None:
+    config = test_login_config()
+    if not config["enabled"]:
+        return
+    now = utc_now()
+    password_hash = hash_password(secrets.token_urlsafe(24))
+    row = conn.execute("SELECT id FROM app_users WHERE id = ?", (TEST_USER_ID,)).fetchone()
+    if row:
+        conn.execute("UPDATE app_users SET email = ? WHERE id = ?", (config["email"], TEST_USER_ID))
+        return
+    existing = conn.execute("SELECT id FROM app_users WHERE email = ?", (config["email"],)).fetchone()
+    if existing:
+        conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (existing["id"],))
+        conn.execute(
+            "UPDATE app_users SET id = ?, password_hash = ? WHERE email = ?",
+            (TEST_USER_ID, password_hash, config["email"]),
+        )
+        return
+    conn.execute(
+        "INSERT INTO app_users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+        (TEST_USER_ID, config["email"], password_hash, now),
     )
 
 
@@ -2003,6 +2039,7 @@ class AppHandler(BaseHTTPRequestHandler):
         "/api/access-config",
         "/api/auth/session",
         "/api/auth/login",
+        "/api/auth/test-login",
         "/api/auth/logout",
     }
 
@@ -2062,6 +2099,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_create_project()
         elif path == "/api/auth/login":
             self.handle_login()
+        elif path == "/api/auth/test-login":
+            self.handle_test_login()
         elif path == "/api/auth/logout":
             self.handle_logout()
         elif re.match(r"^/api/projects/[^/]+/uploads$", path):
@@ -2227,6 +2266,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "authenticated": bool(user),
                 "user": user_public_dict(user) if user else None,
                 "admin_configured": admin_config()["configured"],
+                "test_login_enabled": test_login_config()["enabled"],
             }
         )
 
@@ -2273,6 +2313,24 @@ class AppHandler(BaseHTTPRequestHandler):
             token = self.create_session(conn, user["id"])
         self.respond_json(
             {"authenticated": True, "user": user_public_dict(user)},
+            headers={"Set-Cookie": self.session_cookie_header(token)},
+        )
+
+    def handle_test_login(self) -> None:
+        config = test_login_config()
+        if not config["enabled"]:
+            self.respond_json({"error": "테스트 입장이 비활성화되어 있습니다."}, HTTPStatus.FORBIDDEN)
+            return
+        with connect() as conn:
+            ensure_test_user(conn)
+            row = conn.execute("SELECT * FROM app_users WHERE id = ?", (TEST_USER_ID,)).fetchone()
+            user = row_to_dict(row) if row else None
+            if not user:
+                self.respond_json({"error": "테스트 계정을 준비하지 못했습니다."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            token = self.create_session(conn, user["id"])
+        self.respond_json(
+            {"authenticated": True, "user": user_public_dict(user), "test_mode": True},
             headers={"Set-Cookie": self.session_cookie_header(token)},
         )
 
@@ -2816,6 +2874,7 @@ INDEX_HTML = """<!doctype html>
       <input id="loginEmail" type="email" autocomplete="email" placeholder="관리자 이메일">
       <input id="loginPassword" type="password" autocomplete="current-password" placeholder="관리자 비밀번호">
       <button id="loginBtn" class="primary">로그인</button>
+      <button id="testLoginBtn" class="secondary hidden">테스트로 입장</button>
     </div>
   </section>
 
@@ -3884,6 +3943,7 @@ let hasDraft = false;
 let projects = [];
 let accessRequired = false;
 let currentUser = null;
+let testLoginEnabled = false;
 
 const $ = (selector) => document.querySelector(selector);
 const accessStorageKey = "gtfAccessCode";
@@ -3943,9 +4003,10 @@ function renderAuthPanel(message = "") {
   $("#appShell").classList.toggle("hidden", !isLoggedIn);
   $("#logoutBtn").classList.toggle("hidden", !isLoggedIn);
   $("#sampleBtn").disabled = !isLoggedIn;
+  $("#testLoginBtn").classList.toggle("hidden", isLoggedIn || !testLoginEnabled);
   $("#userStatus").textContent = isLoggedIn ? currentUser.email : "로그인 필요";
   if (!isLoggedIn) {
-    $("#authMessage").textContent = message || "운영자가 발급한 관리자 계정으로 접속하세요. 회원가입은 제공하지 않습니다.";
+    $("#authMessage").textContent = message || (testLoginEnabled ? "관리자 계정으로 로그인하거나 테스트용으로 바로 입장하세요." : "운영자가 발급한 관리자 계정으로 접속하세요. 회원가입은 제공하지 않습니다.");
   }
 }
 
@@ -4142,6 +4203,7 @@ async function refreshAccessConfig() {
 async function refreshSession() {
   const res = await fetch("/api/auth/session", { credentials: "same-origin" });
   const data = await res.json().catch(() => ({}));
+  testLoginEnabled = Boolean(data.test_login_enabled);
   currentUser = data.authenticated ? data.user : null;
   renderAuthPanel();
   return currentUser;
@@ -4166,6 +4228,25 @@ async function submitAuth() {
     await refreshProtectedData();
   } catch (error) {
     renderAuthPanel(error.message || "로그인 처리에 실패했습니다.");
+  }
+}
+
+async function submitTestLogin() {
+  if (!testLoginEnabled) {
+    renderAuthPanel("테스트 입장이 비활성화되어 있습니다.");
+    return;
+  }
+  try {
+    const data = await api("/api/auth/test-login", {
+      method: "POST",
+      body: "{}"
+    });
+    currentUser = data.user;
+    renderAuthPanel();
+    resetWorkspace();
+    await refreshProtectedData();
+  } catch (error) {
+    renderAuthPanel(error.message || "테스트 입장에 실패했습니다.");
   }
 }
 
@@ -4650,6 +4731,7 @@ $("#clearAccessCodeBtn").addEventListener("click", () => {
 });
 
 $("#loginBtn").addEventListener("click", () => submitAuth());
+$("#testLoginBtn").addEventListener("click", () => submitTestLogin());
 $("#loginPassword").addEventListener("keydown", (event) => {
   if (event.key === "Enter") submitAuth();
 });
