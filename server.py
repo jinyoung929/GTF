@@ -2968,7 +2968,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <button id="mapBtn" class="primary" disabled>계정 매핑</button>
       </div>
-      <textarea id="csvInput" spellcheck="false" placeholder="계정명,금액&#10;현금및현금성자산,120000000&#10;리스부채,30000000&#10;개발비,45000000"></textarea>
+      <textarea id="csvInput" spellcheck="false"></textarea>
     </section>
 
     <section class="panel upload-panel">
