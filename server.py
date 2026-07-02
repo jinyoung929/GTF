@@ -38,6 +38,7 @@ OPENAI_API_ENDPOINT = "https://api.openai.com/v1/responses"
 OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
 SESSION_COOKIE = "gtf_session"
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
+ADMIN_USER_ID = "admin"
 
 
 def load_local_env() -> None:
@@ -307,6 +308,16 @@ def upload_public_dict(row_or_upload) -> dict:
     return upload
 
 
+def admin_config() -> dict:
+    email = normalize_email(os.environ.get("ADMIN_EMAIL") or os.environ.get("GTF_ADMIN_EMAIL") or "")
+    password = os.environ.get("ADMIN_PASSWORD") or os.environ.get("GTF_ADMIN_PASSWORD") or ""
+    return {
+        "email": email,
+        "password_ready": bool(password),
+        "configured": bool(email and password),
+    }
+
+
 def postgres_param(value):
     if isinstance(value, str):
         stripped = value.strip()
@@ -368,6 +379,7 @@ def init_db() -> None:
             conn.execute("SELECT 1")
             conn.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_bytes bytea")
             ensure_auth_tables(conn)
+            ensure_admin_user(conn)
         return
     with connect() as conn:
         conn.executescript(
@@ -550,6 +562,7 @@ def init_db() -> None:
         if "file_bytes" not in upload_columns:
             conn.execute("ALTER TABLE uploads ADD COLUMN file_bytes BLOB")
         seed_reference_data(conn)
+        ensure_admin_user(conn)
 
 
 def ensure_auth_tables(conn) -> None:
@@ -574,6 +587,40 @@ def ensure_auth_tables(conn) -> None:
             FOREIGN KEY(user_id) REFERENCES app_users(id)
         )
         """
+    )
+
+
+def ensure_admin_user(conn) -> None:
+    config = admin_config()
+    if not config["configured"]:
+        return
+    now = utc_now()
+    row = conn.execute("SELECT id FROM app_users WHERE id = ?", (ADMIN_USER_ID,)).fetchone()
+    password_hash = hash_password(os.environ.get("ADMIN_PASSWORD") or os.environ.get("GTF_ADMIN_PASSWORD") or "")
+    if row:
+        conflicting = conn.execute(
+            "SELECT id FROM app_users WHERE email = ? AND id != ?",
+            (config["email"], ADMIN_USER_ID),
+        ).fetchone()
+        if conflicting:
+            conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (conflicting["id"],))
+            conn.execute("DELETE FROM app_users WHERE id = ?", (conflicting["id"],))
+        conn.execute(
+            "UPDATE app_users SET email = ?, password_hash = ? WHERE id = ?",
+            (config["email"], password_hash, ADMIN_USER_ID),
+        )
+        return
+    existing = conn.execute("SELECT id FROM app_users WHERE email = ?", (config["email"],)).fetchone()
+    if existing:
+        conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (existing["id"],))
+        conn.execute(
+            "UPDATE app_users SET id = ?, password_hash = ? WHERE email = ?",
+            (ADMIN_USER_ID, password_hash, config["email"]),
+        )
+        return
+    conn.execute(
+        "INSERT INTO app_users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+        (ADMIN_USER_ID, config["email"], password_hash, now),
     )
 
 
@@ -750,18 +797,29 @@ def normalize_account_name(name: str) -> str:
         "cash": "cash",
         "매출채권": "receivables",
         "대손충당금": "receivables",
+        "미수금": "receivables",
         "미수수익": "receivables",
+        "계약자산": "receivables",
         "trade receivable": "receivables",
         "재고자산": "inventory",
+        "상품": "inventory",
+        "제품": "inventory",
+        "원재료": "inventory",
         "inventory": "inventory",
         "리스": "lease",
         "사용권자산": "lease",
+        "리스부채": "lease",
         "lease": "lease",
         "개발비": "development",
+        "무형자산": "development",
         "development": "development",
+        "매출액": "revenue",
         "매출": "revenue",
+        "영업수익": "revenue",
         "수익": "revenue",
         "revenue": "revenue",
+        "금융자산": "financial_instrument",
+        "금융부채": "financial_instrument",
         "금융상품": "financial_instrument",
         "파생상품": "financial_instrument",
         "전환사채": "financial_instrument",
@@ -983,6 +1041,38 @@ def pdf_row_current_amount(row: list) -> float | None:
     return None
 
 
+def parse_pdf_text_statement_rows(text: str) -> list[dict]:
+    rows: list[dict] = []
+    account_keywords = {
+        "cash": ["현금및현금성자산", "현금및 현금성자산", "현금성자산"],
+        "receivables": ["매출채권", "미수금", "미수수익", "계약자산"],
+        "inventory": ["재고자산", "상품", "제품", "원재료"],
+        "lease": ["사용권자산", "리스부채"],
+        "development": ["개발비", "무형자산"],
+        "revenue": ["매출액", "매출", "영업수익", "수익"],
+        "financial_instrument": ["금융자산", "금융부채", "단기차입금", "장기차입금", "전환사채", "파생상품"],
+        "provision": ["충당부채", "판매보증충당부채", "복구충당부채"],
+    }
+    amount_pattern = r"\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d{5,}(?:\.\d+)?\)?"
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line or len(line) > 180:
+            continue
+        compact = re.sub(r"\s+", "", line)
+        matched_name = ""
+        for keywords in account_keywords.values():
+            matched_name = next((keyword for keyword in keywords if keyword.replace(" ", "") in compact), "")
+            if matched_name:
+                break
+        if not matched_name:
+            continue
+        amounts = re.findall(amount_pattern, line)
+        if not amounts:
+            continue
+        rows.append({"account_name": matched_name, "amount": parse_amount(amounts[0])})
+    return rows
+
+
 def parse_pdf_statement_rows(path: Path) -> tuple[list[dict], list[str]]:
     try:
         import pdfplumber
@@ -1006,6 +1096,8 @@ def parse_pdf_statement_rows(path: Path) -> tuple[list[dict], list[str]]:
                 continue
 
             pages_scanned += 1
+            for row in parse_pdf_text_statement_rows(text):
+                rows.append(row)
             for table in page.extract_tables() or []:
                 for raw_row in table:
                     if not raw_row:
@@ -1806,9 +1898,13 @@ def load_statement_template_map(conn) -> dict:
 
 def conversion_basis_report(conversion: dict) -> str:
     project = conversion.get("project", {})
+    entries = conversion.get("entries", [])
+    judgment_items = conversion.get("judgment_items", [])
+    ai_assistance = conversion.get("ai_assistance") or {}
+    notes = conversion.get("draft_notes", [])
     lines = [
-        "GTF 회계기준 변환 근거 리포트",
-        "=" * 32,
+        "GTF 회계기준 변환 검토 리포트",
+        "=" * 42,
         f"회사명: {project.get('company_name', '-')}",
         f"기간: {project.get('period', '-')}",
         f"변환 기준: {project.get('source_standard', 'K-GAAP')} -> {project.get('target_standard', 'IFRS')}",
@@ -1816,29 +1912,44 @@ def conversion_basis_report(conversion: dict) -> str:
         f"검토 상태: {conversion.get('review_status', '-')}",
         f"생성 시각: {conversion.get('generated_at', '-')}",
         "",
-        "[조정분개]",
+        "1. 요약",
+        "-" * 42,
+        f"- 조정분개 후보: {len(entries):,}건",
+        f"- 판단 필요 항목: {len(judgment_items):,}건",
+        f"- OpenAI 판단 보조 상태: {label_backend(ai_assistance.get('status', '-'))}",
+        "",
+        "2. 조정분개 후보",
+        "-" * 42,
+        "No | K-GAAP 계정 | 내부코드 | IFRS 표시 | 금액 | 조정액 | 근거",
     ]
-    for index, entry in enumerate(conversion.get("entries", []), start=1):
-        lines.extend(
-            [
-                f"{index}. {entry.get('source_account', '-')} -> {entry.get('target_account', '-')}",
-                f"   내부 코드: {entry.get('standard_code', '-')}",
-                f"   표시 라인: {entry.get('statement_type', '-')} / {entry.get('statement_line_item', '-')}",
-                f"   금액: {float(entry.get('amount') or 0):,.0f}",
-                f"   조정액: {float(entry.get('adjustment') or 0):,.0f}",
-                f"   근거: {localize_export_text(entry.get('calculation') or entry.get('basis'))}",
-            ]
+    if not entries:
+        lines.append("- 생성된 조정분개 후보가 없습니다.")
+    for index, entry in enumerate(entries, start=1):
+        display = f"{entry.get('statement_type', '-')} / {entry.get('statement_line_item', '-')}"
+        basis = localize_export_text(entry.get("calculation") or entry.get("basis"))
+        lines.append(
+            " | ".join(
+                [
+                    str(index),
+                    str(entry.get("source_account", "-")),
+                    str(entry.get("standard_code", "-")),
+                    display,
+                    f"{float(entry.get('amount') or 0):,.0f}",
+                    f"{float(entry.get('adjustment') or 0):,.0f}",
+                    basis,
+                ]
+            )
         )
     lines.append("")
-    lines.append("[판단 필요 항목]")
-    judgment_items = conversion.get("judgment_items", [])
+    lines.append("3. 판단 필요 항목")
+    lines.append("-" * 42)
     if not judgment_items:
         lines.append("- 없음")
     for item in judgment_items:
         lines.append(f"- {item.get('account', '-')}: {localize_export_text(item.get('basis'))}")
     lines.append("")
-    lines.append("[OpenAI 판단 보조]")
-    ai_assistance = conversion.get("ai_assistance") or {}
+    lines.append("4. OpenAI 판단 보조")
+    lines.append("-" * 42)
     lines.append(f"상태: {label_backend(ai_assistance.get('status', '-'))}")
     lines.append(f"모델: {ai_assistance.get('model', '-')}")
     if ai_assistance.get("overall_note"):
@@ -1863,12 +1974,22 @@ def conversion_basis_report(conversion: dict) -> str:
             ]
         )
     lines.append("")
-    lines.append("[주석 초안]")
-    notes = conversion.get("draft_notes", [])
+    lines.append("5. 주석 초안")
+    lines.append("-" * 42)
     if not notes:
         lines.append("- 없음")
     for note in notes:
         lines.append(f"- {note.get('account', '-')}: {localize_export_text(note.get('draft_note'))}")
+    lines.extend(
+        [
+            "",
+            "6. 최종 검토 체크포인트",
+            "-" * 42,
+            "- 계약 조건, 할인율, 자산화 요건, 수익인식 방식 등 입력값의 근거 문서를 확인하세요.",
+            "- 본 리포트는 변환 초안과 감사추적 보조 자료이며 최종 회계정책 판단은 회사 담당자 또는 회계 전문가가 수행해야 합니다.",
+            "- 감사인 검토 시 입력값, 적용 룰, 체크리스트 응답, 수정 이력을 함께 제시하세요.",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -1882,7 +2003,6 @@ class AppHandler(BaseHTTPRequestHandler):
         "/api/access-config",
         "/api/auth/session",
         "/api/auth/login",
-        "/api/auth/register",
         "/api/auth/logout",
     }
 
@@ -1940,8 +2060,6 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/projects":
             self.handle_create_project()
-        elif path == "/api/auth/register":
-            self.handle_register()
         elif path == "/api/auth/login":
             self.handle_login()
         elif path == "/api/auth/logout":
@@ -1962,6 +2080,16 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_convert(path.split("/")[-2])
         elif re.match(r"^/api/projects/[^/]+/review$", path):
             self.handle_review(path.split("/")[-2])
+        else:
+            self.respond_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self) -> None:
+        path = urlparse(self.path).path
+        if path not in self.public_paths and not self.require_access():
+            return
+        if re.match(r"^/api/projects/[^/]+/uploads/[^/]+$", path):
+            parts = path.split("/")
+            self.handle_delete_upload(parts[3], parts[5])
         else:
             self.respond_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
@@ -2094,7 +2222,13 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_auth_session(self) -> None:
         user = self.current_user()
-        self.respond_json({"authenticated": bool(user), "user": user_public_dict(user) if user else None})
+        self.respond_json(
+            {
+                "authenticated": bool(user),
+                "user": user_public_dict(user) if user else None,
+                "admin_configured": admin_config()["configured"],
+            }
+        )
 
     def create_session(self, conn, user_id: str) -> str:
         token = secrets.token_urlsafe(32)
@@ -2113,54 +2247,28 @@ class AppHandler(BaseHTTPRequestHandler):
         return token
 
     def handle_register(self) -> None:
-        payload = self.read_json()
-        email = normalize_email(payload.get("email", ""))
-        password = str(payload.get("password") or "")
-        if not email or "@" not in email:
-            self.respond_json({"error": "올바른 이메일을 입력하세요."}, HTTPStatus.BAD_REQUEST)
-            return
-        if len(password) < 6:
-            self.respond_json({"error": "비밀번호는 6자 이상이어야 합니다."}, HTTPStatus.BAD_REQUEST)
-            return
-        now = utc_now()
-        user = {
-            "id": str(uuid.uuid4()),
-            "email": email,
-            "password_hash": hash_password(password),
-            "created_at": now,
-        }
-        try:
-            with connect() as conn:
-                existing = conn.execute("SELECT id FROM app_users WHERE email = ?", (email,)).fetchone()
-                if existing:
-                    self.respond_json({"error": "이미 가입된 이메일입니다."}, HTTPStatus.CONFLICT)
-                    return
-                conn.execute(
-                    """
-                    INSERT INTO app_users (id, email, password_hash, created_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (user["id"], user["email"], user["password_hash"], user["created_at"]),
-                )
-                token = self.create_session(conn, user["id"])
-        except Exception as exc:
-            self.respond_json({"error": f"회원가입 처리에 실패했습니다: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
-            return
-        self.respond_json(
-            {"authenticated": True, "user": user_public_dict(user)},
-            HTTPStatus.CREATED,
-            {"Set-Cookie": self.session_cookie_header(token)},
-        )
+        self.respond_json({"error": "회원가입은 비활성화되어 있습니다. 관리자 계정으로 로그인하세요."}, HTTPStatus.FORBIDDEN)
 
     def handle_login(self) -> None:
         payload = self.read_json()
         email = normalize_email(payload.get("email", ""))
         password = str(payload.get("password") or "")
+        config = admin_config()
+        if not config["configured"]:
+            self.respond_json(
+                {"error": "관리자 계정이 설정되지 않았습니다. ADMIN_EMAIL과 ADMIN_PASSWORD를 서버 환경변수에 설정하세요."},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        if email != config["email"] or not hmac.compare_digest(password, os.environ.get("ADMIN_PASSWORD") or os.environ.get("GTF_ADMIN_PASSWORD") or ""):
+            self.respond_json({"error": "관리자 이메일 또는 비밀번호가 올바르지 않습니다."}, HTTPStatus.UNAUTHORIZED)
+            return
         with connect() as conn:
-            row = conn.execute("SELECT * FROM app_users WHERE email = ?", (email,)).fetchone()
+            ensure_admin_user(conn)
+            row = conn.execute("SELECT * FROM app_users WHERE id = ?", (ADMIN_USER_ID,)).fetchone()
             user = row_to_dict(row) if row else None
-            if not user or not verify_password(password, user["password_hash"]):
-                self.respond_json({"error": "이메일 또는 비밀번호가 올바르지 않습니다."}, HTTPStatus.UNAUTHORIZED)
+            if not user:
+                self.respond_json({"error": "관리자 계정을 준비하지 못했습니다."}, HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
             token = self.create_session(conn, user["id"])
         self.respond_json(
@@ -2285,6 +2393,39 @@ class AppHandler(BaseHTTPRequestHandler):
                 (project_id,),
             ).fetchall()
         self.respond_json([upload_public_dict(row) for row in rows])
+
+    def handle_delete_upload(self, project_id: str, upload_id: str) -> None:
+        with connect() as conn:
+            upload = conn.execute(
+                "SELECT * FROM uploads WHERE id = ? AND project_id = ?",
+                (upload_id, project_id),
+            ).fetchone()
+            if not upload:
+                self.respond_json({"error": "Upload not found"}, HTTPStatus.NOT_FOUND)
+                return
+            upload_dict = row_to_dict(upload)
+            conn.execute("DELETE FROM extractions WHERE upload_id = ? AND project_id = ?", (upload_id, project_id))
+            conn.execute("DELETE FROM uploads WHERE id = ? AND project_id = ?", (upload_id, project_id))
+            remaining = conn.execute("SELECT COUNT(*) AS count FROM uploads WHERE project_id = ?", (project_id,)).fetchone()["count"]
+            next_status = "created" if int(remaining or 0) == 0 else "source_uploaded"
+            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", (next_status, utc_now(), project_id))
+            log_event(
+                conn,
+                project_id,
+                "source.deleted",
+                {
+                    "upload_id": upload_id,
+                    "original_name": upload_dict.get("original_name"),
+                    "remaining_uploads": remaining,
+                },
+            )
+        stored_name = str(upload_dict.get("stored_name") or "")
+        if stored_name:
+            try:
+                (UPLOAD_DIR / stored_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.respond_json({"deleted": True, "upload_id": upload_id, "project_status": next_status})
 
     def handle_get_extractions(self, project_id: str) -> None:
         with connect() as conn:
@@ -2667,14 +2808,14 @@ INDEX_HTML = """<!doctype html>
 
   <section id="authPanel" class="access-panel">
     <div>
-      <h2>사용자 로그인</h2>
-      <p id="authMessage">테스트할 이메일과 비밀번호로 로그인하거나 새 계정을 만드세요.</p>
+      <span class="eyebrow">Admin sign in</span>
+      <h2>관리자 로그인</h2>
+      <p id="authMessage">운영자가 발급한 관리자 계정으로 접속하세요. 회원가입은 제공하지 않습니다.</p>
     </div>
     <div class="access-actions">
-      <input id="loginEmail" type="email" autocomplete="email" placeholder="이메일">
-      <input id="loginPassword" type="password" autocomplete="current-password" placeholder="비밀번호">
+      <input id="loginEmail" type="email" autocomplete="email" placeholder="관리자 이메일">
+      <input id="loginPassword" type="password" autocomplete="current-password" placeholder="관리자 비밀번호">
       <button id="loginBtn" class="primary">로그인</button>
-      <button id="registerBtn" class="secondary">회원가입</button>
     </div>
   </section>
 
@@ -2931,22 +3072,23 @@ body {
 
 .access-panel {
   margin: 16px 16px 0;
-  padding: 14px 16px;
+  padding: 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  border: 1px solid #d8c08f;
+  gap: 18px;
+  border: 1px solid #cfe0dd;
   border-radius: 8px;
-  background: #fff8e8;
+  background: #ffffff;
+  box-shadow: var(--shadow);
 }
 
-.access-panel p { color: #785315; }
+.access-panel p { color: var(--muted); }
 
 .access-actions {
   min-width: min(420px, 100%);
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) minmax(140px, 1fr) auto auto;
+  grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr) auto;
   gap: 8px;
 }
 
@@ -3109,6 +3251,16 @@ button:disabled {
 .secondary:not(:disabled):hover {
   border-color: #aebfca;
   background: #e2edf4;
+}
+
+.delete-upload-btn {
+  border-color: #efc2c2;
+  color: var(--danger);
+}
+
+.delete-upload-btn:not(:disabled):hover {
+  border-color: #d99898;
+  background: #fff4f4;
 }
 
 .download {
@@ -3310,7 +3462,25 @@ th {
 }
 
 .result-table td:nth-child(7) {
-  min-width: 240px;
+  min-width: 300px;
+}
+
+.result-table th:nth-child(1),
+.result-table td:nth-child(1),
+.result-table th:nth-child(3),
+.result-table td:nth-child(3) {
+  min-width: 150px;
+}
+
+.num-cell {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.basis-cell {
+  color: #43545b;
+  line-height: 1.55;
 }
 
 .badge {
@@ -3775,7 +3945,7 @@ function renderAuthPanel(message = "") {
   $("#sampleBtn").disabled = !isLoggedIn;
   $("#userStatus").textContent = isLoggedIn ? currentUser.email : "로그인 필요";
   if (!isLoggedIn) {
-    $("#authMessage").textContent = message || "테스트할 이메일과 비밀번호로 로그인하거나 새 계정을 만드세요.";
+    $("#authMessage").textContent = message || "운영자가 발급한 관리자 계정으로 접속하세요. 회원가입은 제공하지 않습니다.";
   }
 }
 
@@ -3812,6 +3982,7 @@ const statusLabels = {
   error: "오류",
   "project.created": "프로젝트 생성",
   "source.uploaded": "원본 파일 업로드",
+  "source.deleted": "원본 파일 삭제",
   "source.extracted": "원본 데이터 추출",
   "extraction.accepted": "추출 결과 반영",
   "statements.mapped": "계정 매핑",
@@ -3976,15 +4147,15 @@ async function refreshSession() {
   return currentUser;
 }
 
-async function submitAuth(mode) {
+async function submitAuth() {
   const email = $("#loginEmail").value.trim();
   const password = $("#loginPassword").value;
   if (!email || !password) {
-    renderAuthPanel("이메일과 비밀번호를 입력하세요.");
+    renderAuthPanel("관리자 이메일과 비밀번호를 입력하세요.");
     return;
   }
   try {
-    const data = await api(`/api/auth/${mode}`, {
+    const data = await api("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password })
     });
@@ -4214,9 +4385,9 @@ function renderDraft(draft) {
       <td>${escapeHtml(entry.standard_code)}</td>
       <td>${escapeHtml(entry.target_account)}</td>
       <td>${escapeHtml(entry.statement_type || "-")} · ${escapeHtml(entry.statement_line_item || "-")}</td>
-      <td>${Number(entry.amount || 0).toLocaleString()}</td>
-      <td>${Number(entry.adjustment || 0).toLocaleString()}</td>
-      <td>${escapeHtml(localizeText(entry.calculation || entry.basis || "-"))}</td>
+      <td class="num-cell">${Number(entry.amount || 0).toLocaleString()}</td>
+      <td class="num-cell">${Number(entry.adjustment || 0).toLocaleString()}</td>
+      <td class="basis-cell">${escapeHtml(localizeText(entry.calculation || entry.basis || "-"))}</td>
     </tr>
   `).join("");
   const judgmentCards = (draft.judgment_items || []).map((item) => `
@@ -4309,11 +4480,15 @@ function renderUploads() {
         <span>${file.content_type} · ${Number(file.size_bytes).toLocaleString()} bytes · ${labelFor(file.extraction_status)}</span>
         <div class="item-actions">
           <button class="secondary extract-btn" data-upload-id="${file.id}" ${file.extraction_status === "analyzing" ? "disabled" : ""}>${uploadActionLabel(file.extraction_status)}</button>
+          <button class="ghost delete-upload-btn" data-delete-upload-id="${file.id}">삭제</button>
         </div>
       </div>
   `).join("");
   document.querySelectorAll("[data-upload-id]").forEach((button) => {
     button.addEventListener("click", () => extractUpload(button.dataset.uploadId));
+  });
+  document.querySelectorAll("[data-delete-upload-id]").forEach((button) => {
+    button.addEventListener("click", () => deleteUpload(button.dataset.deleteUploadId));
   });
 }
 
@@ -4474,10 +4649,9 @@ $("#clearAccessCodeBtn").addEventListener("click", () => {
   renderAccessPanel("접근 코드가 초기화되었습니다.");
 });
 
-$("#loginBtn").addEventListener("click", () => submitAuth("login"));
-$("#registerBtn").addEventListener("click", () => submitAuth("register"));
+$("#loginBtn").addEventListener("click", () => submitAuth());
 $("#loginPassword").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") submitAuth("login");
+  if (event.key === "Enter") submitAuth();
 });
 $("#logoutBtn").addEventListener("click", async () => {
   await api("/api/auth/logout", { method: "POST", body: "{}" });
@@ -4556,6 +4730,23 @@ async function extractUpload(uploadId) {
   renderUploads();
   renderExtractions();
   setStatus("extracted");
+  await refreshProjects();
+  await refreshAudit();
+}
+
+async function deleteUpload(uploadId) {
+  if (!activeProjectId) return;
+  const target = uploads.find((upload) => upload.id === uploadId);
+  const message = target ? `${target.original_name} 파일을 삭제합니다.` : "업로드 파일을 삭제합니다.";
+  if (!window.confirm(message)) return;
+  await api(`/api/projects/${activeProjectId}/uploads/${uploadId}`, {
+    method: "DELETE"
+  });
+  uploads = uploads.filter((upload) => upload.id !== uploadId);
+  extractions = extractions.filter((extraction) => extraction.upload_id !== uploadId);
+  renderUploads();
+  renderExtractions();
+  setStatus(uploads.length ? "source_uploaded" : "created");
   await refreshProjects();
   await refreshAudit();
 }
