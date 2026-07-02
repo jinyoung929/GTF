@@ -1194,6 +1194,12 @@ def validate_statement_records(project: dict, statements: list[sqlite3.Row]) -> 
     def add_check(name: str, status: str, detail: str) -> None:
         checks.append({"name": name, "status": status, "detail": detail})
 
+    def account_text(row) -> str:
+        return re.sub(r"\s+", "", str(row["account_name"] or "")).lower()
+
+    def amount(row) -> float:
+        return float(row["amount"] or 0)
+
     if not statements:
         issues.append("업로드되거나 매핑된 계정 행이 없습니다.")
         add_check("계정 행", "error", "검증할 계정 데이터가 없습니다.")
@@ -1225,6 +1231,14 @@ def validate_statement_records(project: dict, statements: list[sqlite3.Row]) -> 
     else:
         add_check("중복 매핑", "pass", "동일 표준계정 중복 매핑이 없습니다.")
 
+    original_names = [str(row["account_name"]).strip() for row in statements]
+    duplicate_originals = sorted({name for name in original_names if original_names.count(name) > 1})
+    if duplicate_originals:
+        warnings.append(f"동일 계정명이 여러 번 추출되었습니다: {', '.join(duplicate_originals[:5])}")
+        add_check("중복 계정명", "warning", f"{len(duplicate_originals)}개 계정명이 반복됩니다. 주석/세부내역 중복 추출 여부를 확인하세요.")
+    else:
+        add_check("중복 계정명", "pass", "동일 계정명 반복 추출이 없습니다.")
+
     unmapped = [row["account_name"] for row in statements if row["standard_code"] == "X9999"]
     if unmapped:
         issues.append(f"미분류 계정이 있습니다: {', '.join(unmapped[:5])}")
@@ -1251,6 +1265,57 @@ def validate_statement_records(project: dict, statements: list[sqlite3.Row]) -> 
             add_check("큰 금액 비중", "warning", detail)
         else:
             add_check("큰 금액 비중", "pass", detail)
+
+    max_abs_amount = max(abs(amount(row)) for row in statements)
+    if max_abs_amount < 10_000:
+        warnings.append("전체 금액 규모가 작습니다. 원/천원/백만원 단위가 누락되었는지 확인하세요.")
+        add_check("단위 검토", "warning", f"최대 금액이 {max_abs_amount:,.0f}입니다. 표시 단위를 확인하세요.")
+    elif max_abs_amount > 1_000_000_000_000_000:
+        warnings.append("비정상적으로 큰 금액이 있습니다. OCR 숫자 인식 오류 가능성을 확인하세요.")
+        add_check("단위 검토", "warning", f"최대 금액이 {max_abs_amount:,.0f}입니다. 숫자 자릿수를 확인하세요.")
+    else:
+        add_check("단위 검토", "pass", f"최대 금액 {max_abs_amount:,.0f} 기준으로 극단적 단위 오류는 보이지 않습니다.")
+
+    negative_rows = [
+        row["account_name"]
+        for row in statements
+        if amount(row) < 0 and not any(token in account_text(row) for token in ("충당금", "상각", "평가손실", "차감", "환입", "조정"))
+    ]
+    if negative_rows:
+        warnings.append(f"음수 금액 계정이 있습니다: {', '.join(negative_rows[:5])}")
+        add_check("음수 금액", "warning", f"{len(negative_rows)}개 계정의 음수 금액이 정상 표시인지 확인하세요.")
+    else:
+        add_check("음수 금액", "pass", "설명이 필요한 음수 금액 계정은 보이지 않습니다.")
+
+    asset_tokens = ("현금", "매출채권", "미수", "재고", "상품", "제품", "원재료", "사용권자산", "개발비", "무형자산", "금융자산", "자산")
+    liability_tokens = ("매입채무", "미지급", "차입", "사채", "리스부채", "충당부채", "금융부채", "부채")
+    equity_tokens = ("자본금", "자본잉여금", "기타자본", "이익잉여금", "결손금", "자본")
+    assets = sum(amount(row) for row in statements if any(token in account_text(row) for token in asset_tokens) and not any(token in account_text(row) for token in liability_tokens))
+    liabilities = sum(amount(row) for row in statements if any(token in account_text(row) for token in liability_tokens))
+    equity = sum(amount(row) for row in statements if any(token in account_text(row) for token in equity_tokens))
+    balance_basis = max(abs(assets), abs(liabilities + equity), 1)
+    balance_gap = assets - liabilities - equity
+    if equity and assets and liabilities:
+        if abs(balance_gap) / balance_basis > 0.05:
+            warnings.append(f"재무상태표 균형이 맞지 않을 수 있습니다. 자산 {assets:,.0f}, 부채+자본 {(liabilities + equity):,.0f}")
+            add_check("자산=부채+자본", "warning", f"차이 {balance_gap:,.0f}. OCR 중복/누락 또는 표시 단위를 확인하세요.")
+        else:
+            add_check("자산=부채+자본", "pass", f"자산 {assets:,.0f}, 부채+자본 {(liabilities + equity):,.0f}로 큰 차이가 없습니다.")
+    else:
+        warnings.append("자산=부채+자본 검증에 필요한 자산/부채/자본 항목이 충분하지 않습니다.")
+        add_check("자산=부채+자본", "warning", "자산, 부채, 자본 항목이 모두 있어야 균형 검증이 가능합니다.")
+
+    has_revenue = any(any(token in account_text(row) for token in ("매출", "영업수익", "수익")) for row in statements)
+    has_expense = any(any(token in account_text(row) for token in ("매출원가", "판매비", "관리비", "영업비용", "비용", "원가")) for row in statements)
+    has_profit = any(any(token in account_text(row) for token in ("영업이익", "당기순이익", "손실", "이익")) for row in statements)
+    if has_revenue and (has_expense or has_profit):
+        add_check("손익계산서 필수 항목", "pass", "수익 항목과 비용 또는 손익 항목이 함께 확인됩니다.")
+    elif has_revenue:
+        warnings.append("수익 항목은 있으나 비용/손익 항목이 부족합니다. 손익계산서 추출 범위를 확인하세요.")
+        add_check("손익계산서 필수 항목", "warning", "수익은 있으나 비용 또는 이익 항목이 부족합니다.")
+    else:
+        warnings.append("손익계산서 수익 항목이 확인되지 않습니다. 손익계산서가 누락되었는지 확인하세요.")
+        add_check("손익계산서 필수 항목", "warning", "매출/수익 항목이 확인되지 않았습니다.")
 
     status = "failed" if issues else "warning" if warnings else "passed"
     return {
@@ -2940,6 +3005,10 @@ INDEX_HTML = """<!doctype html>
         <span id="nextActionPill" class="pill">프로젝트 생성</span>
       </div>
       <div id="workflowSteps" class="steps"></div>
+      <div id="nextActionGuide" class="next-action-guide">
+        <strong>다음 단계</strong>
+        <span>프로젝트를 생성하면 업로드와 매핑 작업을 시작할 수 있습니다.</span>
+      </div>
       <div class="summary-grid">
         <div class="metric">
           <strong id="metricUploads">0</strong>
@@ -3417,6 +3486,33 @@ button:disabled {
 .step.done strong,
 .step.current strong {
   color: var(--accent);
+}
+
+.next-action-guide {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid #c9ddd7;
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: #f7fcfa;
+}
+
+.next-action-guide strong {
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.next-action-guide span {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.next-primary {
+  box-shadow: 0 0 0 3px rgba(9, 107, 91, 0.16);
+  border-color: var(--accent) !important;
 }
 
 .summary-grid {
@@ -3944,6 +4040,8 @@ let projects = [];
 let accessRequired = false;
 let currentUser = null;
 let testLoginEnabled = false;
+let lastValidationStatus = null;
+let currentStatus = null;
 
 const $ = (selector) => document.querySelector(selector);
 const accessStorageKey = "gtfAccessCode";
@@ -4151,6 +4249,49 @@ function nextActionLabel(status) {
   return labelFor(status);
 }
 
+function nextActionDetail(status) {
+  if (!activeProjectId) return "프로젝트를 생성하면 업로드와 매핑 작업을 시작할 수 있습니다.";
+  if (status === "created") return "재무제표 파일을 선택한 뒤 원본 파일 영역의 업로드 및 분석 버튼을 누르세요.";
+  if (status === "source_uploaded") return "업로드 파일 목록에서 분석 실행을 눌러 추출 결과를 만드세요.";
+  if (status === "extracted") return "추출 결과를 확인한 뒤 계정 반영 버튼을 눌러 매핑 테이블에 추가하세요.";
+  if (status === "mapped") {
+    if (lastValidationStatus === "passed" || lastValidationStatus === "warning") {
+      return "검증 결과를 확인했습니다. 중대한 오류가 없다면 변환 초안 생성 버튼을 누르세요.";
+    }
+    return "변환 초안 생성 전에 검증 버튼을 눌러 중복, 단위, 기간, 손익계산서 필수 항목을 확인하세요.";
+  }
+  if (status === "draft_generated") return "변환 초안과 OpenAI 판단 보조 결과를 검토한 뒤 리포트를 다운로드하거나 승인하세요.";
+  if (status === "changes_requested") return "수정 요청 내용을 반영한 뒤 다시 검증과 변환 초안 생성을 진행하세요.";
+  if (status === "approved") return "승인이 완료되었습니다. 근거 리포트와 조정분개 CSV를 내려받아 보관하세요.";
+  return "현재 단계의 안내에 따라 다음 버튼을 선택하세요.";
+}
+
+function nextActionTarget(status) {
+  if (!activeProjectId) return "#projectForm button[type='submit']";
+  if (status === "created") return "#uploadBtn";
+  if (status === "source_uploaded") return ".extract-btn";
+  if (status === "extracted") return ".accept-extraction-btn";
+  if (status === "mapped") {
+    return (lastValidationStatus === "passed" || lastValidationStatus === "warning") ? "#convertBtn" : "#validateBtn";
+  }
+  if (status === "draft_generated") return "#exportReportBtn";
+  return "";
+}
+
+function updateNextActionGuide(status) {
+  const guide = $("#nextActionGuide");
+  if (!guide) return;
+  guide.innerHTML = `
+    <strong>다음 단계 · ${escapeHtml(nextActionLabel(status))}</strong>
+    <span>${escapeHtml(nextActionDetail(status))}</span>
+  `;
+  document.querySelectorAll(".next-primary").forEach((element) => element.classList.remove("next-primary"));
+  const target = nextActionTarget(status);
+  if (!target) return;
+  const element = document.querySelector(target);
+  if (element && !element.disabled) element.classList.add("next-primary");
+}
+
 function updateProgress(status) {
   const currentIndex = workflowIndex(status);
   $("#nextActionPill").textContent = nextActionLabel(status);
@@ -4163,6 +4304,7 @@ function updateProgress(status) {
       </div>
     `;
   }).join("");
+  updateNextActionGuide(status);
 }
 
 function updateMetrics() {
@@ -4328,6 +4470,7 @@ async function downloadApi(path, filename) {
 }
 
 function setStatus(text) {
+  currentStatus = text;
   $("#statusPill").textContent = labelFor(text);
   updateProgress(text);
 }
@@ -4339,6 +4482,7 @@ function setReviewState(text) {
 function setWorkflowEnabled(enabled) {
   $("#mapBtn").disabled = !enabled;
   $("#uploadBtn").disabled = !enabled;
+  updateNextActionGuide(currentStatus);
 }
 
 function setExportEnabled(enabled) {
@@ -4571,6 +4715,7 @@ function renderUploads() {
   document.querySelectorAll("[data-delete-upload-id]").forEach((button) => {
     button.addEventListener("click", () => deleteUpload(button.dataset.deleteUploadId));
   });
+  updateNextActionGuide(currentStatus);
 }
 
 function uploadActionLabel(status) {
@@ -4611,6 +4756,7 @@ function renderExtractions() {
   document.querySelectorAll("[data-extraction-id]").forEach((button) => {
     button.addEventListener("click", () => acceptExtraction(button.dataset.extractionId));
   });
+  updateNextActionGuide(currentStatus);
 }
 
 function renderProjects() {
@@ -4639,6 +4785,8 @@ function resetWorkspace() {
   uploads = [];
   extractions = [];
   hasDraft = false;
+  lastValidationStatus = null;
+  currentStatus = null;
   renderMapping();
   renderUploads();
   renderExtractions();
@@ -4662,6 +4810,7 @@ function syncProjectForm(project) {
 async function loadProject(projectId) {
   const data = await api(`/api/projects/${projectId}`);
   activeProjectId = data.project.id;
+  lastValidationStatus = null;
   syncProjectForm(data.project);
   setStatus(data.project.status);
   statements = data.statements || [];
@@ -4674,11 +4823,12 @@ async function loadProject(projectId) {
   hasDraft = Boolean(data.conversion);
   renderDraft(data.conversion);
   $("#validateBtn").disabled = statements.length === 0;
-  $("#convertBtn").disabled = statements.length === 0;
+  $("#convertBtn").disabled = statements.length === 0 || (!hasDraft && data.project.status === "mapped");
   $("#approveBtn").disabled = !hasDraft;
   $("#requestChangesBtn").disabled = !hasDraft;
   setExportEnabled(hasDraft);
   setWorkflowEnabled(true);
+  updateNextActionGuide(currentStatus);
   if (data.review) {
     setReviewState(data.review.decision === "approved" ? "approved" : "changes_requested");
     $("#reviewerName").value = data.review.reviewer_name;
@@ -4753,6 +4903,7 @@ $("#projectForm").addEventListener("submit", async (event) => {
     body: JSON.stringify(payload)
   });
   activeProjectId = project.id;
+  lastValidationStatus = null;
   setStatus(project.status);
   setWorkflowEnabled(true);
   $("#validateBtn").disabled = true;
@@ -4839,13 +4990,14 @@ async function acceptExtraction(extractionId) {
     body: "{}"
   });
   statements = [...statements, ...result.statements];
+  lastValidationStatus = null;
   extractions = extractions.map((extraction) => (
     extraction.id === extractionId ? { ...extraction, status: "accepted" } : extraction
   ));
   renderMapping();
   renderExtractions();
   $("#validateBtn").disabled = false;
-  $("#convertBtn").disabled = false;
+  $("#convertBtn").disabled = true;
   setStatus("mapped");
   await refreshProjects();
   await refreshAudit();
@@ -4857,9 +5009,10 @@ $("#mapBtn").addEventListener("click", async () => {
     body: JSON.stringify({ csv_text: $("#csvInput").value, source: "manual_csv" })
   });
   statements = result.statements;
+  lastValidationStatus = null;
   renderMapping();
   $("#validateBtn").disabled = false;
-  $("#convertBtn").disabled = false;
+  $("#convertBtn").disabled = true;
   setStatus("mapped");
   await refreshProjects();
   await refreshAudit();
@@ -4867,7 +5020,10 @@ $("#mapBtn").addEventListener("click", async () => {
 
 $("#validateBtn").addEventListener("click", async () => {
   const result = await api(`/api/projects/${activeProjectId}/validate`, { method: "POST", body: "{}" });
+  lastValidationStatus = result.status;
   renderValidation(result);
+  $("#convertBtn").disabled = result.status === "failed";
+  updateNextActionGuide(currentStatus);
   await refreshAudit();
 });
 
