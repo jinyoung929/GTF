@@ -26,7 +26,7 @@ export function ProjectDashboard({
 }) {
   const [showModal, setShowModal] = useState(false);
   const [company, setCompany] = useState("샘플테크 주식회사");
-  const [period, setPeriod] = useState("2024");
+  const [period, setPeriod] = useState("2026");
 
   function submitCreate() {
     onCreate({ company_name: company, period });
