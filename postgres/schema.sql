@@ -3,6 +3,22 @@
 
 create extension if not exists pgcrypto;
 
+create table if not exists public.app_users (
+  id text primary key,
+  email text not null unique,
+  password_hash text not null,
+  is_read_only boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.user_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null references public.app_users(id) on delete cascade,
+  token_hash text not null unique,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null
+);
+
 create table if not exists public.projects (
   id uuid primary key default gen_random_uuid(),
   owner_user_id text,
