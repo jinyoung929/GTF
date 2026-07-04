@@ -155,6 +155,7 @@ function ImportScreen({
   const [companyName, setCompanyName] = useState(bundle.project.company_name);
   const [stockCode, setStockCode] = useState("");
   const [bsnsYear, setBsnsYear] = useState(bundle.project.period);
+  const [reportCode, setReportCode] = useState("11011");
   const [fsDiv, setFsDiv] = useState("CFS");
   const [manualText, setManualText] = useState("현금및현금성자산,120000000\n리스부채,30000000\n개발비,45000000");
   const latestExtraction = bundle.extractions[0];
@@ -231,7 +232,7 @@ function ImportScreen({
                 <TextInput label="회사명" value={companyName} onChange={setCompanyName} />
                 <TextInput label="종목코드" value={stockCode} onChange={setStockCode} placeholder="005930" />
                 <TextInput label="사업연도" value={bsnsYear} onChange={setBsnsYear} />
-                <SelectInput label="보고서" value="11011" options={[["11011", "사업보고서"], ["11012", "반기보고서"], ["11013", "1분기"], ["11014", "3분기"]]} />
+                <SelectInput label="보고서" value={reportCode} onChange={setReportCode} options={[["11011", "사업보고서"], ["11012", "반기보고서"], ["11013", "1분기"], ["11014", "3분기"]]} />
                 <label className="block">
                   <span className="block text-xs font-bold uppercase tracking-wide text-[#677089] mb-1.5">연결 별도</span>
                   <select value={fsDiv} onChange={(event) => setFsDiv(event.target.value)} className="w-full px-3 py-2 text-sm border border-[#D0D5E0] bg-[#F5F7FA]">
@@ -240,7 +241,7 @@ function ImportScreen({
                   </select>
                 </label>
               </div>
-              <button disabled={!dartReady || !!busy} onClick={() => run("dart", () => onDartImport({ corp_code: corpCode, company_name: companyName, stock_code: stockCode, bsns_year: bsnsYear, reprt_code: "11011", fs_div: fsDiv }))} className="flex items-center gap-2 px-4 py-2 bg-[#1740BE] disabled:bg-[#C8D0DC] text-white text-xs font-bold">
+              <button disabled={!dartReady || !!busy} onClick={() => run("dart", () => onDartImport({ corp_code: corpCode, company_name: companyName, stock_code: stockCode, bsns_year: bsnsYear, reprt_code: reportCode, fs_div: fsDiv }))} className="flex items-center gap-2 px-4 py-2 bg-[#1740BE] disabled:bg-[#C8D0DC] text-white text-xs font-bold">
                 {busy === "dart" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Cloud className="w-3.5 h-3.5" />}
                 DART에서 가져오기
               </button>
@@ -291,11 +292,11 @@ function TextInput({ label, value, onChange, placeholder = "" }: { label: string
   );
 }
 
-function SelectInput({ label, value, options }: { label: string; value: string; options: [string, string][] }) {
+function SelectInput({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: [string, string][] }) {
   return (
     <label className="block">
       <span className="block text-xs font-bold uppercase tracking-wide text-[#677089] mb-1.5">{label}</span>
-      <select defaultValue={value} className="w-full px-3 py-2 text-sm border border-[#D0D5E0] bg-[#F5F7FA]">
+      <select value={value} onChange={(event) => onChange(event.target.value)} className="w-full px-3 py-2 text-sm border border-[#D0D5E0] bg-[#F5F7FA]">
         {options.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
       </select>
     </label>
