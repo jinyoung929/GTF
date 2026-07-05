@@ -21,6 +21,17 @@ import { ProjectDashboard } from "./screens/ProjectDashboard";
 import type { AuditLog, Conversion, ConversionEntry, ImportTab, Project, ProjectBundle, ReviewTab, Screen, SourceRow, Statement, UploadRow, UserInfo } from "./types";
 import { HeaderCell, Pill, SectionLabel, StatusBadge } from "./ui";
 
+type DartReportOption = {
+  corp_code: string;
+  corp_name: string;
+  bsns_year: string;
+  reprt_code: string;
+  reprt_name: string;
+  report_name: string;
+  receipt_no: string;
+  receipt_date: string;
+};
+
 function ProjectLayout({
   bundle,
   screen,
@@ -138,6 +149,7 @@ function ImportScreen({
   onUpload,
   onExtract,
   onAccept,
+  onDartReports,
   onDartImport,
   onManualAdd,
 }: {
@@ -146,6 +158,7 @@ function ImportScreen({
   onUpload: (file: File) => Promise<void>;
   onExtract: (uploadId: string) => Promise<void>;
   onAccept: (extractionId: string) => Promise<void>;
+  onDartReports: (payload: Record<string, string>) => Promise<{ reports: DartReportOption[]; issues: string[]; metadata: Record<string, string> }>;
   onDartImport: (payload: Record<string, string>) => Promise<void>;
   onManualAdd: (rows: SourceRow[]) => Promise<void>;
 }) {
@@ -157,6 +170,9 @@ function ImportScreen({
   const [bsnsYear, setBsnsYear] = useState(bundle.project.period);
   const [reportCode, setReportCode] = useState("11011");
   const [fsDiv, setFsDiv] = useState("CFS");
+  const [reports, setReports] = useState<DartReportOption[]>([]);
+  const [selectedReportKey, setSelectedReportKey] = useState("");
+  const [reportIssues, setReportIssues] = useState<string[]>([]);
   const [manualText, setManualText] = useState("현금및현금성자산,120000000\n리스부채,30000000\n개발비,45000000");
   const latestExtraction = bundle.extractions[0];
   const previewRows = latestExtraction?.rows || [];
@@ -180,6 +196,34 @@ function ImportScreen({
         return { account_name, amount: Number(amount || 0) };
       })
       .filter((row) => row.account_name);
+  }
+
+  async function lookupReports() {
+    const result = await onDartReports({ corp_code: corpCode, company_name: companyName, stock_code: stockCode, from_year: "2024", to_year: bsnsYear });
+    setReports(result.reports || []);
+    setReportIssues(result.issues || []);
+    const firstReport = result.reports?.[0];
+    if (firstReport) selectReport(firstReport);
+  }
+
+  function reportKey(report: DartReportOption) {
+    return `${report.bsns_year}:${report.reprt_code}:${report.receipt_no}`;
+  }
+
+  function selectReport(report: DartReportOption) {
+    setSelectedReportKey(reportKey(report));
+    setCorpCode(report.corp_code || corpCode);
+    setCompanyName(report.corp_name || companyName);
+    setBsnsYear(report.bsns_year);
+    setReportCode(report.reprt_code);
+  }
+
+  function importSelectedReport() {
+    const selectedReport = reports.find((report) => reportKey(report) === selectedReportKey);
+    const payload = selectedReport
+      ? { corp_code: selectedReport.corp_code, company_name: selectedReport.corp_name, stock_code: stockCode, bsns_year: selectedReport.bsns_year, reprt_code: selectedReport.reprt_code, fs_div: fsDiv }
+      : { corp_code: corpCode, company_name: companyName, stock_code: stockCode, bsns_year: bsnsYear, reprt_code: reportCode, fs_div: fsDiv };
+    return onDartImport(payload);
   }
 
   return (
@@ -241,10 +285,41 @@ function ImportScreen({
                   </select>
                 </label>
               </div>
-              <button disabled={!dartReady || !!busy} onClick={() => run("dart", () => onDartImport({ corp_code: corpCode, company_name: companyName, stock_code: stockCode, bsns_year: bsnsYear, reprt_code: reportCode, fs_div: fsDiv }))} className="flex items-center gap-2 px-4 py-2 bg-[#1740BE] disabled:bg-[#C8D0DC] text-white text-xs font-bold">
-                {busy === "dart" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Cloud className="w-3.5 h-3.5" />}
-                DART에서 가져오기
-              </button>
+              <div className="flex items-center gap-2">
+                <button disabled={!dartReady || !!busy} onClick={() => run("reports", lookupReports)} className="flex items-center gap-2 px-4 py-2 bg-white border border-[#1740BE] disabled:border-[#C8D0DC] disabled:text-[#8A96A8] text-[#1740BE] text-xs font-bold">
+                  {busy === "reports" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ClipboardList className="w-3.5 h-3.5" />}
+                  보고서 조회
+                </button>
+                <button disabled={!dartReady || !!busy} onClick={() => run("dart", importSelectedReport)} className="flex items-center gap-2 px-4 py-2 bg-[#1740BE] disabled:bg-[#C8D0DC] text-white text-xs font-bold">
+                  {busy === "dart" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Cloud className="w-3.5 h-3.5" />}
+                  DART에서 가져오기
+                </button>
+              </div>
+              {reports.length > 0 && (
+                <div className="border border-[#D0D5E0] bg-[#F5F7FA]">
+                  <div className="px-4 py-2.5 border-b border-[#D0D5E0]">
+                    <SectionLabel>조회 가능한 보고서</SectionLabel>
+                  </div>
+                  <div className="divide-y divide-[#D0D5E0]">
+                    {reports.map((report) => {
+                      const key = reportKey(report);
+                      return (
+                        <label key={key} className={classNames("flex items-center gap-3 px-4 py-3 cursor-pointer bg-white", selectedReportKey === key && "bg-blue-50")}>
+                          <input type="radio" name="dart-report" checked={selectedReportKey === key} onChange={() => selectReport(report)} />
+                          <span className="flex-1 text-sm font-semibold text-[#0A1628]">{report.bsns_year} {report.reprt_name}</span>
+                          <span className="text-xs font-mono text-[#677089]">{report.receipt_date || "-"}</span>
+                          <span className="text-xs text-[#677089] max-w-[320px] truncate">{report.report_name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {reportIssues.length > 0 && (
+                <div className="border-l-4 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-800 font-medium">
+                  {reportIssues.join(" / ")}
+                </div>
+              )}
             </div>
           )}
 
@@ -616,6 +691,14 @@ export default function App() {
     setScreen("import");
   }
 
+  async function deleteProject(project: Project) {
+    await api<{ deleted: boolean }>(`/api/projects/${project.id}`, { method: "DELETE" });
+    setProjects((items) => items.filter((item) => item.id !== project.id));
+    if (bundle?.project.id === project.id) {
+      setBundle(null);
+    }
+  }
+
   async function refreshBundle() {
     if (bundle) await loadProject(bundle.project.id);
   }
@@ -644,6 +727,11 @@ export default function App() {
     if (!bundle) return;
     await api(`/api/projects/${bundle.project.id}/dart/import`, { method: "POST", body: JSON.stringify(payload) });
     await refreshBundle();
+  }
+
+  async function dartReports(payload: Record<string, string>) {
+    if (!bundle) return { reports: [], issues: [], metadata: {} };
+    return api<{ reports: DartReportOption[]; issues: string[]; metadata: Record<string, string> }>(`/api/projects/${bundle.project.id}/dart/reports`, { method: "POST", body: JSON.stringify(payload) });
   }
 
   async function manualAdd(rows: SourceRow[]) {
@@ -680,6 +768,7 @@ export default function App() {
         projects={projects}
         loading={loading}
         onCreate={createProject}
+        onDelete={deleteProject}
         onLogout={logout}
         onOpen={(project) => loadProject(project.id)}
       />
@@ -712,6 +801,7 @@ export default function App() {
             onUpload={uploadFile}
             onExtract={extractUpload}
             onAccept={acceptExtraction}
+            onDartReports={dartReports}
             onDartImport={dartImport}
             onManualAdd={manualAdd}
           />

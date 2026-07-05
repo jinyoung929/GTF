@@ -3,8 +3,9 @@ import json
 import zipfile
 import unittest
 
+import gtf_app.dart as dart_module
 import server
-from gtf_app.routing import resolve_get, resolve_post
+from gtf_app.routing import resolve_delete, resolve_get, resolve_post
 
 
 class DartImportAndWorkbookTests(unittest.TestCase):
@@ -156,9 +157,63 @@ class DartImportAndWorkbookTests(unittest.TestCase):
 
     def test_routes_include_dart_import_and_workbook_export(self):
         self.assertEqual(resolve_post("/api/projects/p1/dart/import").name, "dart.import")
+        self.assertEqual(resolve_post("/api/projects/p1/dart/reports").name, "dart.reports")
         match = resolve_get("/api/projects/p1/exports/review-workbook.xlsx")
         self.assertEqual(match.name, "exports.get")
         self.assertEqual(match.args, ("p1", "review-workbook.xlsx"))
+        delete_match = resolve_delete("/api/projects/p1")
+        self.assertEqual(delete_match.name, "projects.delete")
+        self.assertEqual(delete_match.args, ("p1",))
+
+    def test_dart_available_reports_filters_periodic_reports(self):
+        original_request = dart_module.dart_json_request
+        original_key = server.os.environ.get("DART_API_KEY")
+
+        def fake_request(_url, params, timeout=30):
+            self.assertEqual(params["corp_code"], "00126380")
+            return {
+                "status": "000",
+                "message": "정상",
+                "list": [
+                    {
+                        "corp_name": "삼성전자",
+                        "report_nm": "분기보고서 (2026.03)",
+                        "rcept_no": "20260515000001",
+                        "rcept_dt": "20260515",
+                    },
+                    {
+                        "corp_name": "삼성전자",
+                        "report_nm": "사업보고서 (2025.12)",
+                        "rcept_no": "20260320000001",
+                        "rcept_dt": "20260320",
+                    },
+                    {
+                        "corp_name": "삼성전자",
+                        "report_nm": "주요사항보고서",
+                        "rcept_no": "20260401000001",
+                        "rcept_dt": "20260401",
+                    },
+                ],
+            }
+
+        try:
+            server.os.environ["DART_API_KEY"] = "test-key"
+            dart_module.dart_json_request = fake_request
+            reports, issues, metadata = server.fetch_dart_available_reports({"corp_code": "00126380", "from_year": "2026", "to_year": "2026"})
+        finally:
+            dart_module.dart_json_request = original_request
+            if original_key is None:
+                server.os.environ.pop("DART_API_KEY", None)
+            else:
+                server.os.environ["DART_API_KEY"] = original_key
+
+        self.assertEqual(issues, [])
+        self.assertEqual(metadata["corp_code"], "00126380")
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(reports[0]["bsns_year"], "2026")
+        self.assertEqual(reports[0]["reprt_code"], "11013")
+        self.assertEqual(reports[1]["bsns_year"], "2025")
+        self.assertEqual(reports[1]["reprt_code"], "11011")
 
 
 if __name__ == "__main__":

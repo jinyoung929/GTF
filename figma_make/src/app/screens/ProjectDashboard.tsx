@@ -3,6 +3,7 @@ import ChevronRight from "lucide-react/dist/esm/icons/chevron-right.js";
 import FileCheck from "lucide-react/dist/esm/icons/file-check.js";
 import LogOut from "lucide-react/dist/esm/icons/log-out.js";
 import Plus from "lucide-react/dist/esm/icons/plus.js";
+import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
 import X from "lucide-react/dist/esm/icons/x.js";
 
 import { classNames } from "../format";
@@ -14,6 +15,7 @@ export function ProjectDashboard({
   user,
   onOpen,
   onCreate,
+  onDelete,
   onLogout,
   loading,
 }: {
@@ -21,16 +23,29 @@ export function ProjectDashboard({
   user: UserInfo;
   onOpen: (project: Project) => void;
   onCreate: (payload: { company_name: string; period: string }) => void;
+  onDelete: (project: Project) => Promise<void>;
   onLogout: () => void;
   loading: boolean;
 }) {
   const [showModal, setShowModal] = useState(false);
+  const [deletingId, setDeletingId] = useState("");
   const [company, setCompany] = useState("샘플테크 주식회사");
   const [period, setPeriod] = useState("2026");
 
   function submitCreate() {
     onCreate({ company_name: company, period });
     setShowModal(false);
+  }
+
+  async function submitDelete(project: Project) {
+    const confirmed = window.confirm(`${project.company_name} 프로젝트를 삭제할까요?\n업로드, 추출 결과, 변환 초안, 감사 로그가 함께 삭제됩니다.`);
+    if (!confirmed) return;
+    setDeletingId(project.id);
+    try {
+      await onDelete(project);
+    } finally {
+      setDeletingId("");
+    }
   }
 
   const reviewCount = projects.filter((project) => ["draft_generated", "mapped", "changes_requested"].includes(project.status)).length;
@@ -105,9 +120,20 @@ export function ProjectDashboard({
                   <td className="px-4 py-3"><StatusBadge status={project.status} /></td>
                   <td className="px-4 py-3 font-mono text-xs text-[#677089]">{project.updated_at?.slice(0, 10)}</td>
                   <td className="px-4 py-3">
-                    <button onClick={() => onOpen(project)} className="flex items-center gap-1 px-2.5 py-1 text-xs font-bold text-[#1740BE] border border-[#1740BE]/30 bg-blue-50 hover:bg-[#1740BE] hover:text-white">
-                      열기 <ChevronRight className="w-3 h-3" />
-                    </button>
+                    <div className="flex items-center justify-end gap-2">
+                      <button onClick={() => onOpen(project)} className="flex items-center gap-1 px-2.5 py-1 text-xs font-bold text-[#1740BE] border border-[#1740BE]/30 bg-blue-50 hover:bg-[#1740BE] hover:text-white">
+                        열기 <ChevronRight className="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={user.is_read_only || deletingId === project.id}
+                        onClick={() => submitDelete(project)}
+                        title="프로젝트 삭제"
+                        className="p-1.5 text-red-700 border border-red-200 bg-red-50 hover:bg-red-600 hover:text-white disabled:text-[#8A96A8] disabled:bg-[#EEF0F5] disabled:border-[#D0D5E0]"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

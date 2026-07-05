@@ -37,6 +37,7 @@ from gtf_app.dart import (
     dart_raw_rows_from_upload,
     dart_raw_statement_rows,
     dart_statement_rows,
+    fetch_dart_available_reports,
     fetch_dart_statement_rows,
     normalize_dart_amount,
 )
@@ -1324,6 +1325,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_extract_upload(*route.args)
         elif route.name == "dart.import":
             self.handle_dart_import(*route.args)
+        elif route.name == "dart.reports":
+            self.handle_dart_reports(*route.args)
         elif route.name == "extractions.accept":
             self.handle_accept_extraction(*route.args)
         elif route.name == "statements.add":
@@ -1346,6 +1349,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.respond_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         elif not self.require_write_access(route.name):
             return
+        elif route.name == "projects.delete":
+            self.handle_delete_project(*route.args)
         elif route.name == "uploads.delete":
             self.handle_delete_upload(*route.args)
         else:
@@ -1720,6 +1725,40 @@ class AppHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def handle_delete_project(self, project_id: str) -> None:
+        user = self.current_user()
+        if not user:
+            self.respond_json({"error": "로그인이 필요합니다."}, HTTPStatus.UNAUTHORIZED)
+            return
+        with connect() as conn:
+            project = conn.execute(
+                "SELECT * FROM projects WHERE id = ? AND owner_user_id = ?",
+                (project_id, user["id"]),
+            ).fetchone()
+            if not project:
+                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
+                return
+            uploads = [
+                row_to_dict(row)
+                for row in conn.execute("SELECT stored_name FROM uploads WHERE project_id = ?", (project_id,))
+            ]
+            conn.execute("DELETE FROM extractions WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM uploads WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM statements WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM conversions WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM reviews WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM audit_logs WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM projects WHERE id = ? AND owner_user_id = ?", (project_id, user["id"]))
+        for upload in uploads:
+            stored_name = str(upload.get("stored_name") or "")
+            if not stored_name:
+                continue
+            try:
+                (UPLOAD_DIR / stored_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.respond_json({"deleted": True, "project_id": project_id})
+
     def handle_get_uploads(self, project_id: str) -> None:
         with connect() as conn:
             rows = conn.execute(
@@ -1987,6 +2026,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 },
             )
         self.respond_json({**extraction, "upload": upload_public_dict(upload)}, HTTPStatus.CREATED if rows else HTTPStatus.BAD_REQUEST)
+
+    def handle_dart_reports(self, project_id: str) -> None:
+        payload = self.read_json()
+        with connect() as conn:
+            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if not project:
+                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
+                return
+
+        reports, issues, metadata = fetch_dart_available_reports(payload)
+        self.respond_json({"reports": reports, "issues": issues, "metadata": metadata})
 
     def handle_accept_extraction(self, project_id: str, extraction_id: str) -> None:
         with connect() as conn:

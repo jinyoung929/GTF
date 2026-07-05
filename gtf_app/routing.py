@@ -67,6 +67,8 @@ def resolve_post(path: str) -> RouteMatch | None:
         return RouteMatch("uploads.extract", (parts[3], parts[5]))
     if re.match(r"^/api/projects/[^/]+/dart/import$", path):
         return RouteMatch("dart.import", (path.split("/")[-3],))
+    if re.match(r"^/api/projects/[^/]+/dart/reports$", path):
+        return RouteMatch("dart.reports", (path.split("/")[-3],))
     if re.match(r"^/api/projects/[^/]+/extractions/[^/]+/accept$", path):
         parts = path.split("/")
         return RouteMatch("extractions.accept", (parts[-4], parts[-2]))
@@ -82,6 +84,8 @@ def resolve_post(path: str) -> RouteMatch | None:
 
 
 def resolve_delete(path: str) -> RouteMatch | None:
+    if re.match(r"^/api/projects/[^/]+$", path):
+        return RouteMatch("projects.delete", (path.split("/")[-1],))
     if re.match(r"^/api/projects/[^/]+/uploads/[^/]+$", path):
         parts = path.split("/")
         return RouteMatch("uploads.delete", (parts[3], parts[5]))

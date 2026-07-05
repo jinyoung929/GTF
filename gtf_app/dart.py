@@ -6,6 +6,7 @@ import os
 import re
 import ssl
 import zipfile
+from datetime import date
 import xml.etree.ElementTree as ET
 from urllib import error as url_error
 from urllib import request as url_request
@@ -16,6 +17,14 @@ from gtf_app.domain import normalize_account_name, parse_amount
 
 DART_API_ENDPOINT = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
 DART_CORP_CODE_ENDPOINT = "https://opendart.fss.or.kr/api/corpCode.xml"
+DART_DISCLOSURE_LIST_ENDPOINT = "https://opendart.fss.or.kr/api/list.json"
+
+REPORT_LABELS = {
+    "11013": "1분기보고서",
+    "11012": "반기보고서",
+    "11014": "3분기보고서",
+    "11011": "사업보고서",
+}
 
 
 def dart_report_code(value: str) -> str:
@@ -38,6 +47,34 @@ def dart_report_code(value: str) -> str:
     if text in {"11013", "11012", "11014", "11011"}:
         return text
     return aliases.get(text, "11011")
+
+
+def dart_report_code_from_name(report_name: str) -> str:
+    compact = re.sub(r"\s+", "", str(report_name or ""))
+    period_match = re.search(r"\((\d{4})[./-]?(\d{2})\)", str(report_name or ""))
+    period_month = period_match.group(2) if period_match else ""
+    if "1분기" in compact:
+        return "11013"
+    if "반기" in compact:
+        return "11012"
+    if "3분기" in compact:
+        return "11014"
+    if "분기보고서" in compact:
+        return "11013" if period_month == "03" else "11014"
+    if "사업보고서" in compact:
+        return "11011"
+    return ""
+
+
+def dart_business_year_from_report(report_name: str, receipt_date: str) -> str:
+    text = str(report_name or "")
+    match = re.search(r"\((\d{4})[./-]?\d{0,2}\)", text)
+    if match:
+        return match.group(1)
+    receipt_year = str(receipt_date or "")[:4]
+    if re.fullmatch(r"\d{4}", receipt_year):
+        return str(int(receipt_year) - 1) if "사업보고서" in text else receipt_year
+    return ""
 
 
 def dart_fs_div(value: str) -> str:
@@ -292,6 +329,85 @@ def lookup_dart_corp_code(api_key: str, company_name: str = "", stock_code: str 
         if normalized_name and normalized_name in re.sub(r"\s+", "", company["corp_name"]).lower():
             return company["corp_code"], []
     return "", ["회사명 또는 종목코드에 해당하는 DART 고유번호를 찾지 못했습니다."]
+
+
+def fetch_dart_available_reports(payload: dict) -> tuple[list[dict], list[str], dict]:
+    api_key = os.environ.get("DART_API_KEY", "").strip()
+    if not api_key:
+        return [], ["DART_API_KEY가 서버 환경변수에 설정되지 않았습니다."], {"api_key_ready": False}
+
+    corp_code = str(payload.get("corp_code") or "").strip()
+    company_name = str(payload.get("company_name") or "").strip()
+    stock_code = str(payload.get("stock_code") or "").strip()
+    lookup_issues: list[str] = []
+    if not corp_code:
+        corp_code, lookup_issues = lookup_dart_corp_code(api_key, company_name=company_name, stock_code=stock_code)
+    if not corp_code:
+        return [], lookup_issues or ["DART 고유번호 corp_code가 필요합니다."], {"api_key_ready": True}
+
+    from_year = str(payload.get("from_year") or payload.get("bgn_year") or "")
+    to_year = str(payload.get("to_year") or payload.get("end_year") or "")
+    current_year = date.today().year
+    if not re.fullmatch(r"\d{4}", from_year):
+        from_year = str(current_year - 2)
+    if not re.fullmatch(r"\d{4}", to_year):
+        to_year = str(current_year)
+
+    params = {
+        "crtfc_key": api_key,
+        "corp_code": corp_code,
+        "bgn_de": f"{from_year}0101",
+        "end_de": f"{to_year}1231",
+        "page_no": "1",
+        "page_count": "100",
+    }
+    try:
+        response_payload = dart_json_request(DART_DISCLOSURE_LIST_ENDPOINT, params)
+    except url_error.HTTPError as exc:
+        message = exc.read().decode("utf-8", errors="replace")[:300]
+        return [], [f"DART 보고서 목록 조회 실패: HTTP {exc.code}", message], {"api_key_ready": True, "corp_code": corp_code}
+    except (url_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return [], [f"DART 보고서 목록 조회 실패: {exc}"], {"api_key_ready": True, "corp_code": corp_code}
+
+    status = str(response_payload.get("status") or "")
+    message = str(response_payload.get("message") or "").strip()
+    if status and status != "000":
+        return [], [f"DART API 오류 {status}: {message or '보고서 목록을 찾지 못했습니다.'}"], {"api_key_ready": True, "corp_code": corp_code}
+
+    reports: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in response_payload.get("list") or []:
+        report_name = str(item.get("report_nm") or "").strip()
+        report_code = dart_report_code_from_name(report_name)
+        if not report_code:
+            continue
+        receipt_date = str(item.get("rcept_dt") or "").strip()
+        business_year = dart_business_year_from_report(report_name, receipt_date)
+        if not business_year:
+            continue
+        key = (business_year, report_code)
+        if key in seen:
+            continue
+        seen.add(key)
+        reports.append(
+            {
+                "corp_code": corp_code,
+                "corp_name": item.get("corp_name") or company_name,
+                "stock_code": stock_code,
+                "bsns_year": business_year,
+                "reprt_code": report_code,
+                "reprt_name": REPORT_LABELS[report_code],
+                "report_name": report_name,
+                "receipt_no": item.get("rcept_no") or "",
+                "receipt_date": receipt_date,
+            }
+        )
+
+    reports.sort(key=lambda report: (report["bsns_year"], report["reprt_code"], report["receipt_date"]), reverse=True)
+    issues = [*lookup_issues]
+    if not reports:
+        issues.append("조회 가능한 사업보고서/분기보고서/반기보고서를 찾지 못했습니다.")
+    return reports, issues, {"api_key_ready": True, "corp_code": corp_code, "from_year": from_year, "to_year": to_year}
 
 
 def fetch_dart_statement_rows(payload: dict) -> tuple[list[dict], list[str], dict]:
