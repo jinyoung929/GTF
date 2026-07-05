@@ -35,7 +35,10 @@ class ApiAuthTests(unittest.TestCase):
         self.old_db_path = server.DB_PATH
         self.old_data_dir = server.DATA_DIR
         self.old_upload_dir = server.UPLOAD_DIR
-        self.old_env = {key: os.environ.get(key) for key in ("ADMIN_EMAIL", "ADMIN_PASSWORD", "ADMIN_READ_ONLY")}
+        self.old_env = {
+            key: os.environ.get(key)
+            for key in ("ADMIN_EMAIL", "ADMIN_PASSWORD", "ADMIN_READ_ONLY", "DEMO_EMAIL", "DEMO_PASSWORD", "DEMO_LOGIN_ENABLED")
+        }
         server.DATA_DIR = Path(self.tmpdir.name)
         server.UPLOAD_DIR = server.DATA_DIR / "uploads"
         server.DB_PATH = server.DATA_DIR / "gtf.sqlite3"
@@ -64,6 +67,18 @@ class ApiAuthTests(unittest.TestCase):
         self.assertEqual(handler.responses[-1]["status"], HTTPStatus.OK)
         body = handler.responses[-1]["payload"]
         self.assertTrue(body["authenticated"])
+        self.assertEqual(body["user"]["email"], "demo@gtf.local")
+        self.assertTrue(body["user"]["is_read_only"])
+        self.assertIn("Set-Cookie", handler.responses[-1]["headers"])
+
+    def test_demo_login_returns_read_only_user_without_password_payload(self):
+        handler = HandlerHarness(payload={})
+        handler.handle_demo_login()
+
+        self.assertEqual(handler.responses[-1]["status"], HTTPStatus.OK)
+        body = handler.responses[-1]["payload"]
+        self.assertTrue(body["authenticated"])
+        self.assertTrue(body["demo"])
         self.assertEqual(body["user"]["email"], "demo@gtf.local")
         self.assertTrue(body["user"]["is_read_only"])
         self.assertIn("Set-Cookie", handler.responses[-1]["headers"])

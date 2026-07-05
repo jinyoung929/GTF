@@ -72,6 +72,9 @@ OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
 SESSION_COOKIE = "gtf_session"
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
 ADMIN_USER_ID = "admin"
+DEMO_USER_ID = "demo"
+DEFAULT_DEMO_EMAIL = "demo@gtf.local"
+DEFAULT_DEMO_PASSWORD = "change-this-demo-password"
 INDEX_HTML = """<!doctype html>
 <html lang="ko">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>GTF</title></head>
@@ -303,6 +306,34 @@ def ensure_admin_user(conn) -> None:
         "INSERT INTO app_users (id, email, password_hash, is_read_only, created_at) VALUES (?, ?, ?, ?, ?)",
         (ADMIN_USER_ID, config["email"], password_hash, read_only, now),
     )
+
+
+def demo_config() -> dict:
+    enabled_env = os.environ.get("DEMO_LOGIN_ENABLED") or os.environ.get("GTF_DEMO_LOGIN_ENABLED") or "true"
+    enabled = enabled_env.strip().lower() not in {"0", "false", "no", "off"}
+    email = normalize_email(os.environ.get("DEMO_EMAIL") or os.environ.get("GTF_DEMO_EMAIL") or DEFAULT_DEMO_EMAIL)
+    password = os.environ.get("DEMO_PASSWORD") or os.environ.get("GTF_DEMO_PASSWORD") or DEFAULT_DEMO_PASSWORD
+    return {"enabled": enabled, "email": email, "password": password}
+
+
+def ensure_demo_user(conn) -> dict | None:
+    config = demo_config()
+    if not config["enabled"] or not config["email"]:
+        return None
+    now = utc_now()
+    password_hash = hash_password(config["password"])
+    row = conn.execute("SELECT * FROM app_users WHERE email = ?", (config["email"],)).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE app_users SET password_hash = ?, is_read_only = ? WHERE id = ?",
+            (password_hash, True, row["id"]),
+        )
+        return row_to_dict(conn.execute("SELECT * FROM app_users WHERE id = ?", (row["id"],)).fetchone())
+    conn.execute(
+        "INSERT INTO app_users (id, email, password_hash, is_read_only, created_at) VALUES (?, ?, ?, ?, ?)",
+        (DEMO_USER_ID, config["email"], password_hash, True, now),
+    )
+    return row_to_dict(conn.execute("SELECT * FROM app_users WHERE id = ?", (DEMO_USER_ID,)).fetchone())
 
 
 def seed_reference_data(conn: sqlite3.Connection) -> None:
@@ -1317,6 +1348,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_create_project()
         elif route.name == "auth.login":
             self.handle_login()
+        elif route.name == "auth.demo":
+            self.handle_demo_login()
         elif route.name == "auth.logout":
             self.handle_logout()
         elif route.name == "uploads.create":
@@ -1377,7 +1410,7 @@ class AppHandler(BaseHTTPRequestHandler):
         return False
 
     def require_write_access(self, route_name: str) -> bool:
-        if route_name in {"auth.login", "auth.logout"}:
+        if route_name in {"auth.login", "auth.demo", "auth.logout"}:
             return True
         user = self.current_user()
         if user and user.get("is_read_only"):
@@ -1585,6 +1618,19 @@ class AppHandler(BaseHTTPRequestHandler):
             token = self.create_session(conn, user["id"])
         self.respond_json(
             {"authenticated": True, "user": user_public_dict(user)},
+            headers={"Set-Cookie": self.session_cookie_header(token)},
+        )
+
+    def handle_demo_login(self) -> None:
+        with connect() as conn:
+            ensure_admin_user(conn)
+            user = ensure_demo_user(conn)
+            if not user:
+                self.respond_json({"error": "데모 로그인이 비활성화되어 있습니다."}, HTTPStatus.FORBIDDEN)
+                return
+            token = self.create_session(conn, user["id"])
+        self.respond_json(
+            {"authenticated": True, "user": user_public_dict(user), "demo": True},
             headers={"Set-Cookie": self.session_cookie_header(token)},
         )
 

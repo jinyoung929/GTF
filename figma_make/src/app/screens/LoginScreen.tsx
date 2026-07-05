@@ -7,8 +7,8 @@ import type { UserInfo } from "../types";
 import { SectionLabel } from "../ui";
 
 export function LoginScreen({ onLoggedIn }: { onLoggedIn: (user: UserInfo) => void }) {
-  const [email, setEmail] = useState("demo@gtf.local");
-  const [password, setPassword] = useState("change-this-demo-password");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -24,6 +24,22 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (user: UserInfo) => vo
       onLoggedIn(result.user);
     } catch (err) {
       setError(err instanceof Error ? err.message : "로그인 실패");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function demoLogin() {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await api<{ authenticated: boolean; user: UserInfo; demo: boolean }>("/api/auth/demo", {
+        method: "POST",
+        body: "{}",
+      });
+      onLoggedIn(result.user);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "데모 로그인 실패");
     } finally {
       setLoading(false);
     }
@@ -58,6 +74,14 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (user: UserInfo) => vo
             {error && <div className="text-xs font-semibold text-red-700 bg-red-50 border border-red-200 px-3 py-2">{error}</div>}
             <button disabled={loading} className="w-full py-2.5 bg-[#1740BE] hover:bg-[#1234A8] disabled:opacity-60 text-white text-sm font-bold transition-colors">
               {loading ? "인증 중" : "로그인"}
+            </button>
+            <button
+              type="button"
+              disabled={loading}
+              onClick={demoLogin}
+              className="w-full py-2.5 bg-white hover:bg-[#F5F7FA] disabled:opacity-60 text-[#1740BE] text-sm font-bold border border-[#1740BE]/40 transition-colors"
+            >
+              데모로 보기
             </button>
           </div>
           <div className="px-6 py-3.5 bg-[#F5F7FA] border-t border-[#D0D5E0] text-xs text-[#677089]">

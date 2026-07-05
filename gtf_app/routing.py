@@ -12,6 +12,7 @@ PUBLIC_PATHS = {
     "/api/access-config",
     "/api/auth/session",
     "/api/auth/login",
+    "/api/auth/demo",
     "/api/auth/logout",
 }
 
@@ -56,6 +57,7 @@ def resolve_post(path: str) -> RouteMatch | None:
     exact = {
         "/api/projects": "projects.create",
         "/api/auth/login": "auth.login",
+        "/api/auth/demo": "auth.demo",
         "/api/auth/logout": "auth.logout",
     }
     if path in exact:
