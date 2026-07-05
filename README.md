@@ -6,7 +6,11 @@ K-GAAP 재무제표 데이터를 IFRS 검토 초안, 조정분개 후보, 판단
 
 이 서비스는 회계처리를 자동 확정하는 시스템이 아닙니다. 리스, 개발비, 수익인식, 금융상품, 충당부채처럼 판단이 필요한 항목을 식별하고 변환 초안을 제시하며, 최종 회계정책 판단과 승인은 회사 담당자 또는 회계 전문가가 수행하는 구조입니다.
 
-<img width="1440" height="900" alt="스크린샷 2026-07-05 오후 9 57 55" src="https://github.com/user-attachments/assets/755b71c2-34d6-4cdb-bff4-e2f5533139a3" />
+<img width="1415" height="806" alt="스크린샷 2026-07-05 오후 9 41 56" src="https://github.com/user-attachments/assets/c5dae643-b72d-49c6-bb43-41689b34701c" />
+
+<img width="1409" height="804" alt="스크린샷 2026-07-05 오후 9 49 41" src="https://github.com/user-attachments/assets/141d656d-486c-427f-8a0e-6b142d3fc2cf" />
+
+<img width="1439" height="796" alt="스크린샷 2026-07-05 오후 9 50 36" src="https://github.com/user-attachments/assets/c2aee03e-2e13-438b-af86-9c79fdcb1a0c" />
 
 <img width="1439" height="703" alt="스크린샷 2026-07-05 오후 9 58 20" src="https://github.com/user-attachments/assets/bd4e47d7-7b57-41b7-83ee-6b921c6f13f6" />
 
