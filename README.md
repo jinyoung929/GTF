@@ -6,15 +6,16 @@ K-GAAP 재무제표 데이터를 IFRS 검토 초안, 조정분개 후보, 판단
 
 이 서비스는 회계처리를 자동 확정하는 시스템이 아닙니다. 리스, 개발비, 수익인식, 금융상품, 충당부채처럼 판단이 필요한 항목을 식별하고 변환 초안을 제시하며, 최종 회계정책 판단과 승인은 회사 담당자 또는 회계 전문가가 수행하는 구조입니다.
 
-<img width="1440" height="817" alt="스크린샷 2026-07-05 오후 9 59 01" src="https://github.com/user-attachments/assets/66ed5ad8-1a25-4101-8603-9bf2db2a72a4" />
-
-<img width="1440" height="813" alt="스크린샷 2026-07-05 오후 9 58 50" src="https://github.com/user-attachments/assets/696ee6ba-6acb-4391-8bb2-89f02ac649c4" />
-
-<img width="1440" height="900" alt="스크린샷 2026-07-05 오후 9 58 42" src="https://github.com/user-attachments/assets/840d541d-d288-4813-8163-0185fcba44d5" />
+<img width="1440" height="900" alt="스크린샷 2026-07-05 오후 9 57 55" src="https://github.com/user-attachments/assets/755b71c2-34d6-4cdb-bff4-e2f5533139a3" />
 
 <img width="1439" height="703" alt="스크린샷 2026-07-05 오후 9 58 20" src="https://github.com/user-attachments/assets/bd4e47d7-7b57-41b7-83ee-6b921c6f13f6" />
 
-<img width="1440" height="900" alt="스크린샷 2026-07-05 오후 9 57 55" src="https://github.com/user-attachments/assets/755b71c2-34d6-4cdb-bff4-e2f5533139a3" />
+<img width="1440" height="900" alt="스크린샷 2026-07-05 오후 9 58 42" src="https://github.com/user-attachments/assets/840d541d-d288-4813-8163-0185fcba44d5" />
+
+<img width="1440" height="813" alt="스크린샷 2026-07-05 오후 9 58 50" src="https://github.com/user-attachments/assets/696ee6ba-6acb-4391-8bb2-89f02ac649c4" />
+
+<img width="1440" height="817" alt="스크린샷 2026-07-05 오후 9 59 01" src="https://github.com/user-attachments/assets/66ed5ad8-1a25-4101-8603-9bf2db2a72a4" />
+
 
 
 ## 프로젝트 배경과 기여 범위
