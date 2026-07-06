@@ -162,3 +162,15 @@ alter table public.standards_references enable row level security;
 
 -- The current server should use the Supabase service role key from backend only.
 -- Public client access policies should be added later when authentication is designed.
+
+create table if not exists public.standards_paragraphs (
+  id text primary key,
+  standard_set text not null,
+  reference_code text not null,
+  paragraph_label text not null,
+  account_key text not null,
+  title text not null,
+  content text not null,
+  keywords text not null
+);
+alter table public.standards_paragraphs enable row level security;

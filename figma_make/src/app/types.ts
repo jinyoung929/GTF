@@ -40,6 +40,12 @@ export type SourceRow = {
   statement_type?: string;
   currency?: string;
   dart_account_id?: string;
+  ai_suggestion?: {
+    account_key: string;
+    label: string;
+    confidence: string;
+    rationale: string;
+  };
 };
 
 export type Statement = {
@@ -74,9 +80,23 @@ export type ConversionEntry = {
   statement_line_item?: string;
 };
 
+export type StandardsParagraph = {
+  standard_set: "K-GAAP" | "K-IFRS";
+  reference_code: string;
+  paragraph_label: string;
+  title: string;
+  content: string;
+};
+
 export type Conversion = {
   entries: ConversionEntry[];
-  judgment_items: Array<{ statement_id: string; account: string; checklist_response: Record<string, unknown>; basis: string }>;
+  judgment_items: Array<{
+    statement_id: string;
+    account: string;
+    checklist_response: Record<string, unknown>;
+    basis: string;
+    standards_paragraphs?: StandardsParagraph[];
+  }>;
   draft_notes: Array<{ account: string; draft_note: string }>;
   ai_assistance?: { status: string; overall_note?: string; items?: unknown[] };
   review_status: string;

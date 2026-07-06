@@ -178,3 +178,15 @@ create index if not exists idx_audit_logs_project_id_created_at on public.audit_
 create index if not exists idx_kgaap_accounts_name on public.kgaap_accounts(kgaap_name);
 create index if not exists idx_mapping_rules_pair on public.mapping_rules(source_standard, target_standard, account_key);
 create index if not exists idx_financial_statement_templates_account on public.financial_statement_templates(standard_set, account_key);
+
+create table if not exists public.standards_paragraphs (
+  id text primary key,
+  standard_set text not null,
+  reference_code text not null,
+  paragraph_label text not null,
+  account_key text not null,
+  title text not null,
+  content text not null,
+  keywords text not null
+);
+create index if not exists idx_standards_paragraphs_account on public.standards_paragraphs(account_key, standard_set);

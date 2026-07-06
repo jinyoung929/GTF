@@ -173,3 +173,14 @@ CREATE TABLE IF NOT EXISTS financial_statement_templates (
     active INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY(account_key) REFERENCES standard_accounts(account_key)
 );
+
+CREATE TABLE IF NOT EXISTS standards_paragraphs (
+    id TEXT PRIMARY KEY,
+    standard_set TEXT NOT NULL,
+    reference_code TEXT NOT NULL,
+    paragraph_label TEXT NOT NULL,
+    account_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    keywords TEXT NOT NULL
+);

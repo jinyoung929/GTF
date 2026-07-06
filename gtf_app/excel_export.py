@@ -100,6 +100,7 @@ def review_workbook_bytes(project: dict, extraction_rows: list[dict], statements
     entries = conversion.get("entries") or []
     notes = conversion.get("draft_notes") or []
     ai_assistance = conversion.get("ai_assistance") or {}
+    judgment_items = conversion.get("judgment_items") or []
     sheets = [
         (
             "01_원본_DART",
@@ -165,6 +166,15 @@ def review_workbook_bytes(project: dict, extraction_rows: list[dict], statements
             [
                 ["구분", "계정", "근거/메모"],
                 *[["주석 초안", note.get("account", ""), localize_export_text(note.get("draft_note"))] for note in notes],
+                *[
+                    [
+                        f"기준서 문단 ({para.get('standard_set', '')})",
+                        item.get("account", ""),
+                        f"{para.get('reference_code', '')} {para.get('paragraph_label', '')}: {para.get('content', '')}",
+                    ]
+                    for item in judgment_items
+                    for para in item.get("standards_paragraphs", [])
+                ],
                 ["AI 판단 보조", "상태", label_backend(ai_assistance.get("status", "-"))],
                 ["AI 판단 보조", "전체 메모", localize_export_text(ai_assistance.get("overall_note", ""))],
             ],

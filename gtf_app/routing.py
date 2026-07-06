@@ -36,6 +36,7 @@ def resolve_get(path: str) -> RouteMatch | None:
         "/api/access-config": "access.config",
         "/api/auth/session": "auth.session",
         "/api/reference-data": "reference.data",
+        "/api/standards/search": "standards.search",
     }
     if path in exact:
         return RouteMatch(exact[path])

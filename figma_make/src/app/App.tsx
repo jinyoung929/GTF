@@ -341,6 +341,13 @@ function ImportScreen({
             </button>
           )}
         </div>
+        {latestExtraction && latestExtraction.issues?.length > 0 && (
+          <div className="border-b border-[#D0D5E0] border-l-4 border-l-amber-500 bg-amber-50 px-4 py-2 text-xs text-amber-800 font-medium space-y-0.5">
+            {latestExtraction.issues.map((issue, index) => (
+              <div key={index}>{issue}</div>
+            ))}
+          </div>
+        )}
         <RowsTable rows={previewRows} />
       </div>
 
@@ -404,7 +411,7 @@ function RowsTable({ rows }: { rows: SourceRow[] }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
-        <thead><tr className="bg-[#F5F7FA]"><HeaderCell>원 계정명</HeaderCell><HeaderCell right>금액</HeaderCell><HeaderCell>재무제표</HeaderCell><HeaderCell>통화</HeaderCell></tr></thead>
+        <thead><tr className="bg-[#F5F7FA]"><HeaderCell>원 계정명</HeaderCell><HeaderCell right>금액</HeaderCell><HeaderCell>재무제표</HeaderCell><HeaderCell>통화</HeaderCell><HeaderCell>AI 1차 분류 제안</HeaderCell></tr></thead>
         <tbody>
           {rows.map((row, index) => (
             <tr key={`${row.account_name}-${index}`} className="border-t border-[#EEF0F5]">
@@ -412,6 +419,15 @@ function RowsTable({ rows }: { rows: SourceRow[] }) {
               <td className="px-4 py-2.5 text-right font-mono">{fmtKRW(row.amount)}</td>
               <td className="px-4 py-2.5 text-[#677089]">{row.statement_type || "-"}</td>
               <td className="px-4 py-2.5 text-[#677089]">{row.currency || "KRW"}</td>
+              <td className="px-4 py-2.5">
+                {row.ai_suggestion ? (
+                  <span title={row.ai_suggestion.rationale} className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold bg-violet-50 text-violet-700 border border-violet-200">
+                    {row.ai_suggestion.label} 제안 · 반영 시 확정
+                  </span>
+                ) : (
+                  <span className="text-[#C8D0DC]">-</span>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -533,7 +549,7 @@ function ReviewScreen({
           )}
 
           {tab === "adjustments" && <AdjustmentTable entries={entries} />}
-          {tab === "notes" && <Notes notes={bundle.conversion?.draft_notes || []} ai={bundle.conversion?.ai_assistance} />}
+          {tab === "notes" && <Notes notes={bundle.conversion?.draft_notes || []} ai={bundle.conversion?.ai_assistance} judgmentItems={bundle.conversion?.judgment_items || []} />}
           {tab === "audit" && <AuditTable logs={[]} projectId={bundle.project.id} />}
           {tab === "export" && <ExportPanel onExport={onExport} ready={!!bundle.conversion} />}
         </div>
@@ -566,7 +582,8 @@ function AdjustmentTable({ entries }: { entries: ConversionEntry[] }) {
   );
 }
 
-function Notes({ notes, ai }: { notes: Conversion["draft_notes"]; ai?: Conversion["ai_assistance"] }) {
+function Notes({ notes, ai, judgmentItems }: { notes: Conversion["draft_notes"]; ai?: Conversion["ai_assistance"]; judgmentItems?: Conversion["judgment_items"] }) {
+  const itemsWithParagraphs = (judgmentItems || []).filter((item) => item.standards_paragraphs?.length);
   return (
     <div className="space-y-3">
       {notes.map((note) => (
@@ -575,12 +592,36 @@ function Notes({ notes, ai }: { notes: Conversion["draft_notes"]; ai?: Conversio
           <p className="p-4 text-sm text-[#677089] leading-relaxed">{note.draft_note}</p>
         </div>
       ))}
+      {itemsWithParagraphs.map((item) => (
+        <div key={`std-${item.statement_id}`} className="border border-[#D0D5E0]">
+          <div className="px-4 py-2.5 bg-[#F5F7FA] border-b border-[#D0D5E0] flex items-center justify-between">
+            <span className="text-xs font-bold">{item.account} · 기준서 문단 근거</span>
+            <span className="text-[11px] text-[#677089]">K-GAAP / K-IFRS 기준서 문단 검색 DB</span>
+          </div>
+          <div className="divide-y divide-[#EEF0F5]">
+            {(item.standards_paragraphs || []).map((paragraph, index) => (
+              <div key={index} className="px-4 py-2.5 flex gap-3 items-start">
+                <span className={classNames(
+                  "shrink-0 px-2 py-0.5 text-[11px] font-bold border",
+                  paragraph.standard_set === "K-IFRS" ? "bg-blue-50 text-blue-700 border-blue-200" : "bg-slate-100 text-slate-700 border-slate-300",
+                )}>
+                  {paragraph.standard_set}
+                </span>
+                <div className="text-xs leading-relaxed">
+                  <span className="font-bold text-[#0A1628]">{paragraph.reference_code} {paragraph.paragraph_label}</span>
+                  <span className="text-[#677089]"> — {paragraph.content}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
       {ai && (
         <div className="border border-[#D0D5E0] p-4 bg-blue-50 text-xs text-blue-800">
           AI 판단 보조 {ai.status} · {ai.overall_note || "사람 검토 필요"}
         </div>
       )}
-      {!notes.length && <div className="text-center py-10 text-xs text-[#677089]">주석 초안이 없습니다</div>}
+      {!notes.length && !itemsWithParagraphs.length && <div className="text-center py-10 text-xs text-[#677089]">주석 초안이 없습니다</div>}
     </div>
   );
 }

@@ -45,6 +45,7 @@ from gtf_app.domain import (
     CHECKLISTS,
     FINANCIAL_STATEMENT_TEMPLATES,
     STANDARD_ACCOUNTS,
+    STANDARDS_PARAGRAPHS,
     build_statement_record,
     conversion_adjustments_csv,
     conversion_basis_report,
@@ -228,6 +229,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_bytes bytea")
             ensure_auth_tables(conn)
             conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_read_only boolean NOT NULL DEFAULT false")
+            ensure_standards_paragraphs(conn)
             ensure_admin_user(conn)
         return
     with connect() as conn:
@@ -244,7 +246,73 @@ def init_db() -> None:
         if "is_test" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
         seed_reference_data(conn)
+        ensure_standards_paragraphs(conn)
         ensure_admin_user(conn)
+
+
+def ensure_standards_paragraphs(conn) -> None:
+    """K-GAAP/K-IFRS 기준서 문단 검색 테이블을 생성하고 시드한다 (SQLite/Postgres 공용)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS standards_paragraphs (
+            id TEXT PRIMARY KEY,
+            standard_set TEXT NOT NULL,
+            reference_code TEXT NOT NULL,
+            paragraph_label TEXT NOT NULL,
+            account_key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            keywords TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("DELETE FROM standards_paragraphs")
+    for para in STANDARDS_PARAGRAPHS:
+        conn.execute(
+            """
+            INSERT INTO standards_paragraphs (
+                id, standard_set, reference_code, paragraph_label, account_key, title, content, keywords
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                para["id"],
+                para["standard_set"],
+                para["reference_code"],
+                para["paragraph_label"],
+                para["account_key"],
+                para["title"],
+                para["content"],
+                para["keywords"],
+            ),
+        )
+
+
+def find_standards_paragraphs(conn, account_key: str | None = None, query: str | None = None, standard_set: str | None = None) -> list[dict]:
+    sql = (
+        "SELECT id, standard_set, reference_code, paragraph_label, account_key, title, content, keywords "
+        "FROM standards_paragraphs WHERE 1=1"
+    )
+    params: list = []
+    if account_key:
+        sql += " AND account_key = ?"
+        params.append(account_key)
+    if standard_set:
+        sql += " AND standard_set = ?"
+        params.append(standard_set)
+    if query:
+        like = f"%{query.strip()}%"
+        sql += " AND (title LIKE ? OR content LIKE ? OR keywords LIKE ? OR reference_code LIKE ?)"
+        params.extend([like, like, like, like])
+    sql += " ORDER BY account_key, standard_set, reference_code, paragraph_label"
+    return [row_to_dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
+
+
+def load_standards_paragraph_map(conn) -> dict:
+    grouped: dict[str, list[dict]] = {}
+    for row in find_standards_paragraphs(conn):
+        grouped.setdefault(row["account_key"], []).append(row)
+    return grouped
 
 
 def ensure_auth_tables(conn) -> None:
@@ -1086,6 +1154,162 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
     }
 
 
+def call_ai_classification(unmapped_accounts: list[str]) -> dict:
+    """키워드 매핑에 실패한 계정명에 대해 표준계정 후보를 제안받는 AI 1차 분류.
+
+    제안은 추출 결과에 후보로만 저장되며, 담당자가 추출 결과를 반영하는 시점에
+    확정된다. 분류를 자동 확정하지 않는다.
+    """
+    config = ai_config()
+    base = {"provider": "openai", "model": config["model"], "human_review_required": True}
+    if not unmapped_accounts:
+        return {**base, "status": "skipped", "suggestions": {}, "note": "표준코드 매핑에 실패한 계정이 없어 AI 1차 분류를 건너뛰었습니다."}
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return {
+            **base,
+            "status": "not_configured",
+            "suggestions": {},
+            "note": "OPENAI_API_KEY가 설정되지 않아 미분류 계정은 담당자가 직접 분류해야 합니다.",
+            "issues": ["OPENAI_API_KEY가 서버 환경변수에 설정되지 않았습니다."],
+        }
+
+    candidates = [
+        {"account_key": key, "label": account["label"], "ifrs": account["ifrs"], "rule": account["rule"]}
+        for key, account in STANDARD_ACCOUNTS.items()
+        if key != "other"
+    ]
+    prompt = {
+        "unmapped_accounts": unmapped_accounts,
+        "candidate_standard_accounts": candidates,
+        "instruction": "각 계정명을 후보 표준계정 중 가장 적합한 하나로 분류 제안하세요. 확신이 없으면 suggested_account_key를 'other'로 두세요.",
+    }
+    payload = {
+        "model": config["model"],
+        "max_output_tokens": 800,
+        "instructions": (
+            "너는 K-GAAP 재무제표 계정을 내부 표준계정으로 분류하는 회계 보조자다. "
+            "규칙 기반 매핑에 실패한 계정명에 대해 후보 표준계정 중 하나를 제안하고 근거를 한국어 한 문장으로 쓴다. "
+            "분류를 확정하지 말고 제안만 하며, 확신이 없으면 other를 반환한다. JSON만 반환한다."
+        ),
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "다음 미분류 계정을 분류 제안해 JSON만 반환하세요.\n" + json.dumps(prompt, ensure_ascii=False),
+                    }
+                ],
+            }
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "gtf_account_classification",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "account_name": {"type": "string"},
+                                    "suggested_account_key": {"type": "string"},
+                                    "confidence": {"type": "string"},
+                                    "rationale": {"type": "string"},
+                                },
+                                "required": ["account_name", "suggested_account_key", "confidence", "rationale"],
+                                "additionalProperties": False,
+                            },
+                        }
+                    },
+                    "required": ["items"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+        },
+    }
+    request = url_request.Request(
+        OPENAI_API_ENDPOINT,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with url_request.urlopen(request, timeout=45) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except url_error.HTTPError as exc:
+        message = exc.read().decode("utf-8", errors="replace")[:500]
+        return {
+            **base,
+            "status": "failed",
+            "suggestions": {},
+            "note": "AI 1차 분류 요청이 실패해 미분류 계정은 담당자가 직접 분류해야 합니다.",
+            "issues": [f"OpenAI 분류 요청 실패: HTTP {exc.code}", message],
+        }
+    except (url_error.URLError, TimeoutError) as exc:
+        return {
+            **base,
+            "status": "failed",
+            "suggestions": {},
+            "note": "AI 1차 분류 네트워크 오류가 발생했습니다.",
+            "issues": [f"OpenAI 분류 네트워크 오류: {exc}"],
+        }
+
+    text = openai_response_text(response_payload)
+    try:
+        parsed = extract_json_object(text) if text else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    items = parsed.get("items") if isinstance(parsed.get("items"), list) else []
+    suggestions = {}
+    for item in items:
+        name = str(item.get("account_name") or "").strip()
+        suggested_key = str(item.get("suggested_account_key") or "").strip()
+        if not name or suggested_key not in STANDARD_ACCOUNTS or suggested_key == "other":
+            continue
+        suggestions[name] = {
+            "account_key": suggested_key,
+            "label": STANDARD_ACCOUNTS[suggested_key]["label"],
+            "confidence": str(item.get("confidence") or "unknown"),
+            "rationale": str(item.get("rationale") or "").strip(),
+            "provider": "openai",
+            "model": config["model"],
+            "human_review_required": True,
+        }
+    return {
+        **base,
+        "status": "connected",
+        "suggestions": suggestions,
+        "note": f"미분류 계정 {len(unmapped_accounts)}건 중 {len(suggestions)}건에 AI 1차 분류 제안이 생성되었습니다. 반영 시 담당자 확정이 필요합니다.",
+    }
+
+
+def attach_ai_classification(rows: list[dict]) -> tuple[list[dict], dict]:
+    """추출 행 중 표준코드 매핑 실패(X9999) 계정에 AI 1차 분류 제안을 붙인다."""
+    unmapped = sorted(
+        {
+            str(row.get("account_name") or "").strip()
+            for row in rows
+            if str(row.get("account_name") or "").strip()
+            and normalize_account_name(str(row.get("account_name") or "")) == "other"
+        }
+    )
+    result = call_ai_classification(unmapped)
+    suggestions = result.get("suggestions") or {}
+    for row in rows:
+        suggestion = suggestions.get(str(row.get("account_name") or "").strip())
+        if suggestion:
+            row["ai_suggestion"] = suggestion
+    return rows, result
+
+
 def call_gemini_ocr(file_path: Path, mime_type: str, model: str) -> tuple[list[dict], list[str]]:
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
@@ -1322,6 +1546,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_auth_session()
         elif route.name == "reference.data":
             self.handle_reference_data()
+        elif route.name == "standards.search":
+            self.handle_standards_search()
         elif route.name == "projects.get":
             self.handle_get_project(*route.args)
         elif route.name == "uploads.list":
@@ -1652,6 +1878,7 @@ class AppHandler(BaseHTTPRequestHandler):
             ("mapping_rules", "변환 룰 DB"),
             ("checklist_items", "판단 체크리스트 DB"),
             ("standards_references", "기준서 참조 DB"),
+            ("standards_paragraphs", "K-GAAP/K-IFRS 기준서 문단 검색 DB"),
             ("financial_statement_templates", "재무제표 양식 DB"),
         ]
         with connect() as conn:
@@ -1682,6 +1909,30 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
             ]
         self.respond_json({"summary": summary, "accounts": accounts, "templates": templates})
+
+    def handle_standards_search(self) -> None:
+        params = parse_qs(urlparse(self.path).query)
+        query = (params.get("q") or [""])[0].strip()
+        account_key = (params.get("account_key") or [""])[0].strip()
+        standard_set = (params.get("standard_set") or [""])[0].strip()
+        if standard_set and standard_set not in {"K-GAAP", "K-IFRS"}:
+            self.respond_json({"error": "standard_set은 K-GAAP 또는 K-IFRS여야 합니다."}, HTTPStatus.BAD_REQUEST)
+            return
+        with connect() as conn:
+            paragraphs = find_standards_paragraphs(
+                conn,
+                account_key=account_key or None,
+                query=query or None,
+                standard_set=standard_set or None,
+            )
+        self.respond_json(
+            {
+                "count": len(paragraphs),
+                "standard_sets": ["K-GAAP", "K-IFRS"],
+                "paragraphs": paragraphs,
+                "note": "기준서 문단 요약 기준정보입니다. 최종 판단 시 기준서 원문을 확인하세요.",
+            }
+        )
 
     def handle_create_project(self) -> None:
         payload = self.read_json()
@@ -1932,6 +2183,9 @@ class AppHandler(BaseHTTPRequestHandler):
 
             config = ocr_config()
             rows, issues, provider = extract_rows_from_upload(row_to_dict(upload))
+            rows, ai_classification = attach_ai_classification(rows)
+            if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
+                issues = [*issues, ai_classification["note"]]
             status = "needs_review" if rows else "failed"
             extraction = {
                 "id": str(uuid.uuid4()),
@@ -1975,6 +2229,12 @@ class AppHandler(BaseHTTPRequestHandler):
                     "ocr_config": config,
                     "row_count": len(rows),
                     "issues": issues,
+                    "ai_classification": {
+                        "status": ai_classification.get("status"),
+                        "model": ai_classification.get("model"),
+                        "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
+                        "human_review_required": True,
+                    },
                 },
             )
         self.respond_json(extraction, HTTPStatus.CREATED)
@@ -1988,6 +2248,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
 
         rows, issues, metadata = fetch_dart_statement_rows(payload)
+        rows, ai_classification = attach_ai_classification(rows)
+        if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
+            issues = [*issues, ai_classification["note"]]
         raw_rows = metadata.pop("raw_rows", [])
         raw_payload = {
             "metadata": metadata,
@@ -2069,6 +2332,12 @@ class AppHandler(BaseHTTPRequestHandler):
                     "raw_row_count": len(raw_rows),
                     "issues": issues,
                     "metadata": metadata,
+                    "ai_classification": {
+                        "status": ai_classification.get("status"),
+                        "model": ai_classification.get("model"),
+                        "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
+                        "human_review_required": True,
+                    },
                 },
             )
         self.respond_json({**extraction, "upload": upload_public_dict(upload)}, HTTPStatus.CREATED if rows else HTTPStatus.BAD_REQUEST)
@@ -2085,6 +2354,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.respond_json({"reports": reports, "issues": issues, "metadata": metadata})
 
     def handle_accept_extraction(self, project_id: str, extraction_id: str) -> None:
+        acting_user = self.current_user()
         with connect() as conn:
             project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
             extraction = conn.execute(
@@ -2125,11 +2395,28 @@ class AppHandler(BaseHTTPRequestHandler):
                 ("accepted", extraction_id),
             )
             conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("mapped", utc_now(), project_id))
+            ai_confirmed = [
+                {
+                    "account_name": record["account_name"],
+                    "suggested_account": record["normalized_account"],
+                    "confidence": (record.get("ai_suggestion") or {}).get("confidence"),
+                    "rationale": (record.get("ai_suggestion") or {}).get("rationale"),
+                }
+                for record in records
+                if record.get("mapping_source") == "ai_suggested_human_accepted"
+            ]
             log_event(
                 conn,
                 project_id,
                 "extraction.accepted",
-                {"extraction_id": extraction_id, "statement_count": len(records)},
+                {
+                    "extraction_id": extraction_id,
+                    "statement_count": len(records),
+                    "ai_classified_count": len(ai_confirmed),
+                    "ai_classified_accounts": ai_confirmed,
+                    "ai_classification_note": "AI 1차 분류 제안을 담당자가 반영하며 확정했습니다." if ai_confirmed else None,
+                },
+                actor=(acting_user or {}).get("email") or "system",
             )
         self.respond_json({"statements": records, "extraction_id": extraction_id})
 
@@ -2193,8 +2480,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 for row in conn.execute("SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,))
             ]
             templates = load_statement_template_map(conn)
+            standards_map = load_standards_paragraph_map(conn)
             project = row_to_dict(project_row)
-            output = generate_conversion(project, statement_rows, responses, templates)
+            output = generate_conversion(project, statement_rows, responses, templates, standards_map)
             output["ai_assistance"] = call_ai_judgment(project, output["entries"], output["judgment_items"])
             conn.execute(
                 "INSERT INTO conversions (id, project_id, output_json, created_at) VALUES (?, ?, ?, ?)",

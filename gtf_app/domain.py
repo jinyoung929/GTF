@@ -209,6 +209,225 @@ CHECKLISTS = {
     ],
 }
 
+
+# K-GAAP(일반기업회계기준)과 K-IFRS 기준서 문단을 standard_set으로 분리해 보관하는
+# 검색용 기준정보. 서버 시작 시 standards_paragraphs 테이블에 시드되고,
+# 판단 필요 항목의 검토 근거로 함께 제시된다. 문단 내용은 기준서 원문의 요약이며
+# 최종 판단 시에는 기준서 원문을 확인해야 한다.
+STANDARDS_PARAGRAPHS = [
+    {
+        "id": "kifrs_1116_p22",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1116호 리스",
+        "paragraph_label": "문단 22",
+        "account_key": "lease",
+        "title": "사용권자산과 리스부채의 인식",
+        "content": "리스이용자는 리스개시일에 사용권자산과 리스부채를 인식한다.",
+        "keywords": "리스,사용권자산,리스부채,인식,리스개시일",
+    },
+    {
+        "id": "kifrs_1116_p26",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1116호 리스",
+        "paragraph_label": "문단 26",
+        "account_key": "lease",
+        "title": "리스부채의 최초 측정",
+        "content": "리스개시일에 리스부채는 그날 현재 지급되지 않은 리스료의 현재가치로 측정한다. 리스의 내재이자율을 쉽게 산정할 수 있으면 그 이자율로, 산정할 수 없으면 리스이용자의 증분차입이자율로 할인한다.",
+        "keywords": "리스부채,현재가치,할인율,내재이자율,증분차입이자율",
+    },
+    {
+        "id": "kifrs_1116_p18",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1116호 리스",
+        "paragraph_label": "문단 18",
+        "account_key": "lease",
+        "title": "리스기간의 산정",
+        "content": "리스기간은 리스의 해지불능기간에, 연장선택권을 행사할 것이 상당히 확실한 경우 그 대상 기간과 종료선택권을 행사하지 않을 것이 상당히 확실한 경우 그 대상 기간을 포함하여 산정한다.",
+        "keywords": "리스기간,연장선택권,종료선택권,해지불능기간",
+    },
+    {
+        "id": "kifrs_1038_p57",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1038호 무형자산",
+        "paragraph_label": "문단 57",
+        "account_key": "development",
+        "title": "개발활동 지출의 자산 인식 요건",
+        "content": "개발활동에서 발생한 무형자산은 기술적 실현가능성, 완성하여 사용하거나 판매하려는 의도와 능력, 미래경제적효익을 창출하는 방법, 개발을 완료하는 데 필요한 자원의 입수가능성, 관련 지출의 신뢰성 있는 측정을 모두 제시할 수 있는 경우에만 인식한다.",
+        "keywords": "개발비,무형자산,자산화,기술적 실현가능성,미래경제적효익",
+    },
+    {
+        "id": "kifrs_1038_p54",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1038호 무형자산",
+        "paragraph_label": "문단 54",
+        "account_key": "development",
+        "title": "연구단계 지출의 비용 처리",
+        "content": "연구(또는 내부 프로젝트의 연구단계)에 대한 지출은 무형자산으로 인식하지 않고 발생시점에 비용으로 인식한다.",
+        "keywords": "연구비,연구단계,비용,연구개발",
+    },
+    {
+        "id": "kifrs_1115_p31",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1115호 고객과의 계약에서 생기는 수익",
+        "paragraph_label": "문단 31",
+        "account_key": "revenue",
+        "title": "수행의무 이행 시 수익 인식",
+        "content": "기업이 고객에게 약속한 재화나 용역, 즉 자산을 이전하여 수행의무를 이행할 때 또는 이행하는 대로 수익을 인식한다. 자산은 고객이 그 자산을 통제할 때 이전된다.",
+        "keywords": "수익,수행의무,통제 이전,수익인식 시점",
+    },
+    {
+        "id": "kifrs_1115_p50",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1115호 고객과의 계약에서 생기는 수익",
+        "paragraph_label": "문단 50",
+        "account_key": "revenue",
+        "title": "변동대가의 추정",
+        "content": "계약에서 약속한 대가에 변동금액이 포함된 경우, 고객에게 약속한 재화나 용역을 이전하고 그 대가로 받을 권리를 갖게 될 금액을 추정한다.",
+        "keywords": "변동대가,대가 추정,리베이트,할인",
+    },
+    {
+        "id": "kifrs_1109_p411",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1109호 금융상품",
+        "paragraph_label": "문단 4.1.1",
+        "account_key": "financial_instrument",
+        "title": "금융자산의 분류 기준",
+        "content": "금융자산은 금융자산의 관리를 위한 사업모형과 금융자산의 계약상 현금흐름 특성에 근거하여 상각후원가, 기타포괄손익-공정가치, 당기손익-공정가치 측정 범주로 분류한다.",
+        "keywords": "금융자산,분류,사업모형,SPPI,계약상 현금흐름",
+    },
+    {
+        "id": "kifrs_1109_p5515",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1109호 금융상품",
+        "paragraph_label": "문단 5.5.15",
+        "account_key": "receivables",
+        "title": "매출채권 기대신용손실 간편법",
+        "content": "매출채권과 계약자산 등에 대해서는 전체기간 기대신용손실에 해당하는 금액으로 손실충당금을 측정하는 간편법을 적용할 수 있다.",
+        "keywords": "매출채권,기대신용손실,ECL,손실충당금,간편법",
+    },
+    {
+        "id": "kifrs_1037_p14",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1037호 충당부채, 우발부채 및 우발자산",
+        "paragraph_label": "문단 14",
+        "account_key": "provision",
+        "title": "충당부채의 인식 요건",
+        "content": "충당부채는 과거사건의 결과로 현재의무(법적의무 또는 의제의무)가 존재하고, 그 의무를 이행하기 위해 경제적효익이 있는 자원의 유출 가능성이 높으며, 의무 금액을 신뢰성 있게 추정할 수 있는 경우에 인식한다.",
+        "keywords": "충당부채,현재의무,자원 유출,신뢰성 있는 추정",
+    },
+    {
+        "id": "kifrs_1002_p9",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1002호 재고자산",
+        "paragraph_label": "문단 9",
+        "account_key": "inventory",
+        "title": "재고자산의 저가 측정",
+        "content": "재고자산은 취득원가와 순실현가능가치 중 낮은 금액으로 측정한다.",
+        "keywords": "재고자산,저가법,순실현가능가치,취득원가",
+    },
+    {
+        "id": "kifrs_1007_p6",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1007호 현금흐름표",
+        "paragraph_label": "문단 6",
+        "account_key": "cash",
+        "title": "현금성자산의 정의",
+        "content": "현금성자산은 유동성이 매우 높은 단기 투자자산으로서, 확정된 금액의 현금으로 전환이 용이하고 가치변동의 위험이 경미한 자산을 말한다.",
+        "keywords": "현금성자산,현금,단기투자,유동성",
+    },
+    {
+        "id": "kgaap_ch13_lease",
+        "standard_set": "K-GAAP",
+        "reference_code": "일반기업회계기준 제13장 리스",
+        "paragraph_label": "리스의 분류",
+        "account_key": "lease",
+        "title": "금융리스와 운용리스의 분류",
+        "content": "리스는 소유에 따른 위험과 보상의 대부분이 이전되는지에 따라 금융리스와 운용리스로 분류한다. 운용리스의 리스이용자는 리스료를 리스기간에 걸쳐 비용으로 인식하며 리스부채를 계상하지 않는다. K-IFRS 전환 시 사용권자산과 리스부채 계상 여부를 검토해야 한다.",
+        "keywords": "리스,운용리스,금융리스,비용 인식,부외",
+    },
+    {
+        "id": "kgaap_ch11_development",
+        "standard_set": "K-GAAP",
+        "reference_code": "일반기업회계기준 제11장 무형자산",
+        "paragraph_label": "개발비의 인식",
+        "account_key": "development",
+        "title": "개발단계 지출의 자산 인식",
+        "content": "개발단계에서 발생한 지출은 기술적 실현가능성, 사용·판매 의도와 능력, 미래경제적효익 창출 가능성, 신뢰성 있는 측정 등 자산 인식요건을 모두 충족하는 경우 개발비의 과목으로 무형자산으로 인식하고, 그 외에는 발생한 기간의 비용으로 처리한다.",
+        "keywords": "개발비,무형자산,자산화,경상개발비",
+    },
+    {
+        "id": "kgaap_ch16_revenue",
+        "standard_set": "K-GAAP",
+        "reference_code": "일반기업회계기준 제16장 수익",
+        "paragraph_label": "재화 판매 수익의 인식",
+        "account_key": "revenue",
+        "title": "위험과 보상 이전에 따른 수익 인식",
+        "content": "재화의 판매 수익은 재화 소유에 따른 유의적인 위험과 보상이 구매자에게 이전되고, 수익금액을 신뢰성 있게 측정할 수 있으며, 경제적 효익의 유입 가능성이 매우 높은 경우 등에 인식한다. K-IFRS 제1115호의 수행의무·통제 이전 모형과 접근 방식이 다르다.",
+        "keywords": "수익,위험과 보상,재화 판매,인도기준",
+    },
+    {
+        "id": "kgaap_ch6_securities",
+        "standard_set": "K-GAAP",
+        "reference_code": "일반기업회계기준 제6장 금융자산·금융부채",
+        "paragraph_label": "유가증권의 분류",
+        "account_key": "financial_instrument",
+        "title": "보유 목적에 따른 유가증권 분류",
+        "content": "유가증권은 취득 목적과 보유 의도에 따라 단기매매증권, 매도가능증권, 만기보유증권 등으로 분류한다. K-IFRS 제1109호의 사업모형·계약상 현금흐름 특성 기준과 분류 체계가 다르므로 전환 시 재분류를 검토해야 한다.",
+        "keywords": "유가증권,단기매매증권,매도가능증권,만기보유증권,분류",
+    },
+    {
+        "id": "kgaap_ch6_receivables",
+        "standard_set": "K-GAAP",
+        "reference_code": "일반기업회계기준 제6장 금융자산·금융부채",
+        "paragraph_label": "대손충당금",
+        "account_key": "receivables",
+        "title": "대손충당금의 설정",
+        "content": "매출채권 등 수취채권은 회수가 불확실한 금액을 합리적이고 객관적인 기준에 따라 산출한 대손추산액을 대손충당금으로 설정한다. 발생손실에 기초한 접근으로, K-IFRS 제1109호의 기대신용손실 모형과 차이가 있다.",
+        "keywords": "매출채권,대손충당금,대손추산액,발생손실",
+    },
+    {
+        "id": "kgaap_ch14_provision",
+        "standard_set": "K-GAAP",
+        "reference_code": "일반기업회계기준 제14장 충당부채",
+        "paragraph_label": "충당부채의 인식",
+        "account_key": "provision",
+        "title": "충당부채의 인식 요건",
+        "content": "충당부채는 과거사건의 결과로 현재의무가 존재하고, 그 의무를 이행하기 위해 자원이 유출될 가능성이 매우 높으며, 의무 금액을 신뢰성 있게 추정할 수 있을 때 인식한다.",
+        "keywords": "충당부채,현재의무,자원 유출,추정",
+    },
+    {
+        "id": "kgaap_ch7_inventory",
+        "standard_set": "K-GAAP",
+        "reference_code": "일반기업회계기준 제7장 재고자산",
+        "paragraph_label": "재고자산의 평가",
+        "account_key": "inventory",
+        "title": "저가법 평가",
+        "content": "재고자산은 취득원가로 측정하되, 시가가 취득원가보다 낮은 경우에는 시가를 장부금액으로 하는 저가법으로 평가한다.",
+        "keywords": "재고자산,저가법,시가,평가손실",
+    },
+    {
+        "id": "kgaap_ch2_cash",
+        "standard_set": "K-GAAP",
+        "reference_code": "일반기업회계기준 제2장 재무제표의 작성과 표시",
+        "paragraph_label": "현금및현금성자산",
+        "account_key": "cash",
+        "title": "현금및현금성자산의 범위",
+        "content": "현금및현금성자산은 통화 및 통화대용증권과 취득 당시 만기가 3개월 이내에 도래하는 유동성이 높은 금융상품 등을 포함한다.",
+        "keywords": "현금,현금성자산,통화대용증권,만기 3개월",
+    },
+]
+
+
+def standards_paragraphs_for_accounts(account_keys) -> dict:
+    """계정키별로 K-GAAP과 K-IFRS 문단을 함께 묶어 반환한다 (DB 미사용 폴백)."""
+    keys = set(account_keys)
+    grouped: dict[str, list[dict]] = {}
+    for para in STANDARDS_PARAGRAPHS:
+        if para["account_key"] in keys:
+            grouped.setdefault(para["account_key"], []).append(para)
+    return grouped
+
+
 def normalize_account_name(name: str) -> str:
     text = re.sub(r"\s+", " ", name.strip().lower())
     replacements = {
@@ -298,8 +517,22 @@ def looks_numeric(value) -> bool:
 
 def build_statement_record(project_period: str, row: dict) -> dict:
     account_key = normalize_account_name(row["account_name"])
+    mapping_source = "rule_based"
+    ai_suggestion = row.get("ai_suggestion") or {}
+    suggested_key = ai_suggestion.get("account_key")
+    if account_key == "other" and suggested_key in STANDARD_ACCOUNTS and suggested_key != "other":
+        # 키워드 매핑 실패 계정에 대한 AI 1차 분류 제안. 추출 결과를 담당자가
+        # 확인하고 반영하는 시점에 적용되며, 확정 권한은 사람에게 있다.
+        account_key = suggested_key
+        mapping_source = "ai_suggested_human_accepted"
     standard = STANDARD_ACCOUNTS[account_key]
     checklist = CHECKLISTS.get(account_key, []) if standard["type"] == "judgment" else []
+    rule_summary = standard["rule"]
+    if mapping_source == "ai_suggested_human_accepted":
+        rationale = str(ai_suggestion.get("rationale") or "").strip()
+        rule_summary = (
+            f"[AI 1차 분류 제안 → 반영 시 담당자 확정] {rationale + ' / ' if rationale else ''}{standard['rule']}"
+        )
     return {
         "id": str(uuid.uuid4()),
         "account_name": row["account_name"],
@@ -308,9 +541,11 @@ def build_statement_record(project_period: str, row: dict) -> dict:
         "amount": row["amount"],
         "period": project_period,
         "mapping_type": standard["type"],
-        "rule_summary": standard["rule"],
+        "rule_summary": rule_summary,
         "checklist": checklist,
         "ifrs_account": standard["ifrs"],
+        "mapping_source": mapping_source,
+        "ai_suggestion": ai_suggestion if mapping_source == "ai_suggested_human_accepted" else None,
     }
 
 
@@ -460,8 +695,18 @@ def validate_statement_records(project: dict, statements: list[sqlite3.Row]) -> 
         "status": status,
     }
 
-def generate_conversion(project: dict, statements: list[dict], responses: dict, templates: dict | None = None) -> dict:
+def generate_conversion(
+    project: dict,
+    statements: list[dict],
+    responses: dict,
+    templates: dict | None = None,
+    standards_map: dict | None = None,
+) -> dict:
     templates = templates or {}
+    if standards_map is None:
+        standards_map = standards_paragraphs_for_accounts(
+            normalize_account_name(item["account_name"]) for item in statements
+        )
     entries = []
     notes = []
     judgment_items = []
@@ -522,6 +767,16 @@ def generate_conversion(project: dict, statements: list[dict], responses: dict, 
                     "account": item["account_name"],
                     "checklist_response": checklist_response,
                     "basis": item["rule_summary"],
+                    "standards_paragraphs": [
+                        {
+                            "standard_set": para["standard_set"],
+                            "reference_code": para["reference_code"],
+                            "paragraph_label": para["paragraph_label"],
+                            "title": para["title"],
+                            "content": para["content"],
+                        }
+                        for para in standards_map.get(account_key, [])
+                    ],
                 }
             )
             notes.append(
@@ -634,12 +889,17 @@ def conversion_basis_report(conversion: dict) -> str:
             )
         )
     lines.append("")
-    lines.append("3. 판단 필요 항목")
+    lines.append("3. 판단 필요 항목 (K-GAAP/K-IFRS 기준서 문단 근거 포함)")
     lines.append("-" * 42)
     if not judgment_items:
         lines.append("- 없음")
     for item in judgment_items:
         lines.append(f"- {item.get('account', '-')}: {localize_export_text(item.get('basis'))}")
+        for para in item.get("standards_paragraphs", []):
+            lines.append(
+                f"    [{para.get('standard_set', '-')}] {para.get('reference_code', '-')} "
+                f"{para.get('paragraph_label', '-')}: {para.get('content', '-')}"
+            )
     lines.append("")
     lines.append("4. OpenAI 판단 보조")
     lines.append("-" * 42)
