@@ -182,6 +182,7 @@ function ImportScreen({
   const [aiDecisions, setAiDecisions] = useState<Record<string, AiDecision>>({});
   const suggestedAccounts = previewRows.filter((row) => row.ai_suggestion).map((row) => row.account_name);
   const undecidedCount = suggestedAccounts.filter((name) => !aiDecisions[name]).length;
+  const unclassifiedCount = bundle.statements.filter((row) => row.standard_code === "X9999").length;
 
   function decideAi(accountName: string, decision: AiDecision) {
     setAiDecisions((current) => {
@@ -348,6 +349,8 @@ function ImportScreen({
         </div>
       </div>
 
+      <MappingTable statements={bundle.statements} />
+
       <div className="bg-white border border-[#D0D5E0]">
         <div className="flex items-center justify-between px-4 py-3 border-b border-[#D0D5E0] bg-[#F5F7FA]">
           <SectionLabel>추출 결과 미리보기</SectionLabel>
@@ -376,7 +379,18 @@ function ImportScreen({
         <RowsTable rows={previewRows} decisions={aiDecisions} onDecide={latestExtraction?.status === "accepted" ? undefined : decideAi} />
       </div>
 
-      <MappingTable statements={bundle.statements} onGoNext={onGoNext} />
+      {!!bundle.statements.length && (
+        <div className="bg-white border border-[#D0D5E0] px-4 py-3 flex items-center justify-between">
+          <span className="text-xs text-[#677089]">
+            {unclassifiedCount > 0
+              ? `미분류 ${unclassifiedCount}건 — 위 미리보기에서 AI 제안을 승인하거나 재분류하면 승인 단계 진행이 원활합니다`
+              : "모든 계정이 표준계정에 매핑되었습니다"}
+          </span>
+          <button onClick={onGoNext} className="px-4 py-2 text-xs font-bold text-white bg-[#1740BE]">
+            다음 단계로 →
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -491,8 +505,7 @@ function RowsTable({ rows, decisions = {}, onDecide }: { rows: SourceRow[]; deci
   );
 }
 
-function MappingTable({ statements, onGoNext }: { statements: Statement[]; onGoNext?: () => void }) {
-  const unclassified = statements.filter((row) => row.standard_code === "X9999").length;
+function MappingTable({ statements }: { statements: Statement[] }) {
   return (
     <div className="bg-white border border-[#D0D5E0]">
       <div className="px-4 py-3 border-b border-[#D0D5E0] bg-[#F5F7FA]"><SectionLabel>계정 매핑</SectionLabel></div>
@@ -512,18 +525,6 @@ function MappingTable({ statements, onGoNext }: { statements: Statement[]; onGoN
         </tbody>
       </table>
       {!statements.length && <div className="text-center py-8 text-xs text-[#677089]">반영된 계정이 없습니다</div>}
-      {!!statements.length && onGoNext && (
-        <div className="px-4 py-3 border-t border-[#D0D5E0] bg-[#F5F7FA] flex items-center justify-between">
-          <span className="text-xs text-[#677089]">
-            {unclassified > 0
-              ? `미분류 ${unclassified}건 — 추출 단계에서 AI 제안을 승인하거나 재분류하면 승인 단계 진행이 원활합니다`
-              : "모든 계정이 표준계정에 매핑되었습니다"}
-          </span>
-          <button onClick={onGoNext} className="px-4 py-2 text-xs font-bold text-white bg-[#1740BE]">
-            다음 단계로 →
-          </button>
-        </div>
-      )}
     </div>
   );
 }
@@ -561,15 +562,9 @@ function ReviewScreen({
 
   return (
     <div className="p-6 space-y-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-bold text-[#0A1628]">K-IFRS 변환 리뷰</h2>
-          <p className="text-xs text-[#677089] mt-0.5 font-medium">체크리스트 입력 후 변환 초안을 생성합니다</p>
-        </div>
-        <button disabled={busy || !bundle.statements.length} onClick={convert} className="flex items-center gap-1.5 px-3.5 py-2 bg-[#1740BE] disabled:bg-[#C8D0DC] text-white text-xs font-bold">
-          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-          변환 생성
-        </button>
+      <div>
+        <h2 className="text-sm font-bold text-[#0A1628]">K-IFRS 변환 리뷰</h2>
+        <p className="text-xs text-[#677089] mt-0.5 font-medium">체크리스트 입력 후 아래 변환 생성 버튼을 누르세요</p>
       </div>
 
       <div className="bg-white border border-[#D0D5E0]">
@@ -613,6 +608,13 @@ function ReviewScreen({
                 </div>
               ))}
               {!judgmentStatements.length && <div className="text-center py-10 text-xs text-[#677089]">판단 필요 계정이 없습니다</div>}
+              <div className="flex items-center justify-end gap-3 pt-2 border-t border-[#EEF0F5]">
+                <span className="text-xs text-[#677089]">체크리스트 입력을 마쳤으면 변환 초안을 생성하세요</span>
+                <button disabled={busy || !bundle.statements.length} onClick={convert} className="flex items-center gap-1.5 px-4 py-2 bg-[#1740BE] disabled:bg-[#C8D0DC] text-white text-xs font-bold">
+                  {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                  변환 생성
+                </button>
+              </div>
             </div>
           )}
 
