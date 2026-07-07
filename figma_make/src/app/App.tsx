@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import AlertTriangle from "lucide-react/dist/esm/icons/alert-triangle.js";
+import Check from "lucide-react/dist/esm/icons/check.js";
 import ClipboardList from "lucide-react/dist/esm/icons/clipboard-list.js";
 import Cloud from "lucide-react/dist/esm/icons/cloud.js";
 import Database from "lucide-react/dist/esm/icons/database.js";
@@ -8,11 +9,13 @@ import FileCheck from "lucide-react/dist/esm/icons/file-check.js";
 import FileSpreadsheet from "lucide-react/dist/esm/icons/file-spreadsheet.js";
 import FileText from "lucide-react/dist/esm/icons/file-text.js";
 import History from "lucide-react/dist/esm/icons/history.js";
+import Info from "lucide-react/dist/esm/icons/info.js";
 import Loader2 from "lucide-react/dist/esm/icons/loader-circle.js";
 import PanelRightClose from "lucide-react/dist/esm/icons/panel-right-close.js";
 import PanelRightOpen from "lucide-react/dist/esm/icons/panel-right-open.js";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
 import Upload from "lucide-react/dist/esm/icons/upload.js";
+import XIcon from "lucide-react/dist/esm/icons/x.js";
 
 import { api, download } from "./api";
 import { classNames, fmtKRW } from "./format";
@@ -349,8 +352,6 @@ function ImportScreen({
         </div>
       </div>
 
-      <MappingTable statements={bundle.statements} />
-
       <div className="bg-white border border-[#D0D5E0]">
         <div className="flex items-center justify-between px-4 py-3 border-b border-[#D0D5E0] bg-[#F5F7FA]">
           <SectionLabel>추출 결과 미리보기</SectionLabel>
@@ -379,11 +380,13 @@ function ImportScreen({
         <RowsTable rows={previewRows} decisions={aiDecisions} onDecide={latestExtraction?.status === "accepted" ? undefined : decideAi} />
       </div>
 
+      <MappingTable statements={bundle.statements} />
+
       {!!bundle.statements.length && (
         <div className="bg-white border border-[#D0D5E0] px-4 py-3 flex items-center justify-between">
           <span className="text-xs text-[#677089]">
             {unclassifiedCount > 0
-              ? `미분류 ${unclassifiedCount}건 — 위 미리보기에서 AI 제안을 승인하거나 재분류하면 승인 단계 진행이 원활합니다`
+              ? `미분류 ${unclassifiedCount}건 — 추출 결과 미리보기에서 AI 제안을 승인하거나 재분류하면 승인 단계 진행이 원활합니다`
               : "모든 계정이 표준계정에 매핑되었습니다"}
           </span>
           <button onClick={onGoNext} className="px-4 py-2 text-xs font-bold text-white bg-[#1740BE]">
@@ -462,33 +465,43 @@ function RowsTable({ rows, decisions = {}, onDecide }: { rows: SourceRow[]; deci
                 <td className="px-4 py-2.5 text-[#677089]">{row.currency || "KRW"}</td>
                 <td className="px-4 py-2.5">
                   {row.ai_suggestion ? (
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span title={row.ai_suggestion.rationale} className="inline-flex items-center px-2 py-0.5 text-[11px] font-bold bg-violet-50 text-violet-700 border border-violet-200">
-                        {row.ai_suggestion.label} 제안
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-bold bg-violet-50 text-violet-700 border border-violet-200 rounded">
+                        {row.ai_suggestion.label}
+                      </span>
+                      <span
+                        title={`근거: ${row.ai_suggestion.rationale || "-"}\n신뢰도: ${row.ai_suggestion.confidence || "-"}`}
+                        className="inline-flex items-center gap-0.5 text-[11px] text-[#9AA1B0] cursor-help"
+                      >
+                        <Info className="w-3 h-3" /> 근거
                       </span>
                       {onDecide ? (
-                        <>
+                        <div className="flex items-center gap-1">
                           <button
+                            aria-label="제안 수락"
+                            title="제안 수락"
                             onClick={() => onDecide(row.account_name, "approved")}
                             className={classNames(
-                              "px-2 py-0.5 text-[11px] font-bold border",
-                              decision === "approved" ? "bg-emerald-600 text-white border-emerald-600" : "text-emerald-700 border-emerald-300 bg-white",
+                              "w-6 h-6 flex items-center justify-center rounded-full border transition-colors",
+                              decision === "approved" ? "bg-emerald-600 border-emerald-600 text-white" : "border-[#D0D5E0] text-emerald-600 hover:bg-emerald-50",
                             )}
                           >
-                            승인
+                            <Check className="w-3.5 h-3.5" />
                           </button>
                           <button
+                            aria-label="제안 거절"
+                            title="제안 거절"
                             onClick={() => onDecide(row.account_name, "rejected")}
                             className={classNames(
-                              "px-2 py-0.5 text-[11px] font-bold border",
-                              decision === "rejected" ? "bg-red-600 text-white border-red-600" : "text-red-700 border-red-300 bg-white",
+                              "w-6 h-6 flex items-center justify-center rounded-full border transition-colors",
+                              decision === "rejected" ? "bg-red-600 border-red-600 text-white" : "border-[#D0D5E0] text-red-600 hover:bg-red-50",
                             )}
                           >
-                            거절
+                            <XIcon className="w-3.5 h-3.5" />
                           </button>
-                        </>
+                        </div>
                       ) : (
-                        <span className="text-[11px] text-[#677089]">반영 완료</span>
+                        <span className="inline-flex items-center gap-0.5 text-[11px] text-emerald-700 font-semibold"><Check className="w-3 h-3" /> 반영됨</span>
                       )}
                     </div>
                   ) : (
@@ -518,7 +531,14 @@ function MappingTable({ statements }: { statements: Statement[] }) {
               <td className="px-4 py-2.5 text-right font-mono">{fmtKRW(row.amount)}</td>
               <td className="px-4 py-2.5">{row.normalized_account}</td>
               <td className={classNames("px-4 py-2.5 font-mono", row.standard_code === "X9999" ? "text-red-600 font-bold" : "text-[#677089]")}>{row.standard_code}</td>
-              <td className="px-4 py-2.5"><Pill color={row.standard_code === "X9999" ? "red" : row.mapping_type === "judgment" ? "amber" : "blue"}>{row.standard_code === "X9999" ? "미분류" : row.mapping_type === "judgment" ? "판단 필요" : "단순 매핑"}</Pill></td>
+              <td className="px-4 py-2.5">
+                <div className="flex items-center gap-1.5">
+                  <Pill color={row.standard_code === "X9999" ? "red" : row.mapping_type === "judgment" ? "amber" : "blue"}>{row.standard_code === "X9999" ? "미분류" : row.mapping_type === "judgment" ? "판단 필요" : "단순 매핑"}</Pill>
+                  {row.rule_summary?.includes("AI 1차 분류") && (
+                    <span title="AI가 분류를 제안하고 담당자가 확정한 계정입니다" className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-bold bg-violet-50 text-violet-700 border border-violet-200 rounded">AI 분류</span>
+                  )}
+                </div>
+              </td>
               <td className="px-4 py-2.5 text-[#677089] max-w-[320px] truncate">{row.rule_summary}</td>
             </tr>
           ))}
