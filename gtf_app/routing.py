@@ -48,6 +48,8 @@ def resolve_get(path: str) -> RouteMatch | None:
         return RouteMatch("extractions.list", (path.split("/")[-2],))
     if re.match(r"^/api/projects/[^/]+/audit$", path):
         return RouteMatch("audit.list", (path.split("/")[-2],))
+    if re.match(r"^/api/projects/[^/]+/review-summary$", path):
+        return RouteMatch("reviews.summary", (path.split("/")[-2],))
     if re.match(r"^/api/projects/[^/]+/exports/[^/]+$", path):
         parts = path.split("/")
         return RouteMatch("exports.get", (parts[3], parts[5]))

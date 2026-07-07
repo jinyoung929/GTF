@@ -1,5 +1,5 @@
 export type Screen = "import" | "review";
-export type ReviewTab = "checklist" | "adjustments" | "notes" | "audit" | "export";
+export type ReviewTab = "checklist" | "adjustments" | "notes" | "approval" | "audit" | "export";
 export type ImportTab = "file" | "dart-api" | "manual";
 
 export type UserInfo = { id: string; email: string; is_read_only: boolean; created_at: string };
@@ -103,6 +103,34 @@ export type Conversion = {
 };
 
 export type AuditLog = { id: string; event_type: string; actor: string; created_at: string; detail: unknown };
+
+export type AiDecision = "approved" | "rejected";
+
+export type ReviewAttentionItem = {
+  type: "unclassified" | "checklist_missing" | "validation";
+  severity: "error" | "warning";
+  account: string;
+  message: string;
+};
+
+export type ReviewSummary = {
+  attention: ReviewAttentionItem[];
+  judgment: Array<{
+    statement_id: string;
+    account: string;
+    normalized_account: string;
+    standard_code: string;
+    amount: number;
+    rule_summary: string;
+    checklist_answered: boolean;
+    checklist_response: Record<string, unknown>;
+    standards_paragraph_count: number;
+  }>;
+  counts: { attention: number; attention_errors: number; judgment: number; unclassified: number };
+  has_conversion: boolean;
+  can_approve: boolean;
+  approval_policy: string;
+};
 
 export type ProjectBundle = {
   project: Project;

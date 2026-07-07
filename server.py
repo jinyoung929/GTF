@@ -46,6 +46,7 @@ from gtf_app.domain import (
     FINANCIAL_STATEMENT_TEMPLATES,
     STANDARD_ACCOUNTS,
     STANDARDS_PARAGRAPHS,
+    build_review_summary,
     build_statement_record,
     conversion_adjustments_csv,
     conversion_basis_report,
@@ -1310,6 +1311,36 @@ def attach_ai_classification(rows: list[dict]) -> tuple[list[dict], dict]:
     return rows, result
 
 
+def apply_ai_decisions(rows: list[dict], decisions: dict | None) -> tuple[list[dict], dict]:
+    """추출 반영 시 AI 1차 분류 제안에 대한 계정별 승인/거절 결정(1차 승인)을 적용한다.
+
+    decisions가 전달되면 명시적으로 approved된 계정의 제안만 유지하고,
+    거절되거나 결정되지 않은 제안은 제거해 X9999 담당자 분류 대상으로 남긴다.
+    decisions가 None이면(구버전 클라이언트) 기존처럼 제안 전체를 적용한다.
+    """
+    summary = {"approved": [], "rejected": [], "undecided": [], "per_account_review": decisions is not None}
+    prepared = []
+    for row in rows:
+        row = dict(row)
+        suggestion = row.get("ai_suggestion")
+        if suggestion:
+            account_name = str(row.get("account_name") or "").strip()
+            if decisions is None:
+                summary["approved"].append(account_name)
+            else:
+                decision = str(decisions.get(account_name) or "").strip().lower()
+                if decision == "approved":
+                    summary["approved"].append(account_name)
+                elif decision == "rejected":
+                    summary["rejected"].append(account_name)
+                    row.pop("ai_suggestion", None)
+                else:
+                    summary["undecided"].append(account_name)
+                    row.pop("ai_suggestion", None)
+        prepared.append(row)
+    return prepared, summary
+
+
 def call_gemini_ocr(file_path: Path, mime_type: str, model: str) -> tuple[list[dict], list[str]]:
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
@@ -1556,6 +1587,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_get_extractions(*route.args)
         elif route.name == "audit.list":
             self.handle_get_audit(*route.args)
+        elif route.name == "reviews.summary":
+            self.handle_review_summary(*route.args)
         elif route.name == "exports.get":
             self.handle_export(*route.args)
         else:
@@ -2355,6 +2388,8 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_accept_extraction(self, project_id: str, extraction_id: str) -> None:
         acting_user = self.current_user()
+        payload = self.read_json()
+        ai_decisions = payload.get("ai_decisions") if isinstance(payload.get("ai_decisions"), dict) else None
         with connect() as conn:
             project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
             extraction = conn.execute(
@@ -2366,6 +2401,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
 
             rows = parse_json_field(extraction["rows_json"], [])
+            rows, decision_summary = apply_ai_decisions(rows, ai_decisions)
             records = [build_statement_record(project["period"], row) for row in rows]
             for record in records:
                 conn.execute(
@@ -2414,11 +2450,16 @@ class AppHandler(BaseHTTPRequestHandler):
                     "statement_count": len(records),
                     "ai_classified_count": len(ai_confirmed),
                     "ai_classified_accounts": ai_confirmed,
-                    "ai_classification_note": "AI 1차 분류 제안을 담당자가 반영하며 확정했습니다." if ai_confirmed else None,
+                    "ai_decision_summary": decision_summary,
+                    "ai_classification_note": (
+                        "AI 1차 분류 제안을 담당자가 계정별로 승인/거절하며 확정했습니다."
+                        if decision_summary["per_account_review"] and (ai_confirmed or decision_summary["rejected"])
+                        else "AI 1차 분류 제안을 담당자가 반영하며 확정했습니다." if ai_confirmed else None
+                    ),
                 },
                 actor=(acting_user or {}).get("email") or "system",
             )
-        self.respond_json({"statements": records, "extraction_id": extraction_id})
+        self.respond_json({"statements": records, "extraction_id": extraction_id, "ai_decision_summary": decision_summary})
 
     def handle_add_statements(self, project_id: str) -> None:
         payload = self.read_json()
@@ -2502,6 +2543,23 @@ class AppHandler(BaseHTTPRequestHandler):
             )
         self.respond_json(output)
 
+    def handle_review_summary(self, project_id: str) -> None:
+        with connect() as conn:
+            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if not project:
+                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
+                return
+            statements = [row_to_dict(row) for row in conn.execute(
+                "SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,)
+            )]
+            conversion_row = conn.execute(
+                "SELECT output_json FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            validation = validate_statement_records(row_to_dict(project), statements) if statements else None
+        conversion = parse_json_field(conversion_row["output_json"], {}) if conversion_row else None
+        self.respond_json(build_review_summary(statements, conversion, validation))
+
     def handle_review(self, project_id: str) -> None:
         payload = self.read_json()
         decision = payload.get("decision")
@@ -2533,6 +2591,21 @@ class AppHandler(BaseHTTPRequestHandler):
             if not conversion:
                 self.respond_json({"error": "Generate a conversion draft before review."}, HTTPStatus.BAD_REQUEST)
                 return
+            if decision == "approved":
+                # 2차 승인 게이트: 오류 수준(미분류 잔존)은 승인을 차단, 경고는 검토자 판단에 맡긴다.
+                unclassified = conn.execute(
+                    "SELECT COUNT(*) AS count FROM statements WHERE project_id = ? AND standard_code = ?",
+                    (project_id, "X9999"),
+                ).fetchone()["count"]
+                if unclassified:
+                    self.respond_json(
+                        {
+                            "error": f"미분류 계정 {unclassified}건이 남아 있어 승인할 수 없습니다. 담당자 분류 또는 AI 제안 승인(1차 승인) 후 다시 시도하세요.",
+                            "unclassified_count": unclassified,
+                        },
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
             conn.execute(
                 """
                 INSERT INTO reviews (id, project_id, reviewer_name, decision, memo, created_at)

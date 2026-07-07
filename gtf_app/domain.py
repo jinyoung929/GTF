@@ -805,6 +805,87 @@ def generate_conversion(
     }
 
 
+def build_review_summary(statements: list[dict], conversion: dict | None, validation: dict | None) -> dict:
+    """최종 검토(2차 승인) 화면용 요약.
+
+    확인 필요(attention): 문제 상황 기반 — 미분류 잔존, 체크리스트 미입력, 검증 경고/오류.
+    회계 판단(judgment): 계정 종류 기반 — 검토자가 값의 타당성을 확인할 judgment 항목.
+    미분류(error 수준)가 남아 있으면 승인을 차단하고, 경고는 표시만 하고 승인을 허용한다.
+    """
+    attention = []
+    responses_by_statement = {}
+    paragraphs_by_statement = {}
+    for item in (conversion or {}).get("judgment_items") or []:
+        responses_by_statement[item.get("statement_id")] = item.get("checklist_response") or {}
+        paragraphs_by_statement[item.get("statement_id")] = item.get("standards_paragraphs") or []
+
+    unclassified = [row for row in statements if row.get("standard_code") == "X9999"]
+    for row in unclassified:
+        attention.append(
+            {
+                "type": "unclassified",
+                "severity": "error",
+                "account": row.get("account_name"),
+                "message": "표준계정 미분류 상태입니다. 담당자 분류 또는 AI 제안 승인(1차 승인)이 필요합니다.",
+            }
+        )
+
+    judgment = []
+    for row in statements:
+        if row.get("mapping_type") != "judgment" or row.get("standard_code") == "X9999":
+            continue
+        response = responses_by_statement.get(row.get("id")) or {}
+        answered = bool(conversion) and bool(response)
+        if not answered:
+            attention.append(
+                {
+                    "type": "checklist_missing",
+                    "severity": "warning",
+                    "account": row.get("account_name"),
+                    "message": "판단 체크리스트가 입력되지 않았습니다." if conversion else "변환 초안이 아직 생성되지 않아 체크리스트 응답이 없습니다.",
+                }
+            )
+        judgment.append(
+            {
+                "statement_id": row.get("id"),
+                "account": row.get("account_name"),
+                "normalized_account": row.get("normalized_account"),
+                "standard_code": row.get("standard_code"),
+                "amount": row.get("amount"),
+                "rule_summary": row.get("rule_summary"),
+                "checklist_answered": answered,
+                "checklist_response": response,
+                "standards_paragraph_count": len(paragraphs_by_statement.get(row.get("id")) or []),
+            }
+        )
+
+    for check in (validation or {}).get("checks") or []:
+        if check.get("status") in {"warning", "error"}:
+            attention.append(
+                {
+                    "type": "validation",
+                    "severity": check.get("status"),
+                    "account": check.get("name"),
+                    "message": check.get("detail"),
+                }
+            )
+
+    blocking = [item for item in attention if item["severity"] == "error"]
+    return {
+        "attention": attention,
+        "judgment": judgment,
+        "counts": {
+            "attention": len(attention),
+            "attention_errors": len(blocking),
+            "judgment": len(judgment),
+            "unclassified": len(unclassified),
+        },
+        "has_conversion": conversion is not None,
+        "can_approve": conversion is not None and not blocking,
+        "approval_policy": "오류(미분류 등)가 남아 있으면 승인이 차단되고, 경고는 검토자 판단으로 승인할 수 있습니다.",
+    }
+
+
 def conversion_adjustments_csv(conversion: dict) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer)

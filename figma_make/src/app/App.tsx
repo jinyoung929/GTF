@@ -18,7 +18,7 @@ import { api, download } from "./api";
 import { classNames, fmtKRW } from "./format";
 import { LoginScreen } from "./screens/LoginScreen";
 import { ProjectDashboard } from "./screens/ProjectDashboard";
-import type { AuditLog, Conversion, ConversionEntry, ImportTab, Project, ProjectBundle, ReviewTab, Screen, SourceRow, Statement, UploadRow, UserInfo } from "./types";
+import type { AiDecision, AuditLog, Conversion, ConversionEntry, ImportTab, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, Statement, UploadRow, UserInfo } from "./types";
 import { HeaderCell, Pill, SectionLabel, StatusBadge } from "./ui";
 
 type DartReportOption = {
@@ -58,6 +58,7 @@ function ProjectLayout({
     { label: "DART 파일 가져오기", icon: Upload, action: () => setScreen("import"), active: screen === "import" },
     { label: "K-IFRS 체크리스트", icon: ClipboardList, action: () => { setScreen("review"); setReviewTab("checklist"); }, active: screen === "review" && reviewTab === "checklist" },
     { label: "변환 초안", icon: Database, action: () => { setScreen("review"); setReviewTab("adjustments"); }, active: screen === "review" && reviewTab === "adjustments" },
+    { label: "검토 승인", icon: FileCheck, action: () => { setScreen("review"); setReviewTab("approval"); }, active: screen === "review" && reviewTab === "approval" },
     { label: "감사 로그", icon: History, action: () => { setScreen("review"); setReviewTab("audit"); }, active: screen === "review" && reviewTab === "audit" },
     { label: "내보내기", icon: Download, action: () => { setScreen("review"); setReviewTab("export"); }, active: screen === "review" && reviewTab === "export" },
   ];
@@ -157,7 +158,7 @@ function ImportScreen({
   dartReady: boolean;
   onUpload: (file: File) => Promise<void>;
   onExtract: (uploadId: string) => Promise<void>;
-  onAccept: (extractionId: string) => Promise<void>;
+  onAccept: (extractionId: string, aiDecisions: Record<string, AiDecision>) => Promise<void>;
   onDartReports: (payload: Record<string, string>) => Promise<{ reports: DartReportOption[]; issues: string[]; metadata: Record<string, string> }>;
   onDartImport: (payload: Record<string, string>) => Promise<void>;
   onManualAdd: (rows: SourceRow[]) => Promise<void>;
@@ -176,6 +177,18 @@ function ImportScreen({
   const [manualText, setManualText] = useState("현금및현금성자산,120000000\n리스부채,30000000\n개발비,45000000");
   const latestExtraction = bundle.extractions[0];
   const previewRows = latestExtraction?.rows || [];
+  const [aiDecisions, setAiDecisions] = useState<Record<string, AiDecision>>({});
+  const suggestedAccounts = previewRows.filter((row) => row.ai_suggestion).map((row) => row.account_name);
+  const undecidedCount = suggestedAccounts.filter((name) => !aiDecisions[name]).length;
+
+  function decideAi(accountName: string, decision: AiDecision) {
+    setAiDecisions((current) => {
+      const next = { ...current };
+      if (next[accountName] === decision) delete next[accountName];
+      else next[accountName] = decision;
+      return next;
+    });
+  }
 
   async function run(label: string, work: () => Promise<void>) {
     setBusy(label);
@@ -335,11 +348,20 @@ function ImportScreen({
       <div className="bg-white border border-[#D0D5E0]">
         <div className="flex items-center justify-between px-4 py-3 border-b border-[#D0D5E0] bg-[#F5F7FA]">
           <SectionLabel>추출 결과 미리보기</SectionLabel>
-          {latestExtraction && (
-            <button disabled={latestExtraction.status === "accepted" || !!busy} onClick={() => run("accept", () => onAccept(latestExtraction.id))} className="px-3 py-1.5 text-xs font-bold text-white bg-[#1740BE] disabled:bg-[#C8D0DC]">
-              추출 결과 반영
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {latestExtraction && undecidedCount > 0 && latestExtraction.status !== "accepted" && (
+              <span className="text-[11px] font-bold text-violet-700">AI 제안 {undecidedCount}건 승인/거절 필요 (1차 승인)</span>
+            )}
+            {latestExtraction && (
+              <button
+                disabled={latestExtraction.status === "accepted" || !!busy || undecidedCount > 0}
+                onClick={() => run("accept", () => onAccept(latestExtraction.id, aiDecisions))}
+                className="px-3 py-1.5 text-xs font-bold text-white bg-[#1740BE] disabled:bg-[#C8D0DC]"
+              >
+                추출 결과 반영
+              </button>
+            )}
+          </div>
         </div>
         {latestExtraction && latestExtraction.issues?.length > 0 && (
           <div className="border-b border-[#D0D5E0] border-l-4 border-l-amber-500 bg-amber-50 px-4 py-2 text-xs text-amber-800 font-medium space-y-0.5">
@@ -348,7 +370,7 @@ function ImportScreen({
             ))}
           </div>
         )}
-        <RowsTable rows={previewRows} />
+        <RowsTable rows={previewRows} decisions={aiDecisions} onDecide={latestExtraction?.status === "accepted" ? undefined : decideAi} />
       </div>
 
       <MappingTable statements={bundle.statements} />
@@ -407,29 +429,58 @@ function SourceTable({ uploads, onExtract, busy }: { uploads: UploadRow[]; onExt
   );
 }
 
-function RowsTable({ rows }: { rows: SourceRow[] }) {
+function RowsTable({ rows, decisions = {}, onDecide }: { rows: SourceRow[]; decisions?: Record<string, AiDecision>; onDecide?: (accountName: string, decision: AiDecision) => void }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
         <thead><tr className="bg-[#F5F7FA]"><HeaderCell>원 계정명</HeaderCell><HeaderCell right>금액</HeaderCell><HeaderCell>재무제표</HeaderCell><HeaderCell>통화</HeaderCell><HeaderCell>AI 1차 분류 제안</HeaderCell></tr></thead>
         <tbody>
-          {rows.map((row, index) => (
-            <tr key={`${row.account_name}-${index}`} className="border-t border-[#EEF0F5]">
-              <td className="px-4 py-2.5 font-semibold">{row.account_name}</td>
-              <td className="px-4 py-2.5 text-right font-mono">{fmtKRW(row.amount)}</td>
-              <td className="px-4 py-2.5 text-[#677089]">{row.statement_type || "-"}</td>
-              <td className="px-4 py-2.5 text-[#677089]">{row.currency || "KRW"}</td>
-              <td className="px-4 py-2.5">
-                {row.ai_suggestion ? (
-                  <span title={row.ai_suggestion.rationale} className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold bg-violet-50 text-violet-700 border border-violet-200">
-                    {row.ai_suggestion.label} 제안 · 반영 시 확정
-                  </span>
-                ) : (
-                  <span className="text-[#C8D0DC]">-</span>
-                )}
-              </td>
-            </tr>
-          ))}
+          {rows.map((row, index) => {
+            const decision = decisions[row.account_name];
+            return (
+              <tr key={`${row.account_name}-${index}`} className="border-t border-[#EEF0F5]">
+                <td className="px-4 py-2.5 font-semibold">{row.account_name}</td>
+                <td className="px-4 py-2.5 text-right font-mono">{fmtKRW(row.amount)}</td>
+                <td className="px-4 py-2.5 text-[#677089]">{row.statement_type || "-"}</td>
+                <td className="px-4 py-2.5 text-[#677089]">{row.currency || "KRW"}</td>
+                <td className="px-4 py-2.5">
+                  {row.ai_suggestion ? (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span title={row.ai_suggestion.rationale} className="inline-flex items-center px-2 py-0.5 text-[11px] font-bold bg-violet-50 text-violet-700 border border-violet-200">
+                        {row.ai_suggestion.label} 제안
+                      </span>
+                      {onDecide ? (
+                        <>
+                          <button
+                            onClick={() => onDecide(row.account_name, "approved")}
+                            className={classNames(
+                              "px-2 py-0.5 text-[11px] font-bold border",
+                              decision === "approved" ? "bg-emerald-600 text-white border-emerald-600" : "text-emerald-700 border-emerald-300 bg-white",
+                            )}
+                          >
+                            승인
+                          </button>
+                          <button
+                            onClick={() => onDecide(row.account_name, "rejected")}
+                            className={classNames(
+                              "px-2 py-0.5 text-[11px] font-bold border",
+                              decision === "rejected" ? "bg-red-600 text-white border-red-600" : "text-red-700 border-red-300 bg-white",
+                            )}
+                          >
+                            거절
+                          </button>
+                        </>
+                      ) : (
+                        <span className="text-[11px] text-[#677089]">반영 완료</span>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-[#C8D0DC]">-</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       {!rows.length && <div className="text-center py-10 text-xs text-[#677089]">추출 결과가 없습니다</div>}
@@ -511,6 +562,7 @@ function ReviewScreen({
             ["checklist", "체크리스트"],
             ["adjustments", `조정분개 ${entries.length}`],
             ["notes", "주석 초안"],
+            ["approval", "검토 승인"],
             ["audit", "감사 로그"],
             ["export", "내보내기"],
           ].map(([id, label]) => (
@@ -550,6 +602,7 @@ function ReviewScreen({
 
           {tab === "adjustments" && <AdjustmentTable entries={entries} />}
           {tab === "notes" && <Notes notes={bundle.conversion?.draft_notes || []} ai={bundle.conversion?.ai_assistance} judgmentItems={bundle.conversion?.judgment_items || []} />}
+          {tab === "approval" && <ApprovalPanel projectId={bundle.project.id} />}
           {tab === "audit" && <AuditTable logs={[]} projectId={bundle.project.id} />}
           {tab === "export" && <ExportPanel onExport={onExport} ready={!!bundle.conversion} />}
         </div>
@@ -622,6 +675,113 @@ function Notes({ notes, ai, judgmentItems }: { notes: Conversion["draft_notes"];
         </div>
       )}
       {!notes.length && !itemsWithParagraphs.length && <div className="text-center py-10 text-xs text-[#677089]">주석 초안이 없습니다</div>}
+    </div>
+  );
+}
+
+function ApprovalPanel({ projectId }: { projectId: string }) {
+  const [summary, setSummary] = useState<ReviewSummary | null>(null);
+  const [reviewerName, setReviewerName] = useState("");
+  const [memo, setMemo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState("");
+
+  async function loadSummary() {
+    const data = await api<ReviewSummary>(`/api/projects/${projectId}/review-summary`).catch(() => null);
+    setSummary(data);
+  }
+
+  useEffect(() => {
+    loadSummary();
+  }, [projectId]);
+
+  async function submit(decision: "approved" | "changes_requested") {
+    setBusy(true);
+    setResult("");
+    try {
+      await api(`/api/projects/${projectId}/review`, {
+        method: "POST",
+        body: JSON.stringify({ decision, reviewer_name: reviewerName, memo }),
+      });
+      setResult(decision === "approved" ? "승인이 기록되었습니다." : "수정 요청이 기록되었습니다.");
+      await loadSummary();
+    } catch (error) {
+      setResult(error instanceof Error ? error.message : "요청이 실패했습니다.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!summary) return <div className="text-center py-10 text-xs text-[#677089]">검토 요약을 불러오는 중...</div>;
+
+  const severityStyle = (severity: string) =>
+    severity === "error" ? "bg-red-50 text-red-700 border-red-200" : "bg-amber-50 text-amber-800 border-amber-200";
+
+  return (
+    <div className="space-y-4">
+      <div className="border border-[#D0D5E0]">
+        <div className="px-4 py-2.5 bg-[#FDF2F2] border-b border-[#D0D5E0] flex items-center justify-between">
+          <span className="text-xs font-bold text-red-700">확인 필요 · {summary.counts.attention}건</span>
+          <span className="text-[11px] text-[#677089]">문제 상황 기반 — 먼저 처리해야 할 항목</span>
+        </div>
+        <div className="divide-y divide-[#EEF0F5]">
+          {summary.attention.map((item, index) => (
+            <div key={index} className="px-4 py-2.5 flex items-start gap-2.5">
+              <span className={classNames("shrink-0 px-2 py-0.5 text-[11px] font-bold border", severityStyle(item.severity))}>
+                {item.severity === "error" ? "오류" : "경고"}
+              </span>
+              <div className="text-xs">
+                <span className="font-bold text-[#0A1628]">{item.account}</span>
+                <span className="text-[#677089]"> — {item.message}</span>
+              </div>
+            </div>
+          ))}
+          {!summary.attention.length && <div className="px-4 py-3 text-xs text-emerald-700 font-semibold">확인 필요 항목이 없습니다.</div>}
+        </div>
+      </div>
+
+      <div className="border border-[#D0D5E0]">
+        <div className="px-4 py-2.5 bg-[#EFF4FF] border-b border-[#D0D5E0] flex items-center justify-between">
+          <span className="text-xs font-bold text-[#1740BE]">회계 판단 항목 · {summary.counts.judgment}건</span>
+          <span className="text-[11px] text-[#677089]">계정 종류 기반 — 값의 타당성 검토</span>
+        </div>
+        <div className="divide-y divide-[#EEF0F5]">
+          {summary.judgment.map((item) => (
+            <div key={item.statement_id} className="px-4 py-2.5 flex items-center gap-2.5 flex-wrap">
+              <Pill color="blue">회계 판단</Pill>
+              <span className="text-xs font-bold text-[#0A1628]">{item.account}</span>
+              <span className="text-xs font-mono text-[#677089]">{fmtKRW(item.amount)}</span>
+              <span className={classNames("px-2 py-0.5 text-[11px] font-bold border", item.checklist_answered ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-800 border-amber-200")}>
+                {item.checklist_answered ? "체크리스트 입력됨" : "체크리스트 미입력"}
+              </span>
+              <span className="text-[11px] text-[#677089]">기준서 문단 {item.standards_paragraph_count}건 연결</span>
+            </div>
+          ))}
+          {!summary.judgment.length && <div className="px-4 py-3 text-xs text-[#677089]">회계 판단 항목이 없습니다.</div>}
+        </div>
+      </div>
+
+      <div className="border border-[#D0D5E0] p-4 space-y-3">
+        <div className="text-[11px] text-[#677089]">{summary.approval_policy}</div>
+        <div className="grid grid-cols-2 gap-3">
+          <TextInput label="검토자 이름" value={reviewerName} onChange={setReviewerName} placeholder="검토자" />
+          <TextInput label="검토 메모" value={memo} onChange={setMemo} placeholder="판단 근거, 수정 요청 사유 등" />
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            disabled={busy || !summary.can_approve}
+            onClick={() => submit("approved")}
+            className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 disabled:bg-[#C8D0DC]"
+            title={summary.can_approve ? "" : summary.has_conversion ? "오류 항목을 해결해야 승인할 수 있습니다" : "변환 초안을 먼저 생성하세요"}
+          >
+            승인 (2차 승인)
+          </button>
+          <button disabled={busy || !summary.has_conversion} onClick={() => submit("changes_requested")} className="px-4 py-2 text-xs font-bold text-white bg-amber-600 disabled:bg-[#C8D0DC]">
+            수정 요청
+          </button>
+          {result && <span className="text-xs font-semibold text-[#1740BE]">{result}</span>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -758,9 +918,12 @@ export default function App() {
     await refreshBundle();
   }
 
-  async function acceptExtraction(extractionId: string) {
+  async function acceptExtraction(extractionId: string, aiDecisions: Record<string, AiDecision>) {
     if (!bundle) return;
-    await api(`/api/projects/${bundle.project.id}/extractions/${extractionId}/accept`, { method: "POST", body: "{}" });
+    await api(`/api/projects/${bundle.project.id}/extractions/${extractionId}/accept`, {
+      method: "POST",
+      body: JSON.stringify({ ai_decisions: aiDecisions }),
+    });
     await refreshBundle();
   }
 
