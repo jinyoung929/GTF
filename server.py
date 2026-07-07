@@ -456,7 +456,9 @@ def seed_reference_data(conn: sqlite3.Connection) -> None:
                 """,
                 (f"{account_key}_{index}", account_key, alias, account["label"]),
             )
-        ref_code, title, summary = standard_refs[account_key]
+        ref_code, title, summary = standard_refs.get(
+            account_key, (account["ifrs"], account["label"], account["rule"])
+        )
         conn.execute(
             """
             INSERT OR REPLACE INTO ifrs_accounts (
@@ -2463,39 +2465,73 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def handle_add_statements(self, project_id: str) -> None:
         payload = self.read_json()
+        raw_rows = parse_statement_rows(payload)
+        # 수동 입력도 파일/DART 경로와 동일하게 추출(extraction)로 만들어, 미분류 계정에
+        # AI 1차 분류 제안을 붙이고 담당자가 추출 미리보기에서 계정별로 승인하도록 통일한다.
+        raw_rows, ai_classification = attach_ai_classification(raw_rows)
+        issues = []
+        if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
+            issues.append(ai_classification["note"])
+        status = "needs_review" if raw_rows else "failed"
+        now = utc_now()
         with connect() as conn:
             project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
             if not project:
                 self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
                 return
-            raw_rows = parse_statement_rows(payload)
-            records = [build_statement_record(project["period"], row) for row in raw_rows]
-            for record in records:
-                conn.execute(
-                    """
-                    INSERT INTO statements (
-                        id, project_id, account_name, normalized_account, standard_code, amount, period,
-                        mapping_type, rule_summary, checklist_json, created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        record["id"],
-                        project_id,
-                        record["account_name"],
-                        record["normalized_account"],
-                        record["standard_code"],
-                        record["amount"],
-                        record["period"],
-                        record["mapping_type"],
-                        record["rule_summary"],
-                        json.dumps(record["checklist"], ensure_ascii=False),
-                        utc_now(),
-                    ),
+            upload_id = str(uuid.uuid4())
+            extraction_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO uploads (
+                    id, project_id, original_name, stored_name, content_type, size_bytes, extraction_status, created_at
                 )
-            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("mapped", utc_now(), project_id))
-            log_event(conn, project_id, "statements.mapped", {"count": len(records), "source": payload.get("source", "manual")})
-        self.respond_json({"statements": records})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (upload_id, project_id, "수동입력.csv", "", "text/csv", 0, status, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO extractions (id, project_id, upload_id, provider, status, rows_json, issues_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    extraction_id,
+                    project_id,
+                    upload_id,
+                    "manual_input",
+                    status,
+                    json.dumps(raw_rows, ensure_ascii=False),
+                    json.dumps(issues, ensure_ascii=False),
+                    now,
+                ),
+            )
+            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("extracted", now, project_id))
+            log_event(
+                conn,
+                project_id,
+                "source.manual_entered",
+                {
+                    "extraction_id": extraction_id,
+                    "row_count": len(raw_rows),
+                    "source": payload.get("source", "manual"),
+                    "ai_classification": {
+                        "status": ai_classification.get("status"),
+                        "model": ai_classification.get("model"),
+                        "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
+                        "human_review_required": True,
+                    },
+                },
+            )
+        self.respond_json(
+            {
+                "extraction_id": extraction_id,
+                "rows": raw_rows,
+                "issues": issues,
+                "ai_classification_status": ai_classification.get("status"),
+            },
+            HTTPStatus.CREATED,
+        )
 
     def handle_validate(self, project_id: str) -> None:
         with connect() as conn:

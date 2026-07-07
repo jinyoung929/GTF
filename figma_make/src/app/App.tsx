@@ -153,6 +153,7 @@ function ImportScreen({
   onDartReports,
   onDartImport,
   onManualAdd,
+  onGoNext,
 }: {
   bundle: ProjectBundle;
   dartReady: boolean;
@@ -162,6 +163,7 @@ function ImportScreen({
   onDartReports: (payload: Record<string, string>) => Promise<{ reports: DartReportOption[]; issues: string[]; metadata: Record<string, string> }>;
   onDartImport: (payload: Record<string, string>) => Promise<void>;
   onManualAdd: (rows: SourceRow[]) => Promise<void>;
+  onGoNext: () => void;
 }) {
   const [tab, setTab] = useState<ImportTab>("file");
   const [busy, setBusy] = useState("");
@@ -339,7 +341,8 @@ function ImportScreen({
           {tab === "manual" && (
             <div className="space-y-3">
               <textarea value={manualText} onChange={(event) => setManualText(event.target.value)} rows={6} className="w-full px-3 py-2 text-sm border border-[#D0D5E0] bg-[#F5F7FA] font-mono" />
-              <button disabled={!!busy} onClick={() => run("manual", () => onManualAdd(parseManualRows()))} className="px-4 py-2 bg-[#1740BE] text-white text-xs font-bold">수동 계정 반영</button>
+              <p className="text-[11px] text-[#677089]">입력하면 추출 결과로 만들어지고, 미분류 계정에는 AI 1차 분류 제안이 붙습니다. 아래 미리보기에서 제안을 승인/거절한 뒤 반영하세요.</p>
+              <button disabled={!!busy} onClick={() => run("manual", () => onManualAdd(parseManualRows()))} className="px-4 py-2 bg-[#1740BE] text-white text-xs font-bold">수동 입력 분석</button>
             </div>
           )}
         </div>
@@ -373,7 +376,7 @@ function ImportScreen({
         <RowsTable rows={previewRows} decisions={aiDecisions} onDecide={latestExtraction?.status === "accepted" ? undefined : decideAi} />
       </div>
 
-      <MappingTable statements={bundle.statements} />
+      <MappingTable statements={bundle.statements} onGoNext={onGoNext} />
     </div>
   );
 }
@@ -488,7 +491,8 @@ function RowsTable({ rows, decisions = {}, onDecide }: { rows: SourceRow[]; deci
   );
 }
 
-function MappingTable({ statements }: { statements: Statement[] }) {
+function MappingTable({ statements, onGoNext }: { statements: Statement[]; onGoNext?: () => void }) {
+  const unclassified = statements.filter((row) => row.standard_code === "X9999").length;
   return (
     <div className="bg-white border border-[#D0D5E0]">
       <div className="px-4 py-3 border-b border-[#D0D5E0] bg-[#F5F7FA]"><SectionLabel>계정 매핑</SectionLabel></div>
@@ -496,18 +500,30 @@ function MappingTable({ statements }: { statements: Statement[] }) {
         <thead><tr className="bg-[#F5F7FA]"><HeaderCell>원 계정</HeaderCell><HeaderCell right>금액</HeaderCell><HeaderCell>표준계정</HeaderCell><HeaderCell>코드</HeaderCell><HeaderCell>유형</HeaderCell><HeaderCell>근거</HeaderCell></tr></thead>
         <tbody>
           {statements.map((row) => (
-            <tr key={row.id} className={classNames("border-t border-[#EEF0F5]", row.mapping_type === "judgment" && "bg-amber-50/30")}>
+            <tr key={row.id} className={classNames("border-t border-[#EEF0F5]", row.mapping_type === "judgment" && "bg-amber-50/30", row.standard_code === "X9999" && "bg-red-50/40")}>
               <td className="px-4 py-2.5 font-semibold">{row.account_name}</td>
               <td className="px-4 py-2.5 text-right font-mono">{fmtKRW(row.amount)}</td>
               <td className="px-4 py-2.5">{row.normalized_account}</td>
-              <td className="px-4 py-2.5 font-mono text-[#677089]">{row.standard_code}</td>
-              <td className="px-4 py-2.5"><Pill color={row.mapping_type === "judgment" ? "amber" : "blue"}>{row.mapping_type === "judgment" ? "판단 필요" : "단순 매핑"}</Pill></td>
+              <td className={classNames("px-4 py-2.5 font-mono", row.standard_code === "X9999" ? "text-red-600 font-bold" : "text-[#677089]")}>{row.standard_code}</td>
+              <td className="px-4 py-2.5"><Pill color={row.standard_code === "X9999" ? "red" : row.mapping_type === "judgment" ? "amber" : "blue"}>{row.standard_code === "X9999" ? "미분류" : row.mapping_type === "judgment" ? "판단 필요" : "단순 매핑"}</Pill></td>
               <td className="px-4 py-2.5 text-[#677089] max-w-[320px] truncate">{row.rule_summary}</td>
             </tr>
           ))}
         </tbody>
       </table>
       {!statements.length && <div className="text-center py-8 text-xs text-[#677089]">반영된 계정이 없습니다</div>}
+      {!!statements.length && onGoNext && (
+        <div className="px-4 py-3 border-t border-[#D0D5E0] bg-[#F5F7FA] flex items-center justify-between">
+          <span className="text-xs text-[#677089]">
+            {unclassified > 0
+              ? `미분류 ${unclassified}건 — 추출 단계에서 AI 제안을 승인하거나 재분류하면 승인 단계 진행이 원활합니다`
+              : "모든 계정이 표준계정에 매핑되었습니다"}
+          </span>
+          <button onClick={onGoNext} className="px-4 py-2 text-xs font-bold text-white bg-[#1740BE]">
+            다음 단계로 →
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1008,6 +1024,7 @@ export default function App() {
             onDartReports={dartReports}
             onDartImport={dartImport}
             onManualAdd={manualAdd}
+            onGoNext={() => { setScreen("review"); setReviewTab("checklist"); }}
           />
         ) : (
           <ReviewScreen

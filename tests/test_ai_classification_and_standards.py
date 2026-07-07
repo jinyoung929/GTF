@@ -201,6 +201,42 @@ class AiClassificationCallTest(unittest.TestCase):
         self.assertNotIn("ai_suggestion", rows[1])
 
 
+class ExpandedStandardCatalogTest(unittest.TestCase):
+    def test_catalog_includes_ifrs_accounts_beyond_core_eight(self):
+        from gtf_app.domain import STANDARD_ACCOUNTS
+
+        for key in ("ppe", "deferred_tax_asset", "prepaid_expense", "share_capital", "retained_earnings", "cost_of_sales"):
+            self.assertIn(key, STANDARD_ACCOUNTS)
+
+    def test_ai_can_suggest_expanded_account(self):
+        row = {
+            "account_name": "이연법인세자산",
+            "amount": 35000000,
+            "ai_suggestion": {"account_key": "deferred_tax_asset", "label": "이연법인세자산", "confidence": "high", "rationale": "IAS 12 이연법인세자산"},
+        }
+        record = build_statement_record("2024", row)
+        self.assertEqual(record["standard_code"], "A1600")
+        self.assertEqual(record["mapping_source"], "ai_suggested_human_accepted")
+
+    def test_classification_candidates_exclude_only_other(self):
+        from gtf_app.domain import STANDARD_ACCOUNTS
+
+        candidates = [key for key in STANDARD_ACCOUNTS if key != "other"]
+        self.assertGreater(len(candidates), 8)
+        self.assertNotIn("other", candidates)
+
+    def test_seed_reference_data_handles_expanded_accounts(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        with open(os.path.join(os.path.dirname(_HERE), "sqlite", "schema.sql"), encoding="utf-8") as handle:
+            conn.executescript(handle.read())
+        server.seed_reference_data(conn)
+        from gtf_app.domain import STANDARD_ACCOUNTS
+
+        count = conn.execute("SELECT COUNT(*) AS c FROM standard_accounts").fetchone()["c"]
+        self.assertEqual(count, len(STANDARD_ACCOUNTS))
+
+
 class AiSuggestionHumanAcceptanceTest(unittest.TestCase):
     SUGGESTION = {
         "account_key": "financial_instrument",
