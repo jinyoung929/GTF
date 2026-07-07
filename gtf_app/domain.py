@@ -10,160 +10,163 @@ from datetime import datetime, timezone
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+# ifrs 필드는 변환 결과의 target_account(K-IFRS 표시 계정명)로 쓰이며, 한국 회사가
+# K-IFRS로 작성하는 재무제표 산출물에 맞춰 한국어 공식 표시명으로 둔다.
+# rule 필드의 기준서 번호는 국제 번호(IFRS 16 등) 대신 K-IFRS 체계(제1116호 등)를 사용한다.
 STANDARD_ACCOUNTS = {
     "cash": {
         "code": "A1000",
         "label": "현금및현금성자산",
-        "ifrs": "Cash and cash equivalents",
+        "ifrs": "현금및현금성자산",
         "type": "simple",
         "rule": "사용 제한 여부를 확인한 뒤 현금및현금성자산으로 단순 매핑합니다.",
     },
     "receivables": {
         "code": "A1100",
         "label": "매출채권",
-        "ifrs": "Trade and other receivables",
+        "ifrs": "매출채권및기타채권",
         "type": "judgment",
-        "rule": "IFRS 9 기준에 따라 매출채권 분류와 기대신용손실 충당금을 검토합니다.",
+        "rule": "K-IFRS 제1109호에 따라 매출채권 분류와 기대신용손실 충당금을 검토합니다.",
     },
     "inventory": {
         "code": "A1200",
         "label": "재고자산",
-        "ifrs": "Inventories",
+        "ifrs": "재고자산",
         "type": "simple",
-        "rule": "IAS 2 재고자산으로 매핑하고 원가와 순실현가능가치 비교를 검토합니다.",
+        "rule": "K-IFRS 제1002호에 따라 재고자산으로 매핑하고 원가와 순실현가능가치 비교를 검토합니다.",
     },
     "lease": {
         "code": "A2100",
         "label": "리스",
-        "ifrs": "Right-of-use asset and lease liability",
+        "ifrs": "사용권자산 및 리스부채",
         "type": "judgment",
-        "rule": "IFRS 16 측정을 위해 리스기간, 지급액, 선택권, 할인율을 추가 확인합니다.",
+        "rule": "K-IFRS 제1116호 측정을 위해 리스기간, 지급액, 선택권, 할인율을 추가 확인합니다.",
     },
     "development": {
         "code": "A3100",
         "label": "개발비",
-        "ifrs": "Intangible assets or R&D expense",
+        "ifrs": "무형자산 또는 연구개발비",
         "type": "judgment",
-        "rule": "IAS 38 개발단계 자산화 요건 충족 여부를 검토합니다.",
+        "rule": "K-IFRS 제1038호 개발단계 자산화 요건 충족 여부를 검토합니다.",
     },
     "revenue": {
         "code": "R1000",
         "label": "수익",
-        "ifrs": "Revenue from contracts with customers",
+        "ifrs": "고객과의 계약에서 생기는 수익",
         "type": "judgment",
-        "rule": "IFRS 15 기준에 따라 수행의무와 수익인식 시점을 확인합니다.",
+        "rule": "K-IFRS 제1115호에 따라 수행의무와 수익인식 시점을 확인합니다.",
     },
     "financial_instrument": {
         "code": "F1000",
         "label": "금융상품",
-        "ifrs": "Financial assets/liabilities",
+        "ifrs": "금융자산·금융부채",
         "type": "judgment",
-        "rule": "IFRS 9 기준에 따라 사업모형과 계약상 현금흐름 특성을 검토합니다.",
+        "rule": "K-IFRS 제1109호에 따라 사업모형과 계약상 현금흐름 특성을 검토합니다.",
     },
     "provision": {
         "code": "L2200",
         "label": "충당부채",
-        "ifrs": "Provisions and contingencies",
+        "ifrs": "충당부채",
         "type": "judgment",
-        "rule": "IAS 37 기준에 따라 현재의무, 유출가능성, 신뢰성 있는 추정 여부를 검토합니다.",
+        "rule": "K-IFRS 제1037호에 따라 현재의무, 유출가능성, 신뢰성 있는 추정 여부를 검토합니다.",
     },
     # 아래는 판단 체크리스트가 필요 없는 표시 매핑 계정으로, 키워드 사전에는 없지만
-    # AI 1차 분류가 미분류 계정을 IFRS 표시 라인으로 제안할 때 후보로 사용된다.
+    # AI 1차 분류가 미분류 계정을 K-IFRS 표시 라인으로 제안할 때 후보로 사용된다.
     "ppe": {
         "code": "A1500",
         "label": "유형자산",
-        "ifrs": "Property, plant and equipment",
+        "ifrs": "유형자산",
         "type": "simple",
-        "rule": "IAS 16 유형자산으로 매핑하고 감가상각과 손상 검토가 필요합니다.",
+        "rule": "K-IFRS 제1016호 유형자산으로 매핑하고 감가상각과 손상 검토가 필요합니다.",
     },
     "prepaid_expense": {
         "code": "A1300",
         "label": "선급비용",
-        "ifrs": "Prepayments",
+        "ifrs": "선급비용",
         "type": "simple",
-        "rule": "선급비용을 IFRS 선급금 라인으로 매핑합니다.",
+        "rule": "선급비용을 K-IFRS 선급비용 라인으로 매핑합니다.",
     },
     "deposits": {
         "code": "A1400",
         "label": "보증금",
-        "ifrs": "Guarantee deposits (financial asset)",
+        "ifrs": "장기보증금(금융자산)",
         "type": "simple",
         "rule": "임차보증금 등 반환 예정 보증금을 금융자산 성격의 예치금으로 매핑합니다.",
     },
     "deferred_tax_asset": {
         "code": "A1600",
         "label": "이연법인세자산",
-        "ifrs": "Deferred tax assets",
+        "ifrs": "이연법인세자산",
         "type": "simple",
-        "rule": "IAS 12 이연법인세자산으로 매핑하고 회수가능성 검토가 필요합니다.",
+        "rule": "K-IFRS 제1012호 이연법인세자산으로 매핑하고 회수가능성 검토가 필요합니다.",
     },
     "trade_payables": {
         "code": "L1000",
         "label": "매입채무",
-        "ifrs": "Trade and other payables",
+        "ifrs": "매입채무및기타채무",
         "type": "simple",
-        "rule": "매입채무와 미지급금을 IFRS 매입채무 라인으로 매핑합니다.",
+        "rule": "매입채무와 미지급금을 K-IFRS 매입채무 라인으로 매핑합니다.",
     },
     "other_payables": {
         "code": "L1100",
         "label": "미지급금",
-        "ifrs": "Other payables and accrued expenses",
+        "ifrs": "기타채무 및 미지급비용",
         "type": "simple",
         "rule": "미지급금, 미지급비용을 기타채무 라인으로 매핑합니다.",
     },
     "current_tax_liability": {
         "code": "L1200",
         "label": "미지급법인세",
-        "ifrs": "Current tax liabilities",
+        "ifrs": "당기법인세부채",
         "type": "simple",
-        "rule": "미지급법인세를 IAS 12 당기법인세부채로 매핑합니다.",
+        "rule": "미지급법인세를 K-IFRS 제1012호 당기법인세부채로 매핑합니다.",
     },
     "deferred_tax_liability": {
         "code": "L2100",
         "label": "이연법인세부채",
-        "ifrs": "Deferred tax liabilities",
+        "ifrs": "이연법인세부채",
         "type": "simple",
-        "rule": "IAS 12 이연법인세부채로 매핑합니다.",
+        "rule": "K-IFRS 제1012호 이연법인세부채로 매핑합니다.",
     },
     "share_capital": {
         "code": "E1000",
         "label": "자본금",
-        "ifrs": "Share capital",
+        "ifrs": "자본금",
         "type": "simple",
-        "rule": "자본금을 IFRS 자본금 라인으로 매핑합니다.",
+        "rule": "자본금을 K-IFRS 자본금 라인으로 매핑합니다.",
     },
     "capital_surplus": {
         "code": "E1100",
         "label": "자본잉여금",
-        "ifrs": "Share premium",
+        "ifrs": "자본잉여금",
         "type": "simple",
         "rule": "자본잉여금을 주식발행초과금 등 자본잉여 라인으로 매핑합니다.",
     },
     "retained_earnings": {
         "code": "E1200",
         "label": "이익잉여금",
-        "ifrs": "Retained earnings",
+        "ifrs": "이익잉여금",
         "type": "simple",
-        "rule": "이익잉여금 또는 결손금을 IFRS 이익잉여금 라인으로 매핑합니다.",
+        "rule": "이익잉여금 또는 결손금을 K-IFRS 이익잉여금 라인으로 매핑합니다.",
     },
     "cost_of_sales": {
         "code": "R2000",
         "label": "매출원가",
-        "ifrs": "Cost of sales",
+        "ifrs": "매출원가",
         "type": "simple",
-        "rule": "매출원가를 IFRS 매출원가 라인으로 매핑합니다.",
+        "rule": "매출원가를 K-IFRS 매출원가 라인으로 매핑합니다.",
     },
     "operating_expense": {
         "code": "R3000",
         "label": "판매비와관리비",
-        "ifrs": "Selling, general and administrative expenses",
+        "ifrs": "판매비와관리비",
         "type": "simple",
-        "rule": "판매비와관리비, 영업비용을 IFRS 판관비 라인으로 매핑합니다.",
+        "rule": "판매비와관리비, 영업비용을 K-IFRS 판매비와관리비 라인으로 매핑합니다.",
     },
     "other": {
         "code": "X9999",
         "label": "미분류 계정",
-        "ifrs": "Review required",
+        "ifrs": "검토 필요",
         "type": "judgment",
         "rule": "자동 매핑 신뢰도가 낮아 담당자 분류 검토가 필요합니다.",
     },
@@ -179,7 +182,7 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "line_item": "현금및현금성자산",
         "account_key": "cash",
         "display_order": 10,
-        "basis": "IAS 7 표시 목적의 현금및현금성자산 라인입니다.",
+        "basis": "K-IFRS 제1007호 표시 목적의 현금및현금성자산 라인입니다.",
     },
     {
         "id": "ifrs_bs_receivables",
@@ -189,7 +192,7 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "line_item": "매출채권 및 기타채권",
         "account_key": "receivables",
         "display_order": 20,
-        "basis": "IFRS 9 기대신용손실 검토 후 채권 라인에 표시합니다.",
+        "basis": "K-IFRS 제1109호 기대신용손실 검토 후 채권 라인에 표시합니다.",
     },
     {
         "id": "ifrs_bs_inventory",
@@ -199,7 +202,7 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "line_item": "재고자산",
         "account_key": "inventory",
         "display_order": 30,
-        "basis": "IAS 2에 따라 원가와 순실현가능가치를 검토한 뒤 표시합니다.",
+        "basis": "K-IFRS 제1002호에 따라 원가와 순실현가능가치를 검토한 뒤 표시합니다.",
     },
     {
         "id": "ifrs_bs_lease_asset",
@@ -209,7 +212,7 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "line_item": "사용권자산 및 리스부채",
         "account_key": "lease",
         "display_order": 90,
-        "basis": "IFRS 16에 따라 사용권자산과 리스부채 표시를 검토합니다.",
+        "basis": "K-IFRS 제1116호에 따라 사용권자산과 리스부채 표시를 검토합니다.",
     },
     {
         "id": "ifrs_bs_development",
@@ -219,7 +222,7 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "line_item": "무형자산 또는 연구개발비",
         "account_key": "development",
         "display_order": 100,
-        "basis": "IAS 38 개발단계 자산화 요건에 따라 표시 라인이 달라집니다.",
+        "basis": "K-IFRS 제1038호 개발단계 자산화 요건에 따라 표시 라인이 달라집니다.",
     },
     {
         "id": "ifrs_bs_financial_instrument",
@@ -229,7 +232,7 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "line_item": "금융자산 또는 금융부채",
         "account_key": "financial_instrument",
         "display_order": 110,
-        "basis": "IFRS 9 분류 결과에 따라 금융자산 또는 금융부채로 표시합니다.",
+        "basis": "K-IFRS 제1109호 분류 결과에 따라 금융자산 또는 금융부채로 표시합니다.",
     },
     {
         "id": "ifrs_bs_provision",
@@ -239,7 +242,7 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "line_item": "충당부채",
         "account_key": "provision",
         "display_order": 120,
-        "basis": "IAS 37 인식요건을 충족하면 충당부채로 표시합니다.",
+        "basis": "K-IFRS 제1037호 인식요건을 충족하면 충당부채로 표시합니다.",
     },
     {
         "id": "ifrs_pl_revenue",
@@ -249,7 +252,7 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "line_item": "고객과의 계약에서 생기는 수익",
         "account_key": "revenue",
         "display_order": 10,
-        "basis": "IFRS 15 수행의무와 인식시점 검토 후 수익 라인에 표시합니다.",
+        "basis": "K-IFRS 제1115호 수행의무와 인식시점 검토 후 수익 라인에 표시합니다.",
     },
     {
         "id": "ifrs_review_required",
@@ -839,13 +842,13 @@ def generate_conversion(
         elif account_key == "development":
             criteria = ["technical_feasibility", "intention_to_complete", "probable_future_benefits", "reliable_measurement"]
             qualifies = all(checklist_response.get(key) is True for key in criteria)
-            entry["target_account"] = "Intangible assets" if qualifies else "Research and development expense"
-            entry["calculation"] = "IAS 38 개발단계 자산화 요건 충족 여부를 검토했습니다."
+            entry["target_account"] = "무형자산" if qualifies else "연구개발비(비용)"
+            entry["calculation"] = "K-IFRS 제1038호 개발단계 자산화 요건 충족 여부를 검토했습니다."
         elif account_key == "revenue":
             timing = checklist_response.get("recognition_timing") or "추가 검토 필요"
             entry["calculation"] = f"수익인식 시점을 '{timing}'로 문서화했습니다."
         elif account_key in {"financial_instrument", "receivables"}:
-            entry["calculation"] = "IFRS 9 분류 및 기대신용손실 검토가 필요합니다."
+            entry["calculation"] = "K-IFRS 제1109호 분류 및 기대신용손실 검토가 필요합니다."
         elif account_key == "provision":
             recognized = all(
                 checklist_response.get(key) is True

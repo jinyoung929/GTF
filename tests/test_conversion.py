@@ -153,25 +153,25 @@ class TestDevelopmentCapitalization(unittest.TestCase):
     def test_all_criteria_met_capitalizes_as_intangible(self):
         _, entry = convert_single("개발비", 30_000_000, "judgment",
                                   response=dict(self.ALL_TRUE))
-        self.assertEqual(entry["target_account"], "Intangible assets")
+        self.assertEqual(entry["target_account"], "무형자산")
 
     def test_one_criterion_missing_expenses_it(self):
         partial = dict(self.ALL_TRUE)
         partial["reliable_measurement"] = False
         _, entry = convert_single("개발비", 30_000_000, "judgment",
                                   response=partial)
-        self.assertEqual(entry["target_account"], "Research and development expense")
+        self.assertEqual(entry["target_account"], "연구개발비(비용)")
 
     def test_none_criteria_defaults_to_expense(self):
         # 체크리스트 미입력(빈 응답)이면 자산화 요건 불충족 → 비용
         _, entry = convert_single("개발비", 30_000_000, "judgment", response={})
-        self.assertEqual(entry["target_account"], "Research and development expense")
+        self.assertEqual(entry["target_account"], "연구개발비(비용)")
 
     def test_truthy_but_not_true_does_not_qualify(self):
         # `is True` 엄격 비교이므로 "true"/1 같은 truthy 값은 자산화 안 됨
         almost = {k: 1 for k in self.ALL_TRUE}  # 값이 1 (True 아님)
         _, entry = convert_single("개발비", 30_000_000, "judgment", response=almost)
-        self.assertEqual(entry["target_account"], "Research and development expense")
+        self.assertEqual(entry["target_account"], "연구개발비(비용)")
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +229,7 @@ class TestMappingAggregation(unittest.TestCase):
 
     def test_simple_account_maps_without_adjustment(self):
         _, entry = convert_single("현금및현금성자산", 20_000_000, "simple")
-        self.assertEqual(entry["target_account"], "Cash and cash equivalents")
+        self.assertEqual(entry["target_account"], "현금및현금성자산")
         self.assertEqual(entry["adjustment"], 0)
 
     def test_judgment_rows_collected_simple_rows_excluded(self):

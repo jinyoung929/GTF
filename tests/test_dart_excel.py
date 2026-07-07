@@ -128,7 +128,7 @@ class DartImportAndWorkbookTests(unittest.TestCase):
                     {
                         "source_account": "리스부채",
                         "standard_code": "A2100",
-                        "target_account": "Right-of-use asset and lease liability",
+                        "target_account": "사용권자산 및 리스부채",
                         "statement_type": "재무상태표",
                         "statement_line_item": "사용권자산 및 리스부채",
                         "amount": 30_000_000,
