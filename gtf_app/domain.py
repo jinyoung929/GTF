@@ -173,6 +173,22 @@ STANDARD_ACCOUNTS = {
 }
 
 
+# 표시 순서는 개별 display_order를 손으로 매기지 않고 계정코드에서 도출한다.
+# 코드 앞자리가 재무제표 구분(A 자산 → 부채 L → 자본 E → 손익 R), 뒷자리 숫자가
+# 구분 내 표시 순서를 담고 있으므로, 계정을 추가할 때 적절한 코드만 부여하면 순서가
+# 자동으로 결정된다. F(금융상품)는 재무상태표상 자산·부채 사이에 표시한다.
+SECTION_ORDER = {"A": 1, "F": 2, "L": 3, "E": 4, "R": 5, "X": 9}
+
+
+def account_presentation_order(code: str) -> int:
+    prefix = (code or "")[:1]
+    try:
+        number = int((code or "")[1:])
+    except ValueError:
+        number = 9999
+    return SECTION_ORDER.get(prefix, 8) * 100000 + number
+
+
 FINANCIAL_STATEMENT_TEMPLATES = [
     {
         "id": "ifrs_bs_cash",
@@ -181,7 +197,6 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "section": "유동자산",
         "line_item": "현금및현금성자산",
         "account_key": "cash",
-        "display_order": 10,
         "basis": "K-IFRS 제1007호 표시 목적의 현금및현금성자산 라인입니다.",
     },
     {
@@ -191,7 +206,6 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "section": "유동자산",
         "line_item": "매출채권 및 기타채권",
         "account_key": "receivables",
-        "display_order": 20,
         "basis": "K-IFRS 제1109호 기대신용손실 검토 후 채권 라인에 표시합니다.",
     },
     {
@@ -201,7 +215,6 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "section": "유동자산",
         "line_item": "재고자산",
         "account_key": "inventory",
-        "display_order": 30,
         "basis": "K-IFRS 제1002호에 따라 원가와 순실현가능가치를 검토한 뒤 표시합니다.",
     },
     {
@@ -211,7 +224,6 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "section": "비유동자산/부채",
         "line_item": "사용권자산 및 리스부채",
         "account_key": "lease",
-        "display_order": 90,
         "basis": "K-IFRS 제1116호에 따라 사용권자산과 리스부채 표시를 검토합니다.",
     },
     {
@@ -221,7 +233,6 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "section": "무형자산/비용",
         "line_item": "무형자산 또는 연구개발비",
         "account_key": "development",
-        "display_order": 100,
         "basis": "K-IFRS 제1038호 개발단계 자산화 요건에 따라 표시 라인이 달라집니다.",
     },
     {
@@ -231,7 +242,6 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "section": "금융자산/금융부채",
         "line_item": "금융자산 또는 금융부채",
         "account_key": "financial_instrument",
-        "display_order": 110,
         "basis": "K-IFRS 제1109호 분류 결과에 따라 금융자산 또는 금융부채로 표시합니다.",
     },
     {
@@ -241,7 +251,6 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "section": "부채",
         "line_item": "충당부채",
         "account_key": "provision",
-        "display_order": 120,
         "basis": "K-IFRS 제1037호 인식요건을 충족하면 충당부채로 표시합니다.",
     },
     {
@@ -251,7 +260,6 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "section": "수익",
         "line_item": "고객과의 계약에서 생기는 수익",
         "account_key": "revenue",
-        "display_order": 10,
         "basis": "K-IFRS 제1115호 수행의무와 인식시점 검토 후 수익 라인에 표시합니다.",
     },
     {
@@ -261,7 +269,6 @@ FINANCIAL_STATEMENT_TEMPLATES = [
         "section": "미분류",
         "line_item": "검토자 분류 필요",
         "account_key": "other",
-        "display_order": 999,
         "basis": "내부 표준계정 매핑 신뢰도가 낮아 사람이 표시 라인을 확정합니다.",
     },
 ]
@@ -819,13 +826,14 @@ def generate_conversion(
             "adjustment": 0,
             "mapping_type": item["mapping_type"],
             "basis": item["rule_summary"],
+            # 표시 순서는 계정코드에서 도출한다 (A 자산 → F 금융상품 → L 부채 → E 자본 → R 손익).
+            "presentation_order": account_presentation_order(item["standard_code"]),
         }
         template = templates.get(account_key)
         if template:
             entry["statement_type"] = template["statement_type"]
             entry["statement_section"] = template["section"]
             entry["statement_line_item"] = template["line_item"]
-            entry["presentation_order"] = template["display_order"]
             entry["presentation_basis"] = template["basis"]
 
         if account_key == "lease":
@@ -883,6 +891,9 @@ def generate_conversion(
             )
 
         entries.append(entry)
+
+    # 조정분개를 계정코드 기반 표시 순서(재무상태표 → 손익계산서)로 정렬한다.
+    entries.sort(key=lambda e: (e.get("presentation_order", 800000), e.get("standard_code", "")))
 
     return {
         "project": {

@@ -237,6 +237,37 @@ class ExpandedStandardCatalogTest(unittest.TestCase):
         self.assertEqual(count, len(STANDARD_ACCOUNTS))
 
 
+class PresentationOrderTest(unittest.TestCase):
+    def test_order_derived_from_account_code(self):
+        from gtf_app.domain import account_presentation_order
+
+        # 자산(A) < 금융상품(F) < 부채(L) < 자본(E) < 손익(R) < 미분류(X)
+        self.assertLess(account_presentation_order("A1000"), account_presentation_order("A1100"))
+        self.assertLess(account_presentation_order("A3100"), account_presentation_order("F1000"))
+        self.assertLess(account_presentation_order("F1000"), account_presentation_order("L1000"))
+        self.assertLess(account_presentation_order("L2200"), account_presentation_order("E1000"))
+        self.assertLess(account_presentation_order("E1200"), account_presentation_order("R1000"))
+        self.assertLess(account_presentation_order("R3000"), account_presentation_order("X9999"))
+
+    def test_malformed_code_does_not_crash(self):
+        from gtf_app.domain import account_presentation_order
+
+        self.assertIsInstance(account_presentation_order(""), int)
+        self.assertIsInstance(account_presentation_order("ZZZZ"), int)
+
+    def test_conversion_entries_sorted_by_code(self):
+        stmts = [
+            build_statement_record("2024", {"account_name": "매출액", "amount": 1000}),
+            build_statement_record("2024", {"account_name": "현금및현금성자산", "amount": 1000}),
+            build_statement_record("2024", {"account_name": "충당부채", "amount": 1000}),
+            build_statement_record("2024", {"account_name": "매출채권", "amount": 1000}),
+        ]
+        output = generate_conversion(PROJECT, stmts, {})
+        codes = [entry["standard_code"] for entry in output["entries"]]
+        self.assertEqual(codes, sorted(codes, key=lambda c: __import__("server").account_presentation_order(c)))
+        self.assertEqual(codes[0], "A1000")  # 현금이 맨 앞
+
+
 class AiSuggestionHumanAcceptanceTest(unittest.TestCase):
     SUGGESTION = {
         "account_key": "financial_instrument",

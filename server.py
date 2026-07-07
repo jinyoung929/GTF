@@ -46,6 +46,7 @@ from gtf_app.domain import (
     FINANCIAL_STATEMENT_TEMPLATES,
     STANDARD_ACCOUNTS,
     STANDARDS_PARAGRAPHS,
+    account_presentation_order,
     build_review_summary,
     build_statement_record,
     conversion_adjustments_csv,
@@ -543,7 +544,8 @@ def seed_reference_data(conn: sqlite3.Connection) -> None:
                 template["section"],
                 template["line_item"],
                 template["account_key"],
-                template["display_order"],
+                # display_order는 손으로 매기지 않고 계정코드에서 도출해 채운다.
+                account_presentation_order(STANDARD_ACCOUNTS[template["account_key"]]["code"]),
                 template["basis"],
             ),
         )
