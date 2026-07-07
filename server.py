@@ -43,7 +43,6 @@ from gtf_app.dart import (
 )
 from gtf_app.domain import (
     CHECKLISTS,
-    FINANCIAL_STATEMENT_TEMPLATES,
     STANDARD_ACCOUNTS,
     STANDARDS_PARAGRAPHS,
     account_presentation_order,
@@ -67,6 +66,7 @@ DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "gtf.sqlite3"
 SQLITE_SCHEMA_PATH = ROOT / "sqlite" / "schema.sql"
+STATEMENT_TEMPLATES_SEED_PATH = ROOT / "seeds" / "financial_statement_templates.sql"
 FIGMA_DIST_DIR = ROOT / "figma_make" / "dist"
 ENV_PATHS = (ROOT / ".env", ROOT / ".env.local")
 GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024
@@ -232,6 +232,8 @@ def init_db() -> None:
             ensure_auth_tables(conn)
             conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_read_only boolean NOT NULL DEFAULT false")
             ensure_standards_paragraphs(conn)
+            ensure_reference_accounts(conn)
+            ensure_statement_templates(conn)
             ensure_admin_user(conn)
         return
     with connect() as conn:
@@ -249,6 +251,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE projects ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
         seed_reference_data(conn)
         ensure_standards_paragraphs(conn)
+        ensure_reference_accounts(conn)
+        ensure_statement_templates(conn)
         ensure_admin_user(conn)
 
 
@@ -406,6 +410,42 @@ def ensure_demo_user(conn) -> dict | None:
     return row_to_dict(conn.execute("SELECT * FROM app_users WHERE id = ?", (DEMO_USER_ID,)).fetchone())
 
 
+def ensure_reference_accounts(conn) -> None:
+    """표준계정을 SQLite/Postgres 양쪽에 upsert한다.
+
+    표준양식 라인 시드가 account_key 외래키를 참조하므로 반드시 먼저 실행되어야 하며,
+    Postgres 배포에서도 코드의 계정 카탈로그 확장이 재배포만으로 반영되게 한다.
+    """
+    now = utc_now()
+    for account_key, account in STANDARD_ACCOUNTS.items():
+        conn.execute(
+            """
+            INSERT INTO standard_accounts (
+                account_key, standard_code, internal_label, ifrs_account, mapping_type, rule_summary, active, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, true, ?)
+            ON CONFLICT (account_key) DO UPDATE SET
+                standard_code = excluded.standard_code,
+                internal_label = excluded.internal_label,
+                ifrs_account = excluded.ifrs_account,
+                mapping_type = excluded.mapping_type,
+                rule_summary = excluded.rule_summary,
+                active = true,
+                updated_at = excluded.updated_at
+            """,
+            (account_key, account["code"], account["label"], account["ifrs"], account["type"], account["rule"], now),
+        )
+
+
+def ensure_statement_templates(conn) -> None:
+    """표준 재무제표 양식 라인 기준 테이블을 SQL 시드 파일(단일 출처)에서 upsert한다.
+
+    파일은 SQLite/Postgres 공통 문법(INSERT ... ON CONFLICT DO UPDATE) 단일 문장이라
+    양쪽 백엔드에서 그대로 실행된다.
+    """
+    conn.execute(STATEMENT_TEMPLATES_SEED_PATH.read_text(encoding="utf-8"))
+
+
 def seed_reference_data(conn: sqlite3.Connection) -> None:
     now = utc_now()
     aliases = {
@@ -528,27 +568,8 @@ def seed_reference_data(conn: sqlite3.Connection) -> None:
             (ref.lower().replace(" ", "_"), "IFRS", ref, ref, "기준서 원문 연결 전까지 요약 기준정보로 사용합니다."),
         )
 
-    for template in FINANCIAL_STATEMENT_TEMPLATES:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO financial_statement_templates (
-                id, standard_set, statement_type, section, line_item, account_key,
-                display_order, basis, active
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-            """,
-            (
-                template["id"],
-                template["standard_set"],
-                template["statement_type"],
-                template["section"],
-                template["line_item"],
-                template["account_key"],
-                # display_order는 손으로 매기지 않고 계정코드에서 도출해 채운다.
-                account_presentation_order(STANDARD_ACCOUNTS[template["account_key"]]["code"]),
-                template["basis"],
-            ),
-        )
+    # 표준 재무제표 양식 라인은 seeds/financial_statement_templates.sql이 단일 출처이며
+    # init_db에서 ensure_statement_templates가 양쪽 백엔드에 upsert한다.
 
 
 def row_to_dict(row) -> dict:

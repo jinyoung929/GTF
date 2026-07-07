@@ -189,89 +189,19 @@ def account_presentation_order(code: str) -> int:
     return SECTION_ORDER.get(prefix, 8) * 100000 + number
 
 
-FINANCIAL_STATEMENT_TEMPLATES = [
-    {
-        "id": "ifrs_bs_cash",
-        "standard_set": "IFRS",
-        "statement_type": "재무상태표",
-        "section": "유동자산",
-        "line_item": "현금및현금성자산",
-        "account_key": "cash",
-        "basis": "K-IFRS 제1007호 표시 목적의 현금및현금성자산 라인입니다.",
-    },
-    {
-        "id": "ifrs_bs_receivables",
-        "standard_set": "IFRS",
-        "statement_type": "재무상태표",
-        "section": "유동자산",
-        "line_item": "매출채권 및 기타채권",
-        "account_key": "receivables",
-        "basis": "K-IFRS 제1109호 기대신용손실 검토 후 채권 라인에 표시합니다.",
-    },
-    {
-        "id": "ifrs_bs_inventory",
-        "standard_set": "IFRS",
-        "statement_type": "재무상태표",
-        "section": "유동자산",
-        "line_item": "재고자산",
-        "account_key": "inventory",
-        "basis": "K-IFRS 제1002호에 따라 원가와 순실현가능가치를 검토한 뒤 표시합니다.",
-    },
-    {
-        "id": "ifrs_bs_lease_asset",
-        "standard_set": "IFRS",
-        "statement_type": "재무상태표",
-        "section": "비유동자산/부채",
-        "line_item": "사용권자산 및 리스부채",
-        "account_key": "lease",
-        "basis": "K-IFRS 제1116호에 따라 사용권자산과 리스부채 표시를 검토합니다.",
-    },
-    {
-        "id": "ifrs_bs_development",
-        "standard_set": "IFRS",
-        "statement_type": "재무상태표 또는 손익계산서",
-        "section": "무형자산/비용",
-        "line_item": "무형자산 또는 연구개발비",
-        "account_key": "development",
-        "basis": "K-IFRS 제1038호 개발단계 자산화 요건에 따라 표시 라인이 달라집니다.",
-    },
-    {
-        "id": "ifrs_bs_financial_instrument",
-        "standard_set": "IFRS",
-        "statement_type": "재무상태표",
-        "section": "금융자산/금융부채",
-        "line_item": "금융자산 또는 금융부채",
-        "account_key": "financial_instrument",
-        "basis": "K-IFRS 제1109호 분류 결과에 따라 금융자산 또는 금융부채로 표시합니다.",
-    },
-    {
-        "id": "ifrs_bs_provision",
-        "standard_set": "IFRS",
-        "statement_type": "재무상태표",
-        "section": "부채",
-        "line_item": "충당부채",
-        "account_key": "provision",
-        "basis": "K-IFRS 제1037호 인식요건을 충족하면 충당부채로 표시합니다.",
-    },
-    {
-        "id": "ifrs_pl_revenue",
-        "standard_set": "IFRS",
-        "statement_type": "손익계산서",
-        "section": "수익",
-        "line_item": "고객과의 계약에서 생기는 수익",
-        "account_key": "revenue",
-        "basis": "K-IFRS 제1115호 수행의무와 인식시점 검토 후 수익 라인에 표시합니다.",
-    },
-    {
-        "id": "ifrs_review_required",
-        "standard_set": "IFRS",
-        "statement_type": "검토 필요",
-        "section": "미분류",
-        "line_item": "검토자 분류 필요",
-        "account_key": "other",
-        "basis": "내부 표준계정 매핑 신뢰도가 낮아 사람이 표시 라인을 확정합니다.",
-    },
-]
+def account_key_for_statement(item: dict) -> str:
+    """계정 행이 확정한 표준코드에서 계정키를 복원한다.
+
+    담당자가 AI 제안을 승인해 재분류한 계정(예: 임차보증금 → F1000)은 계정명 키워드로는
+    다시 찾을 수 없으므로, 저장된 standard_code를 우선하고 없을 때만 계정명 정규화로 보완한다.
+    """
+    code_to_key = {account["code"]: key for key, account in STANDARD_ACCOUNTS.items()}
+    return code_to_key.get(str(item.get("standard_code") or "")) or normalize_account_name(item["account_name"])
+
+
+# 표준 재무제표 양식 라인(계정 → 표시 라인 매핑)은 seeds/financial_statement_templates.sql이
+# 단일 출처이며, 서버 시작 시 financial_statement_templates 테이블로 upsert된다.
+# 런타임 조회는 server.load_statement_template_map이 DB에서 수행한다.
 
 
 CHECKLISTS = {
@@ -808,14 +738,14 @@ def generate_conversion(
     templates = templates or {}
     if standards_map is None:
         standards_map = standards_paragraphs_for_accounts(
-            normalize_account_name(item["account_name"]) for item in statements
+            account_key_for_statement(item) for item in statements
         )
     entries = []
     notes = []
     judgment_items = []
 
     for item in statements:
-        account_key = normalize_account_name(item["account_name"])
+        account_key = account_key_for_statement(item)
         standard = STANDARD_ACCOUNTS[account_key]
         checklist_response = responses.get(item["id"], {})
         entry = {

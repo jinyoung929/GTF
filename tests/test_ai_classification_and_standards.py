@@ -237,6 +237,67 @@ class ExpandedStandardCatalogTest(unittest.TestCase):
         self.assertEqual(count, len(STANDARD_ACCOUNTS))
 
 
+class StatementTemplateSeedTest(unittest.TestCase):
+    """표준양식 라인 SQL 시드(단일 출처)가 전 계정을 커버하고 코드 도출 순서와 일치하는지 검증."""
+
+    def setUp(self):
+        import sqlite3
+
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(server.SQLITE_SCHEMA_PATH.read_text(encoding="utf-8"))
+        server.ensure_reference_accounts(self.conn)
+        server.ensure_statement_templates(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def rows(self):
+        return self.conn.execute(
+            "SELECT account_key, display_order, line_item FROM financial_statement_templates"
+        ).fetchall()
+
+    def test_every_standard_account_has_a_template_line(self):
+        from gtf_app.domain import STANDARD_ACCOUNTS
+
+        mapped = {row["account_key"] for row in self.rows()}
+        self.assertEqual(mapped, set(STANDARD_ACCOUNTS.keys()))
+
+    def test_display_order_matches_account_code_derivation(self):
+        from gtf_app.domain import STANDARD_ACCOUNTS, account_presentation_order
+
+        for row in self.rows():
+            code = STANDARD_ACCOUNTS[row["account_key"]]["code"]
+            self.assertEqual(
+                row["display_order"],
+                account_presentation_order(code),
+                f"{row['account_key']}의 SQL display_order가 계정코드 도출값과 다릅니다",
+            )
+
+    def test_seed_is_idempotent(self):
+        server.ensure_reference_accounts(self.conn)
+        server.ensure_statement_templates(self.conn)
+        self.assertEqual(len(self.rows()), 22)
+
+    def test_new_catalog_accounts_get_statement_lines_in_conversion(self):
+        templates = {
+            row["account_key"]: dict(row)
+            for row in self.conn.execute("SELECT * FROM financial_statement_templates").fetchall()
+        }
+        statement = build_statement_record(
+            "2024",
+            {
+                "account_name": "이연법인세자산",
+                "amount": 35000000.0,
+                "ai_suggestion": {"account_key": "deferred_tax_asset", "label": "이연법인세자산", "confidence": "high", "rationale": "IAS 12"},
+            },
+        )
+        output = generate_conversion(PROJECT, [statement], {}, templates)
+        entry = output["entries"][0]
+        self.assertEqual(entry["statement_line_item"], "이연법인세자산")
+        self.assertEqual(entry["statement_type"], "재무상태표")
+
+
 class PresentationOrderTest(unittest.TestCase):
     def test_order_derived_from_account_code(self):
         from gtf_app.domain import account_presentation_order
