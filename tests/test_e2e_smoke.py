@@ -136,8 +136,9 @@ class EndToEndSmokeTest(unittest.TestCase):
         )
         self.assertEqual(extraction["provider"], "dart_api")
         self.assertEqual(extraction["metadata"]["raw_row_count"], 213)
-        self.assertEqual(extraction["metadata"]["filtered_row_count"], 13)
-        self.assertEqual(len(extraction["rows"]), 13)
+        # 확장 계정 카탈로그(유형자산·이연법인세자산·투자부동산·퇴직급여 등) 인식으로 변환 대상 증가.
+        self.assertEqual(extraction["metadata"]["filtered_row_count"], 17)
+        self.assertEqual(len(extraction["rows"]), 17)
         self.assertEqual(
             next(row for row in extraction["rows"] if row["account_name"] == "단기금융상품")["account_key"],
             "financial_instrument",
@@ -148,12 +149,12 @@ class EndToEndSmokeTest(unittest.TestCase):
             f"/api/projects/{project_id}/extractions/{extraction['id']}/accept",
             {},
         )
-        self.assertEqual(len(accepted["statements"]), 13)
+        self.assertEqual(len(accepted["statements"]), 17)
         financial_product = next(row for row in accepted["statements"] if row["account_name"] == "단기금융상품")
         self.assertEqual(financial_product["standard_code"], "F1000")
 
         conversion = self.client.json("POST", f"/api/projects/{project_id}/convert", {"responses": {}})
-        self.assertEqual(len(conversion["entries"]), 13)
+        self.assertEqual(len(conversion["entries"]), 17)
         self.assertIn("단기금융상품", [entry["source_account"] for entry in conversion["entries"]])
 
         status, workbook_bytes, content_type = self.client.request(
@@ -168,7 +169,7 @@ class EndToEndSmokeTest(unittest.TestCase):
             sheet1 = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
             sheet2 = archive.read("xl/worksheets/sheet2.xml").decode("utf-8")
         self.assertEqual(sheet1.count("<row "), 217)
-        self.assertEqual(sheet2.count("<row "), 14)
+        self.assertEqual(sheet2.count("<row "), 18)
         self.assertIn("자산총계", sheet1)
         self.assertIn("제외사유", sheet1)
         self.assertIn("단기금융상품", sheet2)

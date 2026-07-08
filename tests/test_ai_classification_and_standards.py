@@ -209,13 +209,14 @@ class ExpandedStandardCatalogTest(unittest.TestCase):
             self.assertIn(key, STANDARD_ACCOUNTS)
 
     def test_ai_can_suggest_expanded_account(self):
+        # 임차보증금은 키워드 사전에 없어 미분류(X9999)로 빠지므로 AI 제안 대상이 된다.
         row = {
-            "account_name": "이연법인세자산",
-            "amount": 35000000,
-            "ai_suggestion": {"account_key": "deferred_tax_asset", "label": "이연법인세자산", "confidence": "high", "rationale": "IAS 12 이연법인세자산"},
+            "account_name": "임차보증금",
+            "amount": 60000000,
+            "ai_suggestion": {"account_key": "deposits", "label": "보증금", "confidence": "high", "rationale": "반환 예정 보증금은 금융자산 성격"},
         }
         record = build_statement_record("2024", row)
-        self.assertEqual(record["standard_code"], "A1600")
+        self.assertEqual(record["standard_code"], "A1400")
         self.assertEqual(record["mapping_source"], "ai_suggested_human_accepted")
 
     def test_classification_candidates_exclude_only_other(self):
@@ -275,9 +276,11 @@ class StatementTemplateSeedTest(unittest.TestCase):
             )
 
     def test_seed_is_idempotent(self):
+        from gtf_app.domain import STANDARD_ACCOUNTS
+
         server.ensure_reference_accounts(self.conn)
         server.ensure_statement_templates(self.conn)
-        self.assertEqual(len(self.rows()), 22)
+        self.assertEqual(len(self.rows()), len(STANDARD_ACCOUNTS))
 
     def test_new_catalog_accounts_get_statement_lines_in_conversion(self):
         templates = {

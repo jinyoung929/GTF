@@ -271,13 +271,92 @@ class TestNormalizeAccountName(unittest.TestCase):
         self.assertEqual(server.normalize_account_name("  Cash  "), "cash")
 
     def test_unknown_account_falls_back_to_other(self):
-        self.assertEqual(server.normalize_account_name("이연법인세자산"), "other")
+        self.assertEqual(server.normalize_account_name("가수금"), "other")
+
+    def test_expanded_kifrs_difference_accounts_resolve(self):
+        self.assertEqual(server.normalize_account_name("퇴직급여충당부채"), "retirement_benefit")
+        self.assertEqual(server.normalize_account_name("투자부동산"), "investment_property")
+        self.assertEqual(server.normalize_account_name("정부보조금"), "government_grant")
+        self.assertEqual(server.normalize_account_name("차입원가"), "borrowing_cost")
+        self.assertEqual(server.normalize_account_name("이연법인세자산"), "deferred_tax_asset")
+        self.assertEqual(server.normalize_account_name("유형자산"), "ppe")
 
     def test_known_limitation_substring_overmatch(self):
         # [한계 문서화] 부분문자열 매칭이라 '무형자산'이 무조건 development로 감.
         # 무형자산이 개발비만은 아니므로 오탐 가능 — 리팩터링 시 이 테스트가 신호가 됨.
         self.assertEqual(server.normalize_account_name("영업권"), "other")   # 무형자산이지만 별칭 없음
         self.assertEqual(server.normalize_account_name("무형자산"), "development")  # 현재 동작(주의)
+
+
+# ---------------------------------------------------------------------------
+# K-IFRS 차이 영역 6종 — 상세 변환 로직
+# ---------------------------------------------------------------------------
+
+class TestKifrsDifferenceAreas(unittest.TestCase):
+    """퇴직급여·유형자산·투자부동산·이연법인세·정부보조금·차입원가 측정/분류 로직."""
+
+    def _entry(self, account_name, amount, response):
+        stmt = server.build_statement_record("2024", {"account_name": account_name, "amount": amount})
+        result = server.generate_conversion(PROJECT, [stmt], {stmt["id"]: response})
+        return result["entries"][0]
+
+    def test_retirement_benefit_net_liability(self):
+        # 순확정급여부채 = DBO 1,200 − 사외적립 300 = 900, K-GAAP 700 → 조정 +200
+        e = self._entry("퇴직급여충당부채", 700, {"dbo_amount": 1200, "plan_assets": 300})
+        self.assertEqual(e["standard_code"], "L2300")
+        self.assertEqual(e["adjustment"], 200)
+        self.assertIn("OCI", e["calculation"])
+
+    def test_ppe_revaluation_increase(self):
+        e = self._entry("유형자산", 400, {"measurement_model": "재평가모형", "fair_value": 500})
+        self.assertEqual(e["adjustment"], 100)
+        self.assertIn("재평가잉여금", e["calculation"])
+
+    def test_ppe_impairment_loss(self):
+        e = self._entry("유형자산", 400, {"measurement_model": "원가모형", "recoverable_amount": 300})
+        self.assertEqual(e["adjustment"], -100)
+        self.assertIn("손상차손", e["calculation"])
+
+    def test_ppe_cost_model_no_adjustment(self):
+        e = self._entry("유형자산", 400, {"measurement_model": "원가모형"})
+        self.assertEqual(e["adjustment"], 0)
+
+    def test_investment_property_fair_value_pl(self):
+        e = self._entry("투자부동산", 200, {"measurement_model": "공정가치모형", "fair_value": 250})
+        self.assertEqual(e["adjustment"], 50)
+        self.assertIn("당기손익", e["calculation"])
+
+    def test_deferred_tax_gross_up(self):
+        # 일시적차이 500 × 22% = 110, K-GAAP 80 → 조정 +30
+        e = self._entry("이연법인세자산", 80, {"temporary_difference": 500, "tax_rate": 22, "realizable": True})
+        self.assertEqual(e["adjustment"], 30)
+
+    def test_deferred_tax_not_realizable_limits_recognition(self):
+        e = self._entry("이연법인세자산", 80, {"temporary_difference": 500, "tax_rate": 22, "realizable": False})
+        self.assertEqual(e["adjustment"], 0)
+        self.assertIn("인식 제한", e["target_account"])
+
+    def test_borrowing_cost_capitalization(self):
+        # 지출 1,000 × 5% × 12/12 = 50
+        e = self._entry("차입원가", 0, {"qualifying_asset": True, "expenditure": 1000, "capitalization_rate": 5, "capitalization_months": 12})
+        self.assertEqual(e["adjustment"], 50)
+        self.assertIn("자본화", e["target_account"])
+
+    def test_borrowing_cost_not_qualifying_expensed(self):
+        e = self._entry("차입원가", 0, {"qualifying_asset": False})
+        self.assertEqual(e["adjustment"], 0)
+        self.assertIn("비용", e["calculation"])
+
+    def test_government_grant_presentation_documented(self):
+        e = self._entry("정부보조금", 100, {"grant_relation": "자산관련", "presentation_method": "이연수익법"})
+        self.assertEqual(e["adjustment"], 0)
+        self.assertIn("이연수익법", e["calculation"])
+
+    def test_all_new_areas_are_judgment(self):
+        for name in ["퇴직급여충당부채", "유형자산", "투자부동산", "이연법인세자산", "정부보조금", "차입원가"]:
+            stmt = server.build_statement_record("2024", {"account_name": name, "amount": 100})
+            self.assertEqual(stmt["mapping_type"], "judgment", f"{name}이 판단 필요가 아님")
+            self.assertTrue(stmt["checklist"], f"{name}에 체크리스트가 없음")
 
 
 if __name__ == "__main__":

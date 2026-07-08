@@ -76,8 +76,8 @@ STANDARD_ACCOUNTS = {
         "code": "A1500",
         "label": "유형자산",
         "ifrs": "유형자산",
-        "type": "simple",
-        "rule": "K-IFRS 제1016호 유형자산으로 매핑하고 감가상각과 손상 검토가 필요합니다.",
+        "type": "judgment",
+        "rule": "K-IFRS 제1016·1036호에 따라 원가모형과 재평가모형 중 선택하고 손상 징후가 있으면 회수가능액과 비교해 손상차손을 인식합니다.",
     },
     "prepaid_expense": {
         "code": "A1300",
@@ -97,8 +97,8 @@ STANDARD_ACCOUNTS = {
         "code": "A1600",
         "label": "이연법인세자산",
         "ifrs": "이연법인세자산",
-        "type": "simple",
-        "rule": "K-IFRS 제1012호 이연법인세자산으로 매핑하고 회수가능성 검토가 필요합니다.",
+        "type": "judgment",
+        "rule": "K-IFRS 제1012호에 따라 일시적차이에 세율을 적용해 총액법으로 이연법인세자산을 인식하고 회수가능성을 검토합니다.",
     },
     "trade_payables": {
         "code": "L1000",
@@ -162,6 +162,35 @@ STANDARD_ACCOUNTS = {
         "ifrs": "판매비와관리비",
         "type": "simple",
         "rule": "판매비와관리비, 영업비용을 K-IFRS 판매비와관리비 라인으로 매핑합니다.",
+    },
+    # K-GAAP↔K-IFRS 차이가 큰 판단 필요 영역 (측정·인식 조정 발생)
+    "retirement_benefit": {
+        "code": "L2300",
+        "label": "퇴직급여충당부채",
+        "ifrs": "순확정급여부채",
+        "type": "judgment",
+        "rule": "K-IFRS 제1019호에 따라 확정급여채무를 보험수리적으로 평가하고 사외적립자산을 차감해 순확정급여부채를 측정하며, 재측정요소는 기타포괄손익으로 인식합니다.",
+    },
+    "investment_property": {
+        "code": "A1700",
+        "label": "투자부동산",
+        "ifrs": "투자부동산",
+        "type": "judgment",
+        "rule": "K-IFRS 제1040호에 따라 원가모형과 공정가치모형 중 회계정책을 선택하고, 공정가치모형이면 평가손익을 당기손익에 반영합니다.",
+    },
+    "government_grant": {
+        "code": "L2400",
+        "label": "정부보조금",
+        "ifrs": "이연정부보조금수익",
+        "type": "judgment",
+        "rule": "K-IFRS 제1020호에 따라 자산관련 보조금의 표시 방법(자산 차감법 또는 이연수익법)을 결정하고 체계적으로 수익 인식합니다.",
+    },
+    "borrowing_cost": {
+        "code": "R4000",
+        "label": "차입원가",
+        "ifrs": "금융원가(차입원가 자본화 조정)",
+        "type": "judgment",
+        "rule": "K-IFRS 제1023호에 따라 적격자산 취득에 직접 관련된 차입원가를 자본화 대상으로 판단합니다.",
     },
     "other": {
         "code": "X9999",
@@ -236,6 +265,35 @@ CHECKLISTS = {
     "receivables": [
         {"key": "credit_risk_method", "label": "기대신용손실 산정 방식", "type": "text", "required": True},
         {"key": "aging_available", "label": "연령분석표가 있는가?", "type": "boolean", "required": True},
+    ],
+    "ppe": [
+        {"key": "measurement_model", "label": "측정모형 (원가모형 / 재평가모형)", "type": "text", "required": True},
+        {"key": "fair_value", "label": "재평가모형 선택 시 공정가치", "type": "number", "required": False},
+        {"key": "recoverable_amount", "label": "회수가능액 (손상검토용, 없으면 0)", "type": "number", "required": False},
+    ],
+    "deferred_tax_asset": [
+        {"key": "temporary_difference", "label": "차감할 일시적차이 총액", "type": "number", "required": True},
+        {"key": "tax_rate", "label": "적용 세율(%)", "type": "number", "required": True},
+        {"key": "realizable", "label": "미래 과세소득으로 회수 가능성이 높은가?", "type": "boolean", "required": True},
+    ],
+    "retirement_benefit": [
+        {"key": "dbo_amount", "label": "확정급여채무 현재가치(보험수리적 평가액)", "type": "number", "required": True},
+        {"key": "plan_assets", "label": "사외적립자산 공정가치", "type": "number", "required": False},
+        {"key": "discount_rate", "label": "할인율(%)", "type": "number", "required": False},
+    ],
+    "investment_property": [
+        {"key": "measurement_model", "label": "측정모형 (원가모형 / 공정가치모형)", "type": "text", "required": True},
+        {"key": "fair_value", "label": "공정가치모형 선택 시 공정가치", "type": "number", "required": False},
+    ],
+    "government_grant": [
+        {"key": "grant_relation", "label": "보조금 성격 (자산관련 / 수익관련)", "type": "text", "required": True},
+        {"key": "presentation_method", "label": "자산관련 표시 방법 (자산차감법 / 이연수익법)", "type": "text", "required": True},
+    ],
+    "borrowing_cost": [
+        {"key": "qualifying_asset", "label": "적격자산(취득에 상당한 기간 소요)인가?", "type": "boolean", "required": True},
+        {"key": "expenditure", "label": "적격자산에 대한 평균 지출액", "type": "number", "required": False},
+        {"key": "capitalization_rate", "label": "자본화이자율(%)", "type": "number", "required": False},
+        {"key": "capitalization_months", "label": "자본화 기간(개월)", "type": "number", "required": False},
     ],
     "other": [
         {"key": "management_memo", "label": "경영진 분류 메모", "type": "text", "required": True},
@@ -448,6 +506,86 @@ STANDARDS_PARAGRAPHS = [
         "content": "현금및현금성자산은 통화 및 통화대용증권과 취득 당시 만기가 3개월 이내에 도래하는 유동성이 높은 금융상품 등을 포함한다.",
         "keywords": "현금,현금성자산,통화대용증권,만기 3개월",
     },
+    {
+        "id": "kifrs_1019_p57",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1019호 종업원급여",
+        "paragraph_label": "문단 57",
+        "account_key": "retirement_benefit",
+        "title": "순확정급여부채(자산)의 인식",
+        "content": "확정급여제도의 순확정급여부채(자산)는 확정급여채무의 현재가치에서 사외적립자산의 공정가치를 차감하여 결정한다. 확정급여채무는 예측단위적립방식으로 보험수리적 평가하며, 순확정급여부채(자산)의 재측정요소는 기타포괄손익으로 인식한다.",
+        "keywords": "퇴직급여,확정급여채무,사외적립자산,순확정급여부채,보험수리적,재측정,OCI",
+    },
+    {
+        "id": "kgaap_ch21_severance",
+        "standard_set": "K-GAAP",
+        "reference_code": "일반기업회계기준 제21장 종업원급여",
+        "paragraph_label": "퇴직급여충당부채",
+        "account_key": "retirement_benefit",
+        "title": "퇴직금추계액 기준 충당부채",
+        "content": "확정급여형 퇴직급여제도의 퇴직급여충당부채는 보고기간말 현재 전 종업원이 일시에 퇴직할 경우 지급하여야 할 퇴직금추계액을 기준으로 인식한다(보험수리적 평가를 요구하지 않음).",
+        "keywords": "퇴직급여충당부채,퇴직금추계액,확정급여형",
+    },
+    {
+        "id": "kifrs_1016_p31",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1016호 유형자산",
+        "paragraph_label": "문단 31",
+        "account_key": "ppe",
+        "title": "재평가모형",
+        "content": "재평가모형을 선택한 경우 공정가치를 신뢰성 있게 측정할 수 있는 유형자산은 재평가일의 공정가치에서 이후의 감가상각누계액과 손상차손누계액을 차감한 재평가금액을 장부금액으로 한다. 재평가로 증가한 금액은 기타포괄손익으로, 감소한 금액은 당기손익으로 인식한다.",
+        "keywords": "유형자산,재평가모형,공정가치,재평가잉여금,OCI",
+    },
+    {
+        "id": "kifrs_1036_p59",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1036호 자산손상",
+        "paragraph_label": "문단 59",
+        "account_key": "ppe",
+        "title": "손상차손의 인식",
+        "content": "자산의 회수가능액이 장부금액에 미달하면 장부금액을 회수가능액으로 감액하고 그 차액을 손상차손으로 당기손익에 인식한다. 회수가능액은 순공정가치와 사용가치 중 큰 금액이다.",
+        "keywords": "손상,회수가능액,손상차손,사용가치,순공정가치",
+    },
+    {
+        "id": "kifrs_1040_p33",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1040호 투자부동산",
+        "paragraph_label": "문단 33",
+        "account_key": "investment_property",
+        "title": "공정가치모형",
+        "content": "공정가치모형을 선택한 경우 투자부동산을 공정가치로 측정하고, 공정가치 변동으로 발생하는 손익은 발생한 기간의 당기손익에 반영한다. 공정가치모형에서는 감가상각을 하지 않는다.",
+        "keywords": "투자부동산,공정가치모형,평가손익,당기손익",
+    },
+    {
+        "id": "kifrs_1012_p24",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1012호 법인세",
+        "paragraph_label": "문단 24",
+        "account_key": "deferred_tax_asset",
+        "title": "이연법인세자산의 인식",
+        "content": "차감할 일시적차이가 사용될 수 있는 미래 과세소득의 발생가능성이 높은 경우 그 차이에 대하여 이연법인세자산을 인식한다. 이연법인세자산과 부채는 상계하지 않고 총액으로 인식하며 할인하지 않는다.",
+        "keywords": "이연법인세자산,일시적차이,총액법,회수가능성,과세소득",
+    },
+    {
+        "id": "kifrs_1020_p24",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1020호 정부보조금",
+        "paragraph_label": "문단 24",
+        "account_key": "government_grant",
+        "title": "자산관련 보조금의 표시",
+        "content": "자산관련 정부보조금은 이연수익으로 표시하거나 자산의 장부금액에서 차감하여 표시한다. 어느 방법을 선택하든 관련 자산의 내용연수에 걸쳐 체계적인 기준으로 당기손익에 인식한다.",
+        "keywords": "정부보조금,자산관련,이연수익,자산차감법",
+    },
+    {
+        "id": "kifrs_1023_p8",
+        "standard_set": "K-IFRS",
+        "reference_code": "K-IFRS 제1023호 차입원가",
+        "paragraph_label": "문단 8",
+        "account_key": "borrowing_cost",
+        "title": "적격자산 차입원가의 자본화",
+        "content": "적격자산의 취득, 건설 또는 생산과 직접 관련된 차입원가는 해당 자산 원가의 일부로 자본화한다. 적격자산은 의도된 용도로 사용하거나 판매할 수 있는 상태가 되는 데 상당한 기간을 필요로 하는 자산이다. 그 밖의 차입원가는 발생 기간의 비용으로 인식한다.",
+        "keywords": "차입원가,적격자산,자본화,자본화이자율",
+    },
 ]
 
 
@@ -500,8 +638,22 @@ def normalize_account_name(name: str) -> str:
         "영업수익": "revenue",
         "수익": "revenue",
         "revenue": "revenue",
+        "퇴직급여충당부채": "retirement_benefit",
+        "확정급여채무": "retirement_benefit",
+        "순확정급여부채": "retirement_benefit",
+        "퇴직급여": "retirement_benefit",
         "충당부채": "provision",
         "provision": "provision",
+        "투자부동산": "investment_property",
+        "정부보조금": "government_grant",
+        "국고보조금": "government_grant",
+        "차입원가": "borrowing_cost",
+        "유형자산": "ppe",
+        "토지": "ppe",
+        "건물": "ppe",
+        "기계장치": "ppe",
+        "이연법인세자산": "deferred_tax_asset",
+        "이연법인세부채": "deferred_tax_liability",
     }
     compact = text.replace(" ", "")
     for needle, account_key in replacements.items():
@@ -793,6 +945,84 @@ def generate_conversion(
                 for key in ["present_obligation", "probable_outflow", "reliable_estimate"]
             )
             entry["calculation"] = "충당부채 인식요건을 충족했습니다." if recognized else "충당부채 인식요건이 완전하지 않아 공시 또는 추가 검토가 필요합니다."
+        elif account_key == "retirement_benefit":
+            dbo = float(checklist_response.get("dbo_amount") or 0)
+            plan_assets = float(checklist_response.get("plan_assets") or 0)
+            if dbo > 0:
+                net_liability = dbo - plan_assets
+                entry["adjustment"] = round(net_liability - float(item["amount"]), 2)
+                entry["calculation"] = (
+                    f"순확정급여부채 = 확정급여채무 {dbo:,.0f} − 사외적립자산 {plan_assets:,.0f} = {net_liability:,.0f}. "
+                    "K-GAAP 퇴직급여충당부채(추계액)와의 차이를 조정하며, 보험수리적 재측정요소는 기타포괄손익(OCI)으로 인식합니다."
+                )
+        elif account_key == "ppe":
+            model = str(checklist_response.get("measurement_model") or "")
+            book = float(item["amount"])
+            fair_value = float(checklist_response.get("fair_value") or 0)
+            recoverable = float(checklist_response.get("recoverable_amount") or 0)
+            if "재평가" in model and fair_value > 0:
+                entry["adjustment"] = round(fair_value - book, 2)
+                direction = "증가분은 재평가잉여금(OCI)" if fair_value >= book else "감소분은 당기손익"
+                entry["calculation"] = (
+                    f"재평가모형: 공정가치 {fair_value:,.0f} − 장부금액 {book:,.0f} = {fair_value - book:,.0f}. {direction}으로 인식합니다."
+                )
+            elif 0 < recoverable < book:
+                entry["adjustment"] = round(recoverable - book, 2)
+                entry["calculation"] = (
+                    f"손상: 회수가능액 {recoverable:,.0f} < 장부금액 {book:,.0f} → 손상차손 {book - recoverable:,.0f}을 당기손익으로 인식합니다."
+                )
+            else:
+                entry["calculation"] = "원가모형 유지 또는 손상 징후 없음. 표시 라인만 매핑합니다."
+        elif account_key == "investment_property":
+            model = str(checklist_response.get("measurement_model") or "")
+            fair_value = float(checklist_response.get("fair_value") or 0)
+            book = float(item["amount"])
+            if "공정가치" in model and fair_value > 0:
+                entry["adjustment"] = round(fair_value - book, 2)
+                entry["calculation"] = (
+                    f"공정가치모형: 공정가치 {fair_value:,.0f} − 장부금액 {book:,.0f} = {fair_value - book:,.0f}을 당기손익으로 인식합니다."
+                )
+            else:
+                entry["calculation"] = "원가모형 선택. 감가상각 후 원가로 표시하고 공정가치는 주석 공시합니다."
+        elif account_key == "deferred_tax_asset":
+            td = float(checklist_response.get("temporary_difference") or 0)
+            rate = float(checklist_response.get("tax_rate") or 0) / 100
+            realizable = checklist_response.get("realizable") is True
+            dta = td * rate
+            if td > 0 and rate > 0:
+                if realizable:
+                    entry["adjustment"] = round(dta - float(item["amount"]), 2)
+                    entry["calculation"] = (
+                        f"이연법인세자산 = 차감할 일시적차이 {td:,.0f} × 세율 {rate * 100:.1f}% = {dta:,.0f}. "
+                        "총액법으로 자산·부채를 상계 없이 인식하며 K-GAAP 장부금액과의 차이를 조정합니다."
+                    )
+                else:
+                    entry["target_account"] = "이연법인세자산(인식 제한)"
+                    entry["calculation"] = (
+                        f"산정 이연법인세자산 {dta:,.0f}이나 회수가능성이 높지 않아 인식을 제한합니다(미래 과세소득 검토 필요)."
+                    )
+        elif account_key == "government_grant":
+            relation = str(checklist_response.get("grant_relation") or "미입력")
+            method = str(checklist_response.get("presentation_method") or "미결정")
+            entry["calculation"] = (
+                f"정부보조금 성격: {relation} / 표시 방법: {method}. "
+                "자산관련 보조금은 자산 차감법 또는 이연수익법 중 선택해 자산의 내용연수에 걸쳐 체계적으로 수익 인식합니다."
+            )
+        elif account_key == "borrowing_cost":
+            qualifying = checklist_response.get("qualifying_asset") is True
+            if qualifying:
+                expenditure = float(checklist_response.get("expenditure") or 0)
+                rate = float(checklist_response.get("capitalization_rate") or 0) / 100
+                months = float(checklist_response.get("capitalization_months") or 0)
+                capitalizable = expenditure * rate * (months / 12)
+                entry["adjustment"] = round(capitalizable, 2)
+                entry["target_account"] = "적격자산(유형자산 등) 자본화"
+                entry["calculation"] = (
+                    f"자본화 차입원가 = 평균지출액 {expenditure:,.0f} × 자본화이자율 {rate * 100:.1f}% × {months:.0f}/12 = {capitalizable:,.0f}. "
+                    "적격자산 원가에 가산하고 동액을 금융원가에서 차감합니다."
+                )
+            else:
+                entry["calculation"] = "적격자산이 아니므로 차입원가를 발생 기간의 비용으로 인식합니다(자본화 대상 아님)."
 
         if item["mapping_type"] == "judgment":
             judgment_items.append(
