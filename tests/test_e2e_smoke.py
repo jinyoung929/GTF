@@ -7,7 +7,8 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
+
+from openpyxl import load_workbook
 from pathlib import Path
 
 
@@ -165,15 +166,16 @@ class EndToEndSmokeTest(unittest.TestCase):
 
         workbook_path = ROOT / "data" / "e2e_review_workbook.xlsx"
         workbook_path.write_bytes(workbook_bytes)
-        with zipfile.ZipFile(workbook_path) as archive:
-            sheet1 = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
-            sheet2 = archive.read("xl/worksheets/sheet2.xml").decode("utf-8")
-        self.assertEqual(sheet1.count("<row "), 217)
-        self.assertEqual(sheet2.count("<row "), 18)
-        self.assertIn("자산총계", sheet1)
-        self.assertIn("제외사유", sheet1)
-        self.assertIn("단기금융상품", sheet2)
-        self.assertIn("F1000", sheet2)
+        loaded = load_workbook(workbook_path)
+        sheet1, sheet2 = loaded["01_원본_DART"], loaded["02_계정매핑"]
+        self.assertEqual(sheet1.max_row, 217)
+        self.assertEqual(sheet2.max_row, 18)
+        sheet1_values = {cell.value for row in sheet1.iter_rows() for cell in row}
+        sheet2_values = {cell.value for row in sheet2.iter_rows() for cell in row}
+        self.assertIn("자산총계", sheet1_values)
+        self.assertIn("제외사유", sheet1_values)
+        self.assertIn("단기금융상품", sheet2_values)
+        self.assertIn("F1000", sheet2_values)
 
 
 if __name__ == "__main__":

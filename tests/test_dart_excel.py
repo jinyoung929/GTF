@@ -7,6 +7,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from openpyxl import load_workbook
+
 import gtf_app.dart as dart_module
 import server
 from gtf_app.routing import resolve_delete, resolve_get, resolve_post
@@ -150,17 +152,13 @@ class DartImportAndWorkbookTests(unittest.TestCase):
             [{"created_at": "2026-07-03T00:00:00+00:00", "actor": "system", "event_type": "test", "detail": {}}],
         )
 
-        with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
-            names = set(archive.namelist())
-            workbook_xml = archive.read("xl/workbook.xml").decode("utf-8")
-            sheet1_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
-
-        self.assertIn("[Content_Types].xml", names)
-        self.assertIn("xl/worksheets/sheet5.xml", names)
-        self.assertIn("01_원본_DART", workbook_xml)
-        self.assertIn("05_감사로그", workbook_xml)
-        self.assertIn("자산총계", sheet1_xml)
-        self.assertIn("제외사유", sheet1_xml)
+        loaded = load_workbook(io.BytesIO(workbook))
+        self.assertEqual(len(loaded.sheetnames), 5)
+        self.assertIn("01_원본_DART", loaded.sheetnames)
+        self.assertIn("05_감사로그", loaded.sheetnames)
+        sheet1_values = {cell.value for row in loaded["01_원본_DART"].iter_rows() for cell in row}
+        self.assertIn("자산총계", sheet1_values)
+        self.assertIn("제외사유", sheet1_values)
 
     def test_routes_include_dart_import_and_workbook_export(self):
         self.assertEqual(resolve_post("/api/projects/p1/dart/import").name, "dart.import")

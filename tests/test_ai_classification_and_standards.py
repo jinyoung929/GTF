@@ -20,7 +20,6 @@ import os
 import sqlite3
 import sys
 import unittest
-import zipfile
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +27,8 @@ for _candidate in (_HERE, os.path.dirname(_HERE)):
     if os.path.exists(os.path.join(_candidate, "server.py")):
         sys.path.insert(0, _candidate)
         break
+
+from openpyxl import load_workbook  # noqa: E402
 
 import server  # noqa: E402
 from gtf_app.domain import (  # noqa: E402
@@ -125,10 +126,10 @@ class ConversionParagraphAttachmentTest(unittest.TestCase):
     def test_excel_workbook_review_sheet_contains_paragraphs(self):
         output = generate_conversion(PROJECT, [self.make_statement("리스부채")], {}, REF)
         workbook = review_workbook_bytes(PROJECT, [], [], output, [])
-        with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
-            sheet4 = archive.read("xl/worksheets/sheet4.xml").decode("utf-8")
-        self.assertIn("기준서 문단", sheet4)
-        self.assertIn("일반기업회계기준", sheet4)
+        sheet4 = load_workbook(io.BytesIO(workbook))["04_KIFRS_검토근거"]
+        text = " ".join(str(cell.value) for row in sheet4.iter_rows() for cell in row if cell.value)
+        self.assertIn("기준서 문단", text)
+        self.assertIn("일반기업회계기준", text)
 
 
 class AiClassificationCallTest(unittest.TestCase):
