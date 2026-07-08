@@ -1,8 +1,16 @@
-# SQLite mode uses only the Python standard library.
-# Postgres/Neon deployments use psycopg.
-psycopg[binary]>=3.2.0
-pdfplumber>=0.11.0
-certifi>=2024.8.30
+# 웹 프레임워크 / ASGI 서버
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9
+
+# 외부 API 호출 (OpenAI SDK, DART/Gemini는 requests)
 requests>=2.31.0
 openai>=1.60.0
+certifi>=2024.8.30
+
+# 파일 처리
 openpyxl>=3.1.0
+pdfplumber>=0.11.0
+
+# Postgres/Neon 배포에서만 사용 (로컬 기본값은 SQLite)
+psycopg[binary]>=3.2.0

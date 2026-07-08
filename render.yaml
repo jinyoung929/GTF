@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "HOST=0.0.0.0 python3 server.py"
+    startCommand: "uvicorn server:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: "/healthz"
     envVars:
       - key: OCR_PROVIDER

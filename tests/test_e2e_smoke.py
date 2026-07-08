@@ -86,9 +86,9 @@ class EndToEndSmokeTest(unittest.TestCase):
                 raise RuntimeError(f"Server exited during startup:\n{output}")
             try:
                 status, body, _content_type = cls.client.request("GET", "/healthz")
-                if status == 200 and b'"status": "ok"' in body:
+                if status == 200 and json.loads(body).get("status") == "ok":
                     return
-            except OSError:
+            except (OSError, json.JSONDecodeError):
                 pass
             time.sleep(1)
         raise TimeoutError("Server did not become ready within 60 seconds.")

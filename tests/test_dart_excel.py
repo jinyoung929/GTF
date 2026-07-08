@@ -11,7 +11,6 @@ from openpyxl import load_workbook
 
 import gtf_app.dart as dart_module
 import server
-from gtf_app.routing import resolve_delete, resolve_get, resolve_post
 from reference_fixture import load_reference
 
 REF = load_reference()
@@ -161,14 +160,11 @@ class DartImportAndWorkbookTests(unittest.TestCase):
         self.assertIn("제외사유", sheet1_values)
 
     def test_routes_include_dart_import_and_workbook_export(self):
-        self.assertEqual(resolve_post("/api/projects/p1/dart/import").name, "dart.import")
-        self.assertEqual(resolve_post("/api/projects/p1/dart/reports").name, "dart.reports")
-        match = resolve_get("/api/projects/p1/exports/review-workbook.xlsx")
-        self.assertEqual(match.name, "exports.get")
-        self.assertEqual(match.args, ("p1", "review-workbook.xlsx"))
-        delete_match = resolve_delete("/api/projects/p1")
-        self.assertEqual(delete_match.name, "projects.delete")
-        self.assertEqual(delete_match.args, ("p1",))
+        routes = {(sorted(r.methods)[0], r.path) for r in server.app.routes if hasattr(r, "methods")}
+        self.assertIn(("POST", "/api/projects/{project_id}/dart/import"), routes)
+        self.assertIn(("POST", "/api/projects/{project_id}/dart/reports"), routes)
+        self.assertIn(("GET", "/api/projects/{project_id}/exports/{export_name}"), routes)
+        self.assertIn(("DELETE", "/api/projects/{project_id}"), routes)
 
     def test_dart_available_reports_filters_periodic_reports(self):
         original_request = dart_module.dart_json_request

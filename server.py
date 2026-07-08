@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import base64
+import contextlib
 import hashlib
 import io
 import importlib.util
@@ -16,18 +17,15 @@ import uuid
 import zipfile
 from decimal import Decimal
 from datetime import datetime, timezone
-from email import policy
-from email.parser import BytesParser
-from http import HTTPStatus
-from http.cookies import SimpleCookie
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import xml.etree.ElementTree as ET
-from urllib.parse import parse_qs, urlparse
-
 import openai
 import requests
+import uvicorn
+from fastapi import Body, Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from openai import OpenAI
+from pydantic import BaseModel
 
 from gtf_app.auth import (
     admin_config,
@@ -61,7 +59,6 @@ from gtf_app.domain import (
     validate_statement_records,
 )
 from gtf_app.excel_export import review_workbook_bytes
-from gtf_app.routing import PUBLIC_PATHS, resolve_delete, resolve_get, resolve_post
 
 
 ROOT = Path(__file__).resolve().parent
@@ -1676,1250 +1673,992 @@ def load_statement_template_map(conn) -> dict:
 
 
 
-class AppHandler(BaseHTTPRequestHandler):
-    server_version = "GTFServer/0.1"
-    public_paths = PUBLIC_PATHS
+# ---------------------------------------------------------------------------
+# FastAPI 앱
+# ---------------------------------------------------------------------------
 
-    def do_GET(self) -> None:
-        path = urlparse(self.path).path
-        static_file = figma_static_file(path)
-        if static_file is not None:
-            self.respond_file(static_file)
-            return
-        if path not in self.public_paths and not self.require_access():
-            return
-        route = resolve_get(path)
-        if route is None:
-            self.respond_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
-        elif route.name == "index":
-            self.respond_html(INDEX_HTML)
-        elif route.name == "healthz":
-            self.respond_json(
-                {
-                    "status": "ok",
-                    "service": "gtf-accounting-conversion",
-                    "time": utc_now(),
-                    "database": database_ready(),
-                    "database_config": database_config(),
-                    "ocr": ocr_config(),
-                    "ai": ai_config(),
-                    "dart": dart_config(),
-                }
-            )
-        elif route.name == "styles":
-            self.respond_text(STYLES_CSS, "text/css")
-        elif route.name == "script":
-            self.respond_text(APP_JS, "application/javascript")
-        elif route.name == "projects.list":
-            self.handle_list_projects()
-        elif route.name == "ocr.config":
-            self.handle_ocr_config()
-        elif route.name == "ai.config":
-            self.handle_ai_config()
-        elif route.name == "dart.config":
-            self.handle_dart_config()
-        elif route.name == "access.config":
-            self.handle_access_config()
-        elif route.name == "auth.session":
-            self.handle_auth_session()
-        elif route.name == "reference.data":
-            self.handle_reference_data()
-        elif route.name == "standards.search":
-            self.handle_standards_search()
-        elif route.name == "projects.get":
-            self.handle_get_project(*route.args)
-        elif route.name == "uploads.list":
-            self.handle_get_uploads(*route.args)
-        elif route.name == "extractions.list":
-            self.handle_get_extractions(*route.args)
-        elif route.name == "audit.list":
-            self.handle_get_audit(*route.args)
-        elif route.name == "reviews.summary":
-            self.handle_review_summary(*route.args)
-        elif route.name == "exports.get":
-            self.handle_export(*route.args)
-        else:
-            self.respond_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """서버 시작 시 DB 스키마·기준정보 시드·계약 검증을 수행한다 (실패하면 기동 중단)."""
+    init_db()
+    yield
 
-    def do_POST(self) -> None:
-        path = urlparse(self.path).path
-        if path not in self.public_paths and not self.require_access():
-            return
-        route = resolve_post(path)
-        if route is None:
-            self.respond_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
-        elif not self.require_write_access(route.name):
-            return
-        elif route.name == "projects.create":
-            self.handle_create_project()
-        elif route.name == "auth.login":
-            self.handle_login()
-        elif route.name == "auth.demo":
-            self.handle_demo_login()
-        elif route.name == "auth.logout":
-            self.handle_logout()
-        elif route.name == "uploads.create":
-            self.handle_upload_file(*route.args)
-        elif route.name == "uploads.extract":
-            self.handle_extract_upload(*route.args)
-        elif route.name == "dart.import":
-            self.handle_dart_import(*route.args)
-        elif route.name == "dart.reports":
-            self.handle_dart_reports(*route.args)
-        elif route.name == "extractions.accept":
-            self.handle_accept_extraction(*route.args)
-        elif route.name == "statements.add":
-            self.handle_add_statements(*route.args)
-        elif route.name == "statements.validate":
-            self.handle_validate(*route.args)
-        elif route.name == "conversion.create":
-            self.handle_convert(*route.args)
-        elif route.name == "reviews.create":
-            self.handle_review(*route.args)
-        else:
-            self.respond_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
-    def do_DELETE(self) -> None:
-        path = urlparse(self.path).path
-        if path not in self.public_paths and not self.require_access():
-            return
-        route = resolve_delete(path)
-        if route is None:
-            self.respond_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
-        elif not self.require_write_access(route.name):
-            return
-        elif route.name == "projects.delete":
-            self.handle_delete_project(*route.args)
-        elif route.name == "uploads.delete":
-            self.handle_delete_upload(*route.args)
-        else:
-            self.respond_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+app = FastAPI(title="GTF K-GAAP → K-IFRS 변환", lifespan=lifespan)
 
-    def read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length") or "0")
-        if length == 0:
-            return {}
-        raw = self.rfile.read(length)
-        return json.loads(raw.decode("utf-8"))
 
-    def require_access(self) -> bool:
-        user = self.current_user()
-        if user:
-            return True
-        self.respond_json(
-            {
-                "error": "로그인이 필요합니다.",
-                "login_required": True,
-            },
-            HTTPStatus.UNAUTHORIZED,
-        )
-        return False
+@app.exception_handler(HTTPException)
+async def flat_error_handler(_request: Request, exc: HTTPException):
+    """에러 응답을 {"detail": ...}가 아니라 기존 프런트엔드가 기대하는 평평한 JSON으로 유지한다."""
+    body = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+    return JSONResponse(status_code=exc.status_code, content=body)
 
-    def require_write_access(self, route_name: str) -> bool:
-        if route_name in {"auth.login", "auth.demo", "auth.logout"}:
-            return True
-        user = self.current_user()
-        if user and user.get("is_read_only"):
-            self.respond_json(
-                {
-                    "error": "읽기 전용 데모 계정에서는 데이터를 생성, 수정, 삭제할 수 없습니다.",
-                    "read_only": True,
-                },
-                HTTPStatus.FORBIDDEN,
-            )
-            return False
-        return True
 
-    def read_upload(self) -> tuple[str, str, bytes]:
-        length = int(self.headers.get("Content-Length") or "0")
-        content_type = self.headers.get("Content-Type", "")
-        if "multipart/form-data" not in content_type:
-            raise ValueError("Expected multipart form data.")
+# --- 인증 의존성 (Depends) ---
 
-        body = self.rfile.read(length)
-        raw_message = (
-            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
-            + body
-        )
-        message = BytesParser(policy=policy.default).parsebytes(raw_message)
-        for part in message.iter_parts():
-            if part.get_param("name", header="content-disposition") != "file":
-                continue
-            filename = part.get_filename()
-            if not filename:
-                break
-            content = part.get_payload(decode=True) or b""
-            return filename, part.get_content_type(), content
-        raise ValueError("No file field was provided.")
+def get_current_user(request: Request) -> dict | None:
+    """세션 쿠키 토큰으로 로그인 사용자를 조회한다. 없으면 None."""
+    token = request.cookies.get(SESSION_COOKIE, "")
+    if not token:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT u.id, u.email, u.is_read_only, u.created_at
+            FROM user_sessions s
+            JOIN app_users u ON u.id = s.user_id
+            WHERE s.token_hash = ? AND s.expires_at > ?
+            """,
+            (session_token_hash(token), utc_now()),
+        ).fetchone()
+    return row_to_dict(row) if row else None
 
-    def cookie_token(self) -> str:
-        cookie_header = self.headers.get("Cookie", "")
-        if not cookie_header:
-            return ""
-        cookie = SimpleCookie()
-        try:
-            cookie.load(cookie_header)
-        except Exception:
-            return ""
-        morsel = cookie.get(SESSION_COOKIE)
-        return morsel.value if morsel else ""
 
-    def current_user(self) -> dict | None:
-        token = self.cookie_token()
-        if not token:
-            return None
-        token_hash = session_token_hash(token)
-        now = utc_now()
-        with connect() as conn:
-            row = conn.execute(
-                """
-                SELECT u.id, u.email, u.is_read_only, u.created_at
-                FROM user_sessions s
-                JOIN app_users u ON u.id = s.user_id
-                WHERE s.token_hash = ? AND s.expires_at > ?
-                """,
-                (token_hash, now),
-            ).fetchone()
-        return row_to_dict(row) if row else None
+def require_user(request: Request) -> dict:
+    """로그인 필수 라우트의 의존성. 미로그인이면 401."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(401, {"error": "로그인이 필요합니다.", "login_required": True})
+    return user
 
-    def session_cookie_header(self, token: str, max_age: int = SESSION_MAX_AGE_SECONDS) -> str:
-        return f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}"
 
-    def clear_session_cookie_header(self) -> str:
-        return f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+def require_write_user(user: dict = Depends(require_user)) -> dict:
+    """쓰기 라우트의 의존성. 읽기 전용 데모 계정이면 403."""
+    if user.get("is_read_only"):
+        raise HTTPException(403, {"error": "읽기 전용 데모 계정에서는 데이터를 생성, 수정, 삭제할 수 없습니다.", "read_only": True})
+    return user
 
-    def respond_json(
-        self,
-        payload: dict | list,
-        status: HTTPStatus = HTTPStatus.OK,
-        headers: dict[str, str] | None = None,
-    ) -> None:
-        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        self.send_response(status.value)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        for key, value in (headers or {}).items():
-            self.send_header(key, value)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def respond_text(self, body: str, content_type: str) -> None:
-        data = body.encode("utf-8")
-        self.send_response(HTTPStatus.OK.value)
-        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+def create_session(conn, user_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() + SESSION_MAX_AGE_SECONDS, tz=timezone.utc
+    ).isoformat()
+    conn.execute(
+        "INSERT INTO user_sessions (id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), user_id, session_token_hash(token), utc_now(), expires_at),
+    )
+    return token
 
-    def respond_file(self, path: Path) -> None:
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        data = path.read_bytes()
-        self.send_response(HTTPStatus.OK.value)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-cache" if path.name == "index.html" else "public, max-age=31536000, immutable")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
 
-    def respond_download(self, body: str, content_type: str, filename: str) -> None:
-        data = body.encode("utf-8-sig" if content_type == "text/csv" else "utf-8")
-        self.send_response(HTTPStatus.OK.value)
-        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
-        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_MAX_AGE_SECONDS, path="/", httponly=True, samesite="lax")
 
-    def respond_binary_download(self, data: bytes, content_type: str, filename: str) -> None:
-        self.send_response(HTTPStatus.OK.value)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
 
-    def respond_html(self, body: str) -> None:
-        self.respond_text(body, "text/html")
+def get_project_or_404(conn, project_id: str, owner_user_id: str | None = None) -> dict:
+    if owner_user_id is None:
+        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM projects WHERE id = ? AND owner_user_id = ?", (project_id, owner_user_id)).fetchone()
+    if not row:
+        raise HTTPException(404, {"error": "Project not found"})
+    return row_to_dict(row)
 
-    def handle_list_projects(self) -> None:
-        user = self.current_user()
+
+# --- 요청 본문 모델 (pydantic) ---
+
+class LoginRequest(BaseModel):
+    email: str = ""
+    password: str = ""
+
+
+class ProjectCreateRequest(BaseModel):
+    company_name: str = ""
+    source_standard: str = ""
+    target_standard: str = ""
+    period: str = ""
+
+
+class StatementsAddRequest(BaseModel):
+    rows: list[dict] | None = None
+    csv_text: str = ""
+    source: str = "manual"
+
+
+class AcceptExtractionRequest(BaseModel):
+    ai_decisions: dict[str, str] | None = None
+
+
+class ConvertRequest(BaseModel):
+    responses: dict[str, dict] = {}
+
+
+class ReviewRequest(BaseModel):
+    decision: str = ""
+    reviewer_name: str = ""
+    memo: str = ""
+
+
+# --- 헬스체크·설정 조회 ---
+
+@app.get("/healthz")
+def healthz():
+    return {
+        "status": "ok",
+        "service": "gtf-accounting-conversion",
+        "time": utc_now(),
+        "database": database_ready(),
+        "database_config": database_config(),
+        "ocr": ocr_config(),
+        "ai": ai_config(),
+        "dart": dart_config(),
+    }
+
+
+@app.get("/api/ocr-config")
+def get_ocr_config(user: dict = Depends(require_user)):
+    return ocr_config()
+
+
+@app.get("/api/ai-config")
+def get_ai_config(user: dict = Depends(require_user)):
+    return ai_config()
+
+
+@app.get("/api/dart-config")
+def get_dart_config(user: dict = Depends(require_user)):
+    return dart_config()
+
+
+@app.get("/api/access-config")
+def get_access_config():
+    return access_config()
+
+
+# --- 인증 ---
+
+@app.get("/api/auth/session")
+def auth_session(request: Request):
+    user = get_current_user(request)
+    return {
+        "authenticated": bool(user),
+        "user": user_public_dict(user) if user else None,
+        "admin_configured": admin_config()["configured"],
+    }
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginRequest, response: Response):
+    email = normalize_email(payload.email)
+    if not email or not payload.password:
+        raise HTTPException(400, {"error": "이메일과 비밀번호를 입력하세요."})
+    with connect() as conn:
+        ensure_admin_user(conn)
+        row = conn.execute("SELECT * FROM app_users WHERE email = ?", (email,)).fetchone()
+        user = row_to_dict(row) if row else None
+        if not user and not admin_config()["configured"]:
+            raise HTTPException(503, {"error": "관리자 계정이 설정되지 않았습니다. ADMIN_EMAIL과 ADMIN_PASSWORD를 서버 환경변수에 설정하세요."})
+        if not user or not verify_password(payload.password, user["password_hash"]):
+            raise HTTPException(401, {"error": "이메일 또는 비밀번호가 올바르지 않습니다."})
+        token = create_session(conn, user["id"])
+    set_session_cookie(response, token)
+    return {"authenticated": True, "user": user_public_dict(user)}
+
+
+@app.post("/api/auth/demo")
+def demo_login(response: Response):
+    with connect() as conn:
+        ensure_admin_user(conn)
+        user = ensure_demo_user(conn)
         if not user:
-            self.respond_json([])
-            return
+            raise HTTPException(403, {"error": "데모 로그인이 비활성화되어 있습니다."})
+        token = create_session(conn, user["id"])
+    set_session_cookie(response, token)
+    return {"authenticated": True, "user": user_public_dict(user), "demo": True}
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE, "")
+    if token:
         with connect() as conn:
-            projects = [
-                row_to_dict(row)
-                for row in conn.execute(
-                    """
-                    SELECT * FROM projects
-                    WHERE owner_user_id = ?
-                    ORDER BY created_at DESC
-                    """,
-                    (user["id"],),
-                )
-            ]
-        self.respond_json(projects)
+            conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (session_token_hash(token),))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"authenticated": False, "user": None}
 
-    def handle_ocr_config(self) -> None:
-        self.respond_json(ocr_config())
 
-    def handle_ai_config(self) -> None:
-        self.respond_json(ai_config())
+# --- 기준정보·기준서 검색 ---
 
-    def handle_dart_config(self) -> None:
-        self.respond_json(dart_config())
+@app.get("/api/reference-data")
+def reference_data(user: dict = Depends(require_user)):
+    tables = [
+        ("standard_accounts", "내부 표준계정코드 DB"),
+        ("kgaap_accounts", "K-GAAP 계정명 DB"),
+        ("ifrs_accounts", "IFRS 계정/기준 DB"),
+        ("mapping_rules", "변환 룰 DB"),
+        ("checklist_items", "판단 체크리스트 DB"),
+        ("standards_references", "기준서 참조 DB"),
+        ("standards_paragraphs", "K-GAAP/K-IFRS 기준서 문단 검색 DB"),
+        ("financial_statement_templates", "재무제표 양식 DB"),
+    ]
+    with connect() as conn:
+        summary = [
+            {"table": table, "label": label, "count": conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]}
+            for table, label in tables
+        ]
+        accounts = [
+            row_to_dict(row)
+            for row in conn.execute(
+                "SELECT account_key, standard_code, internal_label, ifrs_account, mapping_type "
+                "FROM standard_accounts ORDER BY standard_code"
+            )
+        ]
+        templates = [
+            row_to_dict(row)
+            for row in conn.execute(
+                "SELECT statement_type, section, line_item, account_key, display_order "
+                "FROM financial_statement_templates WHERE standard_set = ? AND active = true "
+                "ORDER BY statement_type, display_order",
+                ("IFRS",),
+            )
+        ]
+    return {"summary": summary, "accounts": accounts, "templates": templates}
 
-    def handle_access_config(self) -> None:
-        self.respond_json(access_config())
 
-    def handle_auth_session(self) -> None:
-        user = self.current_user()
-        self.respond_json(
-            {
-                "authenticated": bool(user),
-                "user": user_public_dict(user) if user else None,
-                "admin_configured": admin_config()["configured"],
-            }
-        )
+@app.get("/api/standards/search")
+def standards_search(q: str = "", account_key: str = "", standard_set: str = "", user: dict = Depends(require_user)):
+    query, account_key, standard_set = q.strip(), account_key.strip(), standard_set.strip()
+    if standard_set and standard_set not in {"K-GAAP", "K-IFRS"}:
+        raise HTTPException(400, {"error": "standard_set은 K-GAAP 또는 K-IFRS여야 합니다."})
+    with connect() as conn:
+        if query:
+            paragraphs = semantic_search_paragraphs(conn, query, account_key=account_key or None, standard_set=standard_set or None, k=8)
+        else:
+            paragraphs = find_standards_paragraphs(conn, account_key=account_key or None, query=None, standard_set=standard_set or None)
+    return {
+        "count": len(paragraphs),
+        "retrieval": paragraphs[0].get("retrieval", "none") if paragraphs else "none",
+        "standard_sets": ["K-GAAP", "K-IFRS"],
+        "paragraphs": paragraphs,
+        "note": "기준서 문단 요약 기준정보입니다. 최종 판단 시 기준서 원문을 확인하세요.",
+    }
 
-    def create_session(self, conn, user_id: str) -> str:
-        token = secrets.token_urlsafe(32)
-        now = utc_now()
-        expires_at = datetime.fromtimestamp(
-            datetime.now(timezone.utc).timestamp() + SESSION_MAX_AGE_SECONDS,
-            tz=timezone.utc,
-        ).isoformat()
+
+# --- 프로젝트 ---
+
+@app.get("/api/projects")
+def list_projects(user: dict = Depends(require_user)):
+    with connect() as conn:
+        return [
+            row_to_dict(row)
+            for row in conn.execute(
+                "SELECT * FROM projects WHERE owner_user_id = ? ORDER BY created_at DESC",
+                (user["id"],),
+            )
+        ]
+
+
+@app.post("/api/projects", status_code=201)
+def create_project(payload: ProjectCreateRequest, user: dict = Depends(require_write_user)):
+    now = utc_now()
+    project = {
+        "id": str(uuid.uuid4()),
+        "owner_user_id": user["id"],
+        "is_test": False,
+        "company_name": payload.company_name or "Untitled company",
+        "source_standard": payload.source_standard or "K-GAAP",
+        "target_standard": payload.target_standard or "IFRS",
+        "period": payload.period or "2026",
+        "status": "created",
+        "created_at": now,
+        "updated_at": now,
+    }
+    with connect() as conn:
         conn.execute(
             """
-            INSERT INTO user_sessions (id, user_id, token_hash, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO projects (
+                id, owner_user_id, is_test, company_name, source_standard,
+                target_standard, period, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (str(uuid.uuid4()), user_id, session_token_hash(token), now, expires_at),
+            (
+                project["id"], project["owner_user_id"], project["is_test"], project["company_name"],
+                project["source_standard"], project["target_standard"], project["period"],
+                project["status"], project["created_at"], project["updated_at"],
+            ),
         )
-        return token
+        log_event(conn, project["id"], "project.created", project)
+    return project
 
-    def handle_register(self) -> None:
-        self.respond_json({"error": "회원가입은 비활성화되어 있습니다. 관리자 계정으로 로그인하세요."}, HTTPStatus.FORBIDDEN)
 
-    def handle_login(self) -> None:
-        payload = self.read_json()
-        email = normalize_email(payload.get("email", ""))
-        password = str(payload.get("password") or "")
-        if not email or not password:
-            self.respond_json({"error": "이메일과 비밀번호를 입력하세요."}, HTTPStatus.BAD_REQUEST)
-            return
-        with connect() as conn:
-            ensure_admin_user(conn)
-            row = conn.execute("SELECT * FROM app_users WHERE email = ?", (email,)).fetchone()
-            user = row_to_dict(row) if row else None
-            if not user and not admin_config()["configured"]:
-                self.respond_json(
-                    {"error": "관리자 계정이 설정되지 않았습니다. ADMIN_EMAIL과 ADMIN_PASSWORD를 서버 환경변수에 설정하세요."},
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                )
-                return
-            if not user or not verify_password(password, user["password_hash"]):
-                self.respond_json({"error": "이메일 또는 비밀번호가 올바르지 않습니다."}, HTTPStatus.UNAUTHORIZED)
-                return
-            token = self.create_session(conn, user["id"])
-        self.respond_json(
-            {"authenticated": True, "user": user_public_dict(user)},
-            headers={"Set-Cookie": self.session_cookie_header(token)},
-        )
-
-    def handle_demo_login(self) -> None:
-        with connect() as conn:
-            ensure_admin_user(conn)
-            user = ensure_demo_user(conn)
-            if not user:
-                self.respond_json({"error": "데모 로그인이 비활성화되어 있습니다."}, HTTPStatus.FORBIDDEN)
-                return
-            token = self.create_session(conn, user["id"])
-        self.respond_json(
-            {"authenticated": True, "user": user_public_dict(user), "demo": True},
-            headers={"Set-Cookie": self.session_cookie_header(token)},
-        )
-
-    def handle_logout(self) -> None:
-        token = self.cookie_token()
-        if token:
-            with connect() as conn:
-                conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (session_token_hash(token),))
-        self.respond_json(
-            {"authenticated": False, "user": None},
-            headers={"Set-Cookie": self.clear_session_cookie_header()},
-        )
-
-    def handle_reference_data(self) -> None:
-        tables = [
-            ("standard_accounts", "내부 표준계정코드 DB"),
-            ("kgaap_accounts", "K-GAAP 계정명 DB"),
-            ("ifrs_accounts", "IFRS 계정/기준 DB"),
-            ("mapping_rules", "변환 룰 DB"),
-            ("checklist_items", "판단 체크리스트 DB"),
-            ("standards_references", "기준서 참조 DB"),
-            ("standards_paragraphs", "K-GAAP/K-IFRS 기준서 문단 검색 DB"),
-            ("financial_statement_templates", "재무제표 양식 DB"),
+@app.get("/api/projects/{project_id}")
+def get_project(project_id: str, user: dict = Depends(require_user)):
+    with connect() as conn:
+        project = get_project_or_404(conn, project_id, owner_user_id=user["id"])
+        statements = sort_statements_by_code([
+            dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
+            for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
+        ])
+        uploads = [
+            upload_public_dict(row)
+            for row in conn.execute("SELECT * FROM uploads WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
         ]
-        with connect() as conn:
-            summary = []
-            for table, label in tables:
-                count = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]
-                summary.append({"table": table, "label": label, "count": count})
-            accounts = [
-                row_to_dict(row)
-                for row in conn.execute(
-                    """
-                    SELECT account_key, standard_code, internal_label, ifrs_account, mapping_type
-                    FROM standard_accounts
-                    ORDER BY standard_code
-                    """
-                )
-            ]
-            templates = [
-                row_to_dict(row)
-                for row in conn.execute(
-                    """
-                    SELECT statement_type, section, line_item, account_key, display_order
-                    FROM financial_statement_templates
-                    WHERE standard_set = ? AND active = true
-                    ORDER BY statement_type, display_order
-                    """,
-                    ("IFRS",),
-                )
-            ]
-        self.respond_json({"summary": summary, "accounts": accounts, "templates": templates})
+        extractions = [
+            dict(row_to_dict(row), rows=parse_json_field(row["rows_json"], []), issues=parse_json_field(row["issues_json"], []))
+            for row in conn.execute("SELECT * FROM extractions WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
+        ]
+        conversion = conn.execute(
+            "SELECT * FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", (project_id,)
+        ).fetchone()
+        review = conn.execute(
+            "SELECT * FROM reviews WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", (project_id,)
+        ).fetchone()
+    return {
+        "project": project,
+        "statements": statements,
+        "uploads": uploads,
+        "extractions": extractions,
+        "conversion": parse_json_field(conversion["output_json"], None) if conversion else None,
+        "review": row_to_dict(review) if review else None,
+    }
 
-    def handle_standards_search(self) -> None:
-        params = parse_qs(urlparse(self.path).query)
-        query = (params.get("q") or [""])[0].strip()
-        account_key = (params.get("account_key") or [""])[0].strip()
-        standard_set = (params.get("standard_set") or [""])[0].strip()
-        if standard_set and standard_set not in {"K-GAAP", "K-IFRS"}:
-            self.respond_json({"error": "standard_set은 K-GAAP 또는 K-IFRS여야 합니다."}, HTTPStatus.BAD_REQUEST)
-            return
-        with connect() as conn:
-            if query:
-                paragraphs = semantic_search_paragraphs(
-                    conn,
-                    query,
-                    account_key=account_key or None,
-                    standard_set=standard_set or None,
-                    k=8,
-                )
-            else:
-                paragraphs = find_standards_paragraphs(
-                    conn,
-                    account_key=account_key or None,
-                    query=None,
-                    standard_set=standard_set or None,
-                )
-        retrieval_mode = paragraphs[0].get("retrieval", "none") if paragraphs else "none"
-        self.respond_json(
-            {
-                "count": len(paragraphs),
-                "retrieval": retrieval_mode,
-                "standard_sets": ["K-GAAP", "K-IFRS"],
-                "paragraphs": paragraphs,
-                "note": "기준서 문단 요약 기준정보입니다. 최종 판단 시 기준서 원문을 확인하세요.",
-            }
-        )
 
-    def handle_create_project(self) -> None:
-        payload = self.read_json()
-        user = self.current_user()
-        if not user:
-            self.respond_json({"error": "로그인이 필요합니다."}, HTTPStatus.UNAUTHORIZED)
-            return
-        now = utc_now()
-        project = {
-            "id": str(uuid.uuid4()),
-            "owner_user_id": user["id"],
-            "is_test": False,
-            "company_name": payload.get("company_name") or "Untitled company",
-            "source_standard": payload.get("source_standard") or "K-GAAP",
-            "target_standard": payload.get("target_standard") or "IFRS",
-            "period": payload.get("period") or "2026",
-            "status": "created",
-            "created_at": now,
-            "updated_at": now,
-        }
-        with connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO projects (
-                    id, owner_user_id, is_test, company_name, source_standard,
-                    target_standard, period, status, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    project["id"],
-                    project["owner_user_id"],
-                    project["is_test"],
-                    project["company_name"],
-                    project["source_standard"],
-                    project["target_standard"],
-                    project["period"],
-                    project["status"],
-                    project["created_at"],
-                    project["updated_at"],
-                ),
-            )
-            log_event(conn, project["id"], "project.created", project)
-        self.respond_json(project, HTTPStatus.CREATED)
-
-    def handle_get_project(self, project_id: str) -> None:
-        user = self.current_user()
-        if not user:
-            self.respond_json({"error": "로그인이 필요합니다."}, HTTPStatus.UNAUTHORIZED)
-            return
-        with connect() as conn:
-            project = conn.execute(
-                "SELECT * FROM projects WHERE id = ? AND owner_user_id = ?",
-                (project_id, user["id"]),
-            ).fetchone()
-            if not project:
-                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-                return
-            statements = sort_statements_by_code([
-                dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
-                for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
-            ])
-            uploads = [
-                upload_public_dict(row)
-                for row in conn.execute("SELECT * FROM uploads WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
-            ]
-            extractions = [
-                dict(row_to_dict(row), rows=parse_json_field(row["rows_json"], []), issues=parse_json_field(row["issues_json"], []))
-                for row in conn.execute("SELECT * FROM extractions WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
-            ]
-            conversion = conn.execute(
-                "SELECT * FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            review = conn.execute(
-                "SELECT * FROM reviews WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
-                (project_id,),
-            ).fetchone()
-        self.respond_json(
-            {
-                "project": row_to_dict(project),
-                "statements": statements,
-                "uploads": uploads,
-                "extractions": extractions,
-                "conversion": parse_json_field(conversion["output_json"], None) if conversion else None,
-                "review": row_to_dict(review) if review else None,
-            }
-        )
-
-    def handle_delete_project(self, project_id: str) -> None:
-        user = self.current_user()
-        if not user:
-            self.respond_json({"error": "로그인이 필요합니다."}, HTTPStatus.UNAUTHORIZED)
-            return
-        with connect() as conn:
-            project = conn.execute(
-                "SELECT * FROM projects WHERE id = ? AND owner_user_id = ?",
-                (project_id, user["id"]),
-            ).fetchone()
-            if not project:
-                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-                return
-            uploads = [
-                row_to_dict(row)
-                for row in conn.execute("SELECT stored_name FROM uploads WHERE project_id = ?", (project_id,))
-            ]
-            conn.execute("DELETE FROM extractions WHERE project_id = ?", (project_id,))
-            conn.execute("DELETE FROM uploads WHERE project_id = ?", (project_id,))
-            conn.execute("DELETE FROM statements WHERE project_id = ?", (project_id,))
-            conn.execute("DELETE FROM conversions WHERE project_id = ?", (project_id,))
-            conn.execute("DELETE FROM reviews WHERE project_id = ?", (project_id,))
-            conn.execute("DELETE FROM audit_logs WHERE project_id = ?", (project_id,))
-            conn.execute("DELETE FROM projects WHERE id = ? AND owner_user_id = ?", (project_id, user["id"]))
-        for upload in uploads:
-            stored_name = str(upload.get("stored_name") or "")
-            if not stored_name:
-                continue
-            try:
-                (UPLOAD_DIR / stored_name).unlink(missing_ok=True)
-            except OSError:
-                pass
-        self.respond_json({"deleted": True, "project_id": project_id})
-
-    def handle_get_uploads(self, project_id: str) -> None:
-        with connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM uploads WHERE project_id = ? ORDER BY created_at DESC",
-                (project_id,),
-            ).fetchall()
-        self.respond_json([upload_public_dict(row) for row in rows])
-
-    def handle_delete_upload(self, project_id: str, upload_id: str) -> None:
-        with connect() as conn:
-            upload = conn.execute(
-                "SELECT * FROM uploads WHERE id = ? AND project_id = ?",
-                (upload_id, project_id),
-            ).fetchone()
-            if not upload:
-                self.respond_json({"error": "Upload not found"}, HTTPStatus.NOT_FOUND)
-                return
-            upload_dict = row_to_dict(upload)
-            conn.execute("DELETE FROM extractions WHERE upload_id = ? AND project_id = ?", (upload_id, project_id))
-            conn.execute("DELETE FROM uploads WHERE id = ? AND project_id = ?", (upload_id, project_id))
-            remaining = conn.execute("SELECT COUNT(*) AS count FROM uploads WHERE project_id = ?", (project_id,)).fetchone()["count"]
-            next_status = "created" if int(remaining or 0) == 0 else "source_uploaded"
-            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", (next_status, utc_now(), project_id))
-            log_event(
-                conn,
-                project_id,
-                "source.deleted",
-                {
-                    "upload_id": upload_id,
-                    "original_name": upload_dict.get("original_name"),
-                    "remaining_uploads": remaining,
-                },
-            )
-        stored_name = str(upload_dict.get("stored_name") or "")
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: str, user: dict = Depends(require_write_user)):
+    with connect() as conn:
+        get_project_or_404(conn, project_id, owner_user_id=user["id"])
+        uploads = [
+            row_to_dict(row)
+            for row in conn.execute("SELECT stored_name FROM uploads WHERE project_id = ?", (project_id,))
+        ]
+        for table in ("extractions", "uploads", "statements", "conversions", "reviews", "audit_logs"):
+            conn.execute(f"DELETE FROM {table} WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM projects WHERE id = ? AND owner_user_id = ?", (project_id, user["id"]))
+    for upload in uploads:
+        stored_name = str(upload.get("stored_name") or "")
         if stored_name:
             try:
                 (UPLOAD_DIR / stored_name).unlink(missing_ok=True)
             except OSError:
                 pass
-        self.respond_json({"deleted": True, "upload_id": upload_id, "project_status": next_status})
+    return {"deleted": True, "project_id": project_id}
 
-    def handle_get_extractions(self, project_id: str) -> None:
-        with connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM extractions WHERE project_id = ? ORDER BY created_at DESC",
-                (project_id,),
-            ).fetchall()
-        self.respond_json(
-            [dict(row_to_dict(row), rows=parse_json_field(row["rows_json"], []), issues=parse_json_field(row["issues_json"], [])) for row in rows]
+
+# --- 업로드·추출 ---
+
+@app.get("/api/projects/{project_id}/uploads")
+def list_uploads(project_id: str, user: dict = Depends(require_user)):
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM uploads WHERE project_id = ? ORDER BY created_at DESC", (project_id,)
+        ).fetchall()
+    return [upload_public_dict(row) for row in rows]
+
+
+@app.post("/api/projects/{project_id}/uploads", status_code=201)
+def upload_file(project_id: str, file: UploadFile = File(...), user: dict = Depends(require_write_user)):
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+
+    original_name = file.filename or "upload.bin"
+    content = file.file.read()
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_name).name).strip("._")
+    stored_name = f"{project_id}_{uuid.uuid4()}_{safe_name or 'upload.bin'}"
+    (UPLOAD_DIR / stored_name).write_bytes(content)
+
+    upload = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "original_name": original_name,
+        "stored_name": stored_name,
+        "content_type": file.content_type or "application/octet-stream",
+        "size_bytes": len(content),
+        "file_bytes": content,
+        "extraction_status": "pending_ocr",
+        "created_at": utc_now(),
+    }
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO uploads (
+                id, project_id, original_name, stored_name, content_type, size_bytes, file_bytes, extraction_status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                upload["id"], upload["project_id"], upload["original_name"], upload["stored_name"],
+                upload["content_type"], upload["size_bytes"], upload["file_bytes"],
+                upload["extraction_status"], upload["created_at"],
+            ),
         )
+        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("source_uploaded", utc_now(), project_id))
+        log_event(
+            conn,
+            project_id,
+            "source.uploaded",
+            {
+                "upload_id": upload["id"],
+                "original_name": original_name,
+                "content_type": upload["content_type"],
+                "size_bytes": len(content),
+                "next_step": "Gemini OCR extraction",
+            },
+        )
+    return upload_public_dict(upload)
 
-    def handle_upload_file(self, project_id: str) -> None:
-        with connect() as conn:
-            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-            if not project:
-                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-                return
 
+@app.delete("/api/projects/{project_id}/uploads/{upload_id}")
+def delete_upload(project_id: str, upload_id: str, user: dict = Depends(require_write_user)):
+    with connect() as conn:
+        upload = conn.execute(
+            "SELECT * FROM uploads WHERE id = ? AND project_id = ?", (upload_id, project_id)
+        ).fetchone()
+        if not upload:
+            raise HTTPException(404, {"error": "Upload not found"})
+        upload_dict = row_to_dict(upload)
+        conn.execute("DELETE FROM extractions WHERE upload_id = ? AND project_id = ?", (upload_id, project_id))
+        conn.execute("DELETE FROM uploads WHERE id = ? AND project_id = ?", (upload_id, project_id))
+        remaining = conn.execute("SELECT COUNT(*) AS count FROM uploads WHERE project_id = ?", (project_id,)).fetchone()["count"]
+        next_status = "created" if int(remaining or 0) == 0 else "source_uploaded"
+        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", (next_status, utc_now(), project_id))
+        log_event(
+            conn,
+            project_id,
+            "source.deleted",
+            {"upload_id": upload_id, "original_name": upload_dict.get("original_name"), "remaining_uploads": remaining},
+        )
+    stored_name = str(upload_dict.get("stored_name") or "")
+    if stored_name:
         try:
-            original_name, content_type, content = self.read_upload()
-        except ValueError as exc:
-            self.respond_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
-            return
+            (UPLOAD_DIR / stored_name).unlink(missing_ok=True)
+        except OSError:
+            pass
+    return {"deleted": True, "upload_id": upload_id, "project_status": next_status}
 
-        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_name).name).strip("._")
-        stored_name = f"{project_id}_{uuid.uuid4()}_{safe_name or 'upload.bin'}"
-        stored_path = UPLOAD_DIR / stored_name
-        stored_path.write_bytes(content)
 
-        upload = {
-            "id": str(uuid.uuid4()),
-            "project_id": project_id,
-            "original_name": original_name,
-            "stored_name": stored_name,
-            "content_type": content_type,
-            "size_bytes": len(content),
-            "file_bytes": content,
-            "extraction_status": "pending_ocr",
-            "created_at": utc_now(),
-        }
-        with connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO uploads (
-                    id, project_id, original_name, stored_name, content_type, size_bytes, file_bytes, extraction_status, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    upload["id"],
-                    upload["project_id"],
-                    upload["original_name"],
-                    upload["stored_name"],
-                    upload["content_type"],
-                    upload["size_bytes"],
-                    upload["file_bytes"],
-                    upload["extraction_status"],
-                    upload["created_at"],
-                ),
-            )
-            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("source_uploaded", utc_now(), project_id))
-            log_event(
-                conn,
-                project_id,
-                "source.uploaded",
-                {
-                    "upload_id": upload["id"],
-                    "original_name": original_name,
-                    "content_type": content_type,
-                    "size_bytes": len(content),
-                    "next_step": "Gemini OCR extraction",
-                },
-            )
-        self.respond_json(upload_public_dict(upload), HTTPStatus.CREATED)
+@app.get("/api/projects/{project_id}/extractions")
+def list_extractions(project_id: str, user: dict = Depends(require_user)):
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM extractions WHERE project_id = ? ORDER BY created_at DESC", (project_id,)
+        ).fetchall()
+    return [
+        dict(row_to_dict(row), rows=parse_json_field(row["rows_json"], []), issues=parse_json_field(row["issues_json"], []))
+        for row in rows
+    ]
 
-    def handle_extract_upload(self, project_id: str, upload_id: str) -> None:
-        with connect() as conn:
-            upload = conn.execute(
-                "SELECT * FROM uploads WHERE id = ? AND project_id = ?",
-                (upload_id, project_id),
-            ).fetchone()
-            if not upload:
-                self.respond_json({"error": "Upload not found"}, HTTPStatus.NOT_FOUND)
-                return
 
-            config = ocr_config()
-            rows, issues, provider = extract_rows_from_upload(row_to_dict(upload))
-            rows, ai_classification = attach_ai_classification(rows)
-            if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
-                issues = [*issues, ai_classification["note"]]
-            status = "needs_review" if rows else "failed"
-            extraction = {
-                "id": str(uuid.uuid4()),
-                "project_id": project_id,
-                "upload_id": upload_id,
-                "provider": provider,
-                "status": status,
-                "rows": rows,
-                "issues": issues,
-                "created_at": utc_now(),
-            }
-            conn.execute(
-                """
-                INSERT INTO extractions (id, project_id, upload_id, provider, status, rows_json, issues_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    extraction["id"],
-                    extraction["project_id"],
-                    extraction["upload_id"],
-                    extraction["provider"],
-                    extraction["status"],
-                    json.dumps(extraction["rows"], ensure_ascii=False),
-                    json.dumps(extraction["issues"], ensure_ascii=False),
-                    extraction["created_at"],
-                ),
-            )
-            conn.execute(
-                "UPDATE uploads SET extraction_status = ? WHERE id = ?",
-                (status, upload_id),
-            )
-            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("extracted", utc_now(), project_id))
-            log_event(
-                conn,
-                project_id,
-                "source.extracted",
-                {
-                    "upload_id": upload_id,
-                    "extraction_id": extraction["id"],
-                    "provider": provider,
-                    "ocr_config": config,
-                    "row_count": len(rows),
-                    "issues": issues,
-                    "ai_classification": {
-                        "status": ai_classification.get("status"),
-                        "model": ai_classification.get("model"),
-                        "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
-                        "human_review_required": True,
-                    },
-                },
-            )
-        self.respond_json(extraction, HTTPStatus.CREATED)
+@app.post("/api/projects/{project_id}/uploads/{upload_id}/extract", status_code=201)
+def extract_upload(project_id: str, upload_id: str, user: dict = Depends(require_write_user)):
+    with connect() as conn:
+        upload = conn.execute(
+            "SELECT * FROM uploads WHERE id = ? AND project_id = ?", (upload_id, project_id)
+        ).fetchone()
+        if not upload:
+            raise HTTPException(404, {"error": "Upload not found"})
 
-    def handle_dart_import(self, project_id: str) -> None:
-        payload = self.read_json()
-        with connect() as conn:
-            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-            if not project:
-                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-                return
-
-        rows, issues, metadata = fetch_dart_statement_rows(payload, REFERENCE.aliases)
+        config = ocr_config()
+        rows, issues, provider = extract_rows_from_upload(row_to_dict(upload))
         rows, ai_classification = attach_ai_classification(rows)
         if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
             issues = [*issues, ai_classification["note"]]
-        raw_rows = metadata.pop("raw_rows", [])
-        raw_payload = {
-            "metadata": metadata,
-            "raw_rows": raw_rows,
-            "filtered_rows": rows,
-            "issues": issues,
-        }
-        raw_bytes = json.dumps(raw_payload, ensure_ascii=False).encode("utf-8")
         status = "needs_review" if rows else "failed"
-        now = utc_now()
-        upload = {
-            "id": str(uuid.uuid4()),
-            "project_id": project_id,
-            "original_name": f"DART_API_{metadata.get('corp_code', 'unknown')}_{metadata.get('bsns_year', payload.get('bsns_year', 'unknown'))}.json",
-            "stored_name": "",
-            "content_type": "application/json",
-            "size_bytes": len(raw_bytes),
-            "file_bytes": raw_bytes,
-            "extraction_status": status,
-            "created_at": now,
-        }
         extraction = {
             "id": str(uuid.uuid4()),
             "project_id": project_id,
-            "upload_id": upload["id"],
-            "provider": "dart_api",
+            "upload_id": upload_id,
+            "provider": provider,
             "status": status,
             "rows": rows,
             "issues": issues,
-            "metadata": metadata,
-            "created_at": now,
-        }
-        with connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO uploads (
-                    id, project_id, original_name, stored_name, content_type, size_bytes, file_bytes, extraction_status, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    upload["id"],
-                    upload["project_id"],
-                    upload["original_name"],
-                    upload["stored_name"],
-                    upload["content_type"],
-                    upload["size_bytes"],
-                    upload["file_bytes"],
-                    upload["extraction_status"],
-                    upload["created_at"],
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO extractions (id, project_id, upload_id, provider, status, rows_json, issues_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    extraction["id"],
-                    extraction["project_id"],
-                    extraction["upload_id"],
-                    extraction["provider"],
-                    extraction["status"],
-                    json.dumps(extraction["rows"], ensure_ascii=False),
-                    json.dumps([*extraction["issues"], json.dumps(metadata, ensure_ascii=False)], ensure_ascii=False),
-                    extraction["created_at"],
-                ),
-            )
-            next_status = "extracted" if rows else "source_import_failed"
-            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", (next_status, utc_now(), project_id))
-            log_event(
-                conn,
-                project_id,
-                "dart.imported",
-                {
-                    "upload_id": upload["id"],
-                    "extraction_id": extraction["id"],
-                    "row_count": len(rows),
-                    "raw_row_count": len(raw_rows),
-                    "issues": issues,
-                    "metadata": metadata,
-                    "ai_classification": {
-                        "status": ai_classification.get("status"),
-                        "model": ai_classification.get("model"),
-                        "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
-                        "human_review_required": True,
-                    },
-                },
-            )
-        self.respond_json({**extraction, "upload": upload_public_dict(upload)}, HTTPStatus.CREATED if rows else HTTPStatus.BAD_REQUEST)
-
-    def handle_dart_reports(self, project_id: str) -> None:
-        payload = self.read_json()
-        with connect() as conn:
-            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-            if not project:
-                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-                return
-
-        reports, issues, metadata = fetch_dart_available_reports(payload)
-        self.respond_json({"reports": reports, "issues": issues, "metadata": metadata})
-
-    def handle_accept_extraction(self, project_id: str, extraction_id: str) -> None:
-        acting_user = self.current_user()
-        payload = self.read_json()
-        ai_decisions = payload.get("ai_decisions") if isinstance(payload.get("ai_decisions"), dict) else None
-        with connect() as conn:
-            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-            extraction = conn.execute(
-                "SELECT * FROM extractions WHERE id = ? AND project_id = ?",
-                (extraction_id, project_id),
-            ).fetchone()
-            if not project or not extraction:
-                self.respond_json({"error": "Extraction not found"}, HTTPStatus.NOT_FOUND)
-                return
-
-            rows = parse_json_field(extraction["rows_json"], [])
-            rows, decision_summary = apply_ai_decisions(rows, ai_decisions)
-            records = [build_statement_record(project["period"], row, REFERENCE) for row in rows]
-            for record in records:
-                conn.execute(
-                    """
-                    INSERT INTO statements (
-                        id, project_id, account_name, normalized_account, standard_code, amount, period,
-                        mapping_type, rule_summary, checklist_json, created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        record["id"],
-                        project_id,
-                        record["account_name"],
-                        record["normalized_account"],
-                        record["standard_code"],
-                        record["amount"],
-                        record["period"],
-                        record["mapping_type"],
-                        record["rule_summary"],
-                        json.dumps(record["checklist"], ensure_ascii=False),
-                        utc_now(),
-                    ),
-                )
-            conn.execute(
-                "UPDATE extractions SET status = ? WHERE id = ?",
-                ("accepted", extraction_id),
-            )
-            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("mapped", utc_now(), project_id))
-            ai_confirmed = [
-                {
-                    "account_name": record["account_name"],
-                    "suggested_account": record["normalized_account"],
-                    "confidence": (record.get("ai_suggestion") or {}).get("confidence"),
-                    "rationale": (record.get("ai_suggestion") or {}).get("rationale"),
-                }
-                for record in records
-                if record.get("mapping_source") == "ai_suggested_human_accepted"
-            ]
-            log_event(
-                conn,
-                project_id,
-                "extraction.accepted",
-                {
-                    "extraction_id": extraction_id,
-                    "statement_count": len(records),
-                    "ai_classified_count": len(ai_confirmed),
-                    "ai_classified_accounts": ai_confirmed,
-                    "ai_decision_summary": decision_summary,
-                    "ai_classification_note": (
-                        "AI 1차 분류 제안을 담당자가 계정별로 승인/거절하며 확정했습니다."
-                        if decision_summary["per_account_review"] and (ai_confirmed or decision_summary["rejected"])
-                        else "AI 1차 분류 제안을 담당자가 반영하며 확정했습니다." if ai_confirmed else None
-                    ),
-                },
-                actor=(acting_user or {}).get("email") or "system",
-            )
-        self.respond_json({"statements": records, "extraction_id": extraction_id, "ai_decision_summary": decision_summary})
-
-    def handle_add_statements(self, project_id: str) -> None:
-        payload = self.read_json()
-        raw_rows = parse_statement_rows(payload)
-        # 수동 입력도 파일/DART 경로와 동일하게 추출(extraction)로 만들어, 미분류 계정에
-        # AI 1차 분류 제안을 붙이고 담당자가 추출 미리보기에서 계정별로 승인하도록 통일한다.
-        raw_rows, ai_classification = attach_ai_classification(raw_rows)
-        issues = []
-        if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
-            issues.append(ai_classification["note"])
-        status = "needs_review" if raw_rows else "failed"
-        now = utc_now()
-        with connect() as conn:
-            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-            if not project:
-                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-                return
-            upload_id = str(uuid.uuid4())
-            extraction_id = str(uuid.uuid4())
-            conn.execute(
-                """
-                INSERT INTO uploads (
-                    id, project_id, original_name, stored_name, content_type, size_bytes, extraction_status, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (upload_id, project_id, "수동입력.csv", "", "text/csv", 0, status, now),
-            )
-            conn.execute(
-                """
-                INSERT INTO extractions (id, project_id, upload_id, provider, status, rows_json, issues_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    extraction_id,
-                    project_id,
-                    upload_id,
-                    "manual_input",
-                    status,
-                    json.dumps(raw_rows, ensure_ascii=False),
-                    json.dumps(issues, ensure_ascii=False),
-                    now,
-                ),
-            )
-            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("extracted", now, project_id))
-            log_event(
-                conn,
-                project_id,
-                "source.manual_entered",
-                {
-                    "extraction_id": extraction_id,
-                    "row_count": len(raw_rows),
-                    "source": payload.get("source", "manual"),
-                    "ai_classification": {
-                        "status": ai_classification.get("status"),
-                        "model": ai_classification.get("model"),
-                        "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
-                        "human_review_required": True,
-                    },
-                },
-            )
-        self.respond_json(
-            {
-                "extraction_id": extraction_id,
-                "rows": raw_rows,
-                "issues": issues,
-                "ai_classification_status": ai_classification.get("status"),
-            },
-            HTTPStatus.CREATED,
-        )
-
-    def handle_validate(self, project_id: str) -> None:
-        with connect() as conn:
-            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-            if not project:
-                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-                return
-            statements = conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,)).fetchall()
-            result = validate_statement_records(row_to_dict(project), statements)
-            log_event(conn, project_id, "validation.completed", result)
-        self.respond_json(result)
-
-    def handle_convert(self, project_id: str) -> None:
-        payload = self.read_json()
-        responses = payload.get("responses") or {}
-        with connect() as conn:
-            project_row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-            if not project_row:
-                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-                return
-            statement_rows = sort_statements_by_code([
-                dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
-                for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
-            ])
-            project = row_to_dict(project_row)
-            output = generate_conversion(project, statement_rows, responses, REFERENCE)
-            # RAG: 판단 필요 항목마다 계정명·근거를 질의로 관련 기준서 문단을 시맨틱 검색해
-            # AI 판단 보조의 근거(context)로 주입한다. 검색 결과는 조정 금액이 아니라 근거 설명에만 쓰인다.
-            retrieved_context = []
-            for jitem in output["judgment_items"]:
-                query = f"{jitem.get('account', '')} {jitem.get('basis', '')}".strip()
-                paras = semantic_search_paragraphs(conn, query, k=3) if query else []
-                retrieved_context.append(
-                    {
-                        "account": jitem.get("account"),
-                        "paragraphs": [
-                            {
-                                "standard_set": p.get("standard_set"),
-                                "reference_code": p.get("reference_code"),
-                                "title": p.get("title"),
-                                "content": p.get("content"),
-                                "retrieval": p.get("retrieval"),
-                                "similarity": p.get("similarity"),
-                            }
-                            for p in paras
-                        ],
-                    }
-                )
-            output["ai_assistance"] = call_ai_judgment(project, output["entries"], output["judgment_items"], retrieved_context)
-            output["retrieved_context"] = retrieved_context
-            conn.execute(
-                "INSERT INTO conversions (id, project_id, output_json, created_at) VALUES (?, ?, ?, ?)",
-                (str(uuid.uuid4()), project_id, json.dumps(output, ensure_ascii=False), utc_now()),
-            )
-            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("draft_generated", utc_now(), project_id))
-            log_event(
-                conn,
-                project_id,
-                "conversion.generated",
-                {
-                    "responses": responses,
-                    "entry_count": len(output["entries"]),
-                    "template": output["statement_template"],
-                    "ai_status": output["ai_assistance"].get("status"),
-                },
-            )
-        self.respond_json(output)
-
-    def handle_review_summary(self, project_id: str) -> None:
-        with connect() as conn:
-            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-            if not project:
-                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-                return
-            statements = sort_statements_by_code([row_to_dict(row) for row in conn.execute(
-                "SELECT * FROM statements WHERE project_id = ?", (project_id,)
-            )])
-            conversion_row = conn.execute(
-                "SELECT output_json FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            validation = validate_statement_records(row_to_dict(project), statements) if statements else None
-        conversion = parse_json_field(conversion_row["output_json"], {}) if conversion_row else None
-        self.respond_json(build_review_summary(statements, conversion, validation))
-
-    def handle_review(self, project_id: str) -> None:
-        payload = self.read_json()
-        decision = payload.get("decision")
-        if decision not in {"approved", "changes_requested"}:
-            self.respond_json({"error": "Decision must be approved or changes_requested."}, HTTPStatus.BAD_REQUEST)
-            return
-
-        reviewer_name = str(payload.get("reviewer_name") or "").strip() or "Unassigned reviewer"
-        memo = str(payload.get("memo") or "").strip()
-        status = "approved" if decision == "approved" else "changes_requested"
-        review = {
-            "id": str(uuid.uuid4()),
-            "project_id": project_id,
-            "reviewer_name": reviewer_name,
-            "decision": decision,
-            "memo": memo,
             "created_at": utc_now(),
         }
+        conn.execute(
+            """
+            INSERT INTO extractions (id, project_id, upload_id, provider, status, rows_json, issues_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                extraction["id"], project_id, upload_id, provider, status,
+                json.dumps(rows, ensure_ascii=False), json.dumps(issues, ensure_ascii=False), extraction["created_at"],
+            ),
+        )
+        conn.execute("UPDATE uploads SET extraction_status = ? WHERE id = ?", (status, upload_id))
+        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("extracted", utc_now(), project_id))
+        log_event(
+            conn,
+            project_id,
+            "source.extracted",
+            {
+                "upload_id": upload_id,
+                "extraction_id": extraction["id"],
+                "provider": provider,
+                "ocr_config": config,
+                "row_count": len(rows),
+                "issues": issues,
+                "ai_classification": {
+                    "status": ai_classification.get("status"),
+                    "model": ai_classification.get("model"),
+                    "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
+                    "human_review_required": True,
+                },
+            },
+        )
+    return extraction
 
-        with connect() as conn:
-            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-            if not project:
-                self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-                return
-            conversion = conn.execute(
-                "SELECT id FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            if not conversion:
-                self.respond_json({"error": "Generate a conversion draft before review."}, HTTPStatus.BAD_REQUEST)
-                return
-            if decision == "approved":
-                # 2차 승인 게이트: 오류 수준(미분류 잔존)은 승인을 차단, 경고는 검토자 판단에 맡긴다.
-                unclassified = conn.execute(
-                    "SELECT COUNT(*) AS count FROM statements WHERE project_id = ? AND standard_code = ?",
-                    (project_id, "X9999"),
-                ).fetchone()["count"]
-                if unclassified:
-                    self.respond_json(
-                        {
-                            "error": f"미분류 계정 {unclassified}건이 남아 있어 승인할 수 없습니다. 담당자 분류 또는 AI 제안 승인(1차 승인) 후 다시 시도하세요.",
-                            "unclassified_count": unclassified,
-                        },
-                        HTTPStatus.CONFLICT,
-                    )
-                    return
+
+# --- DART 연동 ---
+
+@app.post("/api/projects/{project_id}/dart/import")
+def dart_import(project_id: str, payload: dict = Body(default={}), user: dict = Depends(require_write_user)):
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+
+    rows, issues, metadata = fetch_dart_statement_rows(payload, REFERENCE.aliases)
+    rows, ai_classification = attach_ai_classification(rows)
+    if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
+        issues = [*issues, ai_classification["note"]]
+    raw_rows = metadata.pop("raw_rows", [])
+    raw_payload = {"metadata": metadata, "raw_rows": raw_rows, "filtered_rows": rows, "issues": issues}
+    raw_bytes = json.dumps(raw_payload, ensure_ascii=False).encode("utf-8")
+    status = "needs_review" if rows else "failed"
+    now = utc_now()
+    upload = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "original_name": f"DART_API_{metadata.get('corp_code', 'unknown')}_{metadata.get('bsns_year', payload.get('bsns_year', 'unknown'))}.json",
+        "stored_name": "",
+        "content_type": "application/json",
+        "size_bytes": len(raw_bytes),
+        "file_bytes": raw_bytes,
+        "extraction_status": status,
+        "created_at": now,
+    }
+    extraction = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "upload_id": upload["id"],
+        "provider": "dart_api",
+        "status": status,
+        "rows": rows,
+        "issues": issues,
+        "metadata": metadata,
+        "created_at": now,
+    }
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO uploads (
+                id, project_id, original_name, stored_name, content_type, size_bytes, file_bytes, extraction_status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                upload["id"], upload["project_id"], upload["original_name"], upload["stored_name"],
+                upload["content_type"], upload["size_bytes"], upload["file_bytes"],
+                upload["extraction_status"], upload["created_at"],
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO extractions (id, project_id, upload_id, provider, status, rows_json, issues_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                extraction["id"], project_id, upload["id"], "dart_api", status,
+                json.dumps(rows, ensure_ascii=False),
+                json.dumps([*issues, json.dumps(metadata, ensure_ascii=False)], ensure_ascii=False),
+                now,
+            ),
+        )
+        next_status = "extracted" if rows else "source_import_failed"
+        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", (next_status, utc_now(), project_id))
+        log_event(
+            conn,
+            project_id,
+            "dart.imported",
+            {
+                "upload_id": upload["id"],
+                "extraction_id": extraction["id"],
+                "row_count": len(rows),
+                "raw_row_count": len(raw_rows),
+                "issues": issues,
+                "metadata": metadata,
+                "ai_classification": {
+                    "status": ai_classification.get("status"),
+                    "model": ai_classification.get("model"),
+                    "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
+                    "human_review_required": True,
+                },
+            },
+        )
+    return JSONResponse(
+        status_code=201 if rows else 400,
+        content={**extraction, "upload": upload_public_dict(upload)},
+    )
+
+
+@app.post("/api/projects/{project_id}/dart/reports")
+def dart_reports(project_id: str, payload: dict = Body(default={}), user: dict = Depends(require_write_user)):
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+    reports, issues, metadata = fetch_dart_available_reports(payload)
+    return {"reports": reports, "issues": issues, "metadata": metadata}
+
+
+# --- 추출 반영(1차 승인)·수동 입력·검증 ---
+
+@app.post("/api/projects/{project_id}/extractions/{extraction_id}/accept")
+def accept_extraction(
+    project_id: str,
+    extraction_id: str,
+    payload: AcceptExtractionRequest | None = None,
+    user: dict = Depends(require_write_user),
+):
+    ai_decisions = payload.ai_decisions if payload else None
+    with connect() as conn:
+        project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        extraction = conn.execute(
+            "SELECT * FROM extractions WHERE id = ? AND project_id = ?", (extraction_id, project_id)
+        ).fetchone()
+        if not project or not extraction:
+            raise HTTPException(404, {"error": "Extraction not found"})
+
+        rows = parse_json_field(extraction["rows_json"], [])
+        rows, decision_summary = apply_ai_decisions(rows, ai_decisions)
+        records = [build_statement_record(project["period"], row, REFERENCE) for row in rows]
+        for record in records:
             conn.execute(
                 """
-                INSERT INTO reviews (id, project_id, reviewer_name, decision, memo, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO statements (
+                    id, project_id, account_name, normalized_account, standard_code, amount, period,
+                    mapping_type, rule_summary, checklist_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    review["id"],
-                    review["project_id"],
-                    review["reviewer_name"],
-                    review["decision"],
-                    review["memo"],
-                    review["created_at"],
+                    record["id"], project_id, record["account_name"], record["normalized_account"],
+                    record["standard_code"], record["amount"], record["period"], record["mapping_type"],
+                    record["rule_summary"], json.dumps(record["checklist"], ensure_ascii=False), utc_now(),
                 ),
             )
-            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", (status, utc_now(), project_id))
-            log_event(
-                conn,
-                project_id,
-                "review.recorded",
-                {
-                    "review_id": review["id"],
-                    "decision": decision,
-                    "memo": memo,
-                    "conversion_id": conversion["id"],
+        conn.execute("UPDATE extractions SET status = ? WHERE id = ?", ("accepted", extraction_id))
+        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("mapped", utc_now(), project_id))
+        ai_confirmed = [
+            {
+                "account_name": record["account_name"],
+                "suggested_account": record["normalized_account"],
+                "confidence": (record.get("ai_suggestion") or {}).get("confidence"),
+                "rationale": (record.get("ai_suggestion") or {}).get("rationale"),
+            }
+            for record in records
+            if record.get("mapping_source") == "ai_suggested_human_accepted"
+        ]
+        log_event(
+            conn,
+            project_id,
+            "extraction.accepted",
+            {
+                "extraction_id": extraction_id,
+                "statement_count": len(records),
+                "ai_classified_count": len(ai_confirmed),
+                "ai_classified_accounts": ai_confirmed,
+                "ai_decision_summary": decision_summary,
+                "ai_classification_note": (
+                    "AI 1차 분류 제안을 담당자가 계정별로 승인/거절하며 확정했습니다."
+                    if decision_summary["per_account_review"] and (ai_confirmed or decision_summary["rejected"])
+                    else "AI 1차 분류 제안을 담당자가 반영하며 확정했습니다." if ai_confirmed else None
+                ),
+            },
+            actor=user.get("email") or "system",
+        )
+    return {"statements": records, "extraction_id": extraction_id, "ai_decision_summary": decision_summary}
+
+
+@app.post("/api/projects/{project_id}/statements", status_code=201)
+def add_statements(project_id: str, payload: StatementsAddRequest, user: dict = Depends(require_write_user)):
+    raw_rows = parse_statement_rows(payload.model_dump())
+    # 수동 입력도 파일/DART 경로와 동일하게 추출(extraction)로 만들어, 미분류 계정에
+    # AI 1차 분류 제안을 붙이고 담당자가 추출 미리보기에서 계정별로 승인하도록 통일한다.
+    raw_rows, ai_classification = attach_ai_classification(raw_rows)
+    issues = []
+    if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
+        issues.append(ai_classification["note"])
+    status = "needs_review" if raw_rows else "failed"
+    now = utc_now()
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        upload_id = str(uuid.uuid4())
+        extraction_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO uploads (
+                id, project_id, original_name, stored_name, content_type, size_bytes, extraction_status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (upload_id, project_id, "수동입력.csv", "", "text/csv", 0, status, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO extractions (id, project_id, upload_id, provider, status, rows_json, issues_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                extraction_id, project_id, upload_id, "manual_input", status,
+                json.dumps(raw_rows, ensure_ascii=False), json.dumps(issues, ensure_ascii=False), now,
+            ),
+        )
+        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("extracted", now, project_id))
+        log_event(
+            conn,
+            project_id,
+            "source.manual_entered",
+            {
+                "extraction_id": extraction_id,
+                "row_count": len(raw_rows),
+                "source": payload.source,
+                "ai_classification": {
+                    "status": ai_classification.get("status"),
+                    "model": ai_classification.get("model"),
+                    "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
+                    "human_review_required": True,
                 },
-                actor=reviewer_name,
+            },
+        )
+    return {
+        "extraction_id": extraction_id,
+        "rows": raw_rows,
+        "issues": issues,
+        "ai_classification_status": ai_classification.get("status"),
+    }
+
+
+@app.post("/api/projects/{project_id}/validate")
+def validate_project(project_id: str, user: dict = Depends(require_write_user)):
+    with connect() as conn:
+        project = get_project_or_404(conn, project_id)
+        statements = conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,)).fetchall()
+        result = validate_statement_records(project, statements)
+        log_event(conn, project_id, "validation.completed", result)
+    return result
+
+
+# --- 변환·검토 ---
+
+@app.post("/api/projects/{project_id}/convert")
+def convert_project(project_id: str, payload: ConvertRequest, user: dict = Depends(require_write_user)):
+    responses = payload.responses or {}
+    with connect() as conn:
+        project = get_project_or_404(conn, project_id)
+        statement_rows = sort_statements_by_code([
+            dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
+            for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
+        ])
+        output = generate_conversion(project, statement_rows, responses, REFERENCE)
+        # RAG: 판단 필요 항목마다 계정명·근거를 질의로 관련 기준서 문단을 시맨틱 검색해
+        # AI 판단 보조의 근거(context)로 주입한다. 검색 결과는 조정 금액이 아니라 근거 설명에만 쓰인다.
+        retrieved_context = []
+        for jitem in output["judgment_items"]:
+            query = f"{jitem.get('account', '')} {jitem.get('basis', '')}".strip()
+            paras = semantic_search_paragraphs(conn, query, k=3) if query else []
+            retrieved_context.append(
+                {
+                    "account": jitem.get("account"),
+                    "paragraphs": [
+                        {
+                            "standard_set": p.get("standard_set"),
+                            "reference_code": p.get("reference_code"),
+                            "title": p.get("title"),
+                            "content": p.get("content"),
+                            "retrieval": p.get("retrieval"),
+                            "similarity": p.get("similarity"),
+                        }
+                        for p in paras
+                    ],
+                }
             )
-        self.respond_json(review, HTTPStatus.CREATED)
+        output["ai_assistance"] = call_ai_judgment(project, output["entries"], output["judgment_items"], retrieved_context)
+        output["retrieved_context"] = retrieved_context
+        conn.execute(
+            "INSERT INTO conversions (id, project_id, output_json, created_at) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), project_id, json.dumps(output, ensure_ascii=False), utc_now()),
+        )
+        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("draft_generated", utc_now(), project_id))
+        log_event(
+            conn,
+            project_id,
+            "conversion.generated",
+            {
+                "responses": responses,
+                "entry_count": len(output["entries"]),
+                "template": output["statement_template"],
+                "ai_status": output["ai_assistance"].get("status"),
+            },
+        )
+    return output
 
-    def handle_get_audit(self, project_id: str) -> None:
-        with connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at DESC",
-                (project_id,),
-            ).fetchall()
-        logs = [dict(row_to_dict(row), detail=parse_json_field(row["detail_json"], {})) for row in rows]
-        self.respond_json(logs)
 
-    def handle_export(self, project_id: str, export_name: str) -> None:
-        with connect() as conn:
-            project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-            conversion = conn.execute(
-                "SELECT output_json FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            statements = sort_statements_by_code([
-                dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
-                for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
-            ])
-            latest_extraction = conn.execute(
-                """
-                SELECT e.rows_json, u.file_bytes
-                FROM extractions e
-                LEFT JOIN uploads u ON u.id = e.upload_id
-                WHERE e.project_id = ?
-                ORDER BY e.created_at DESC
-                LIMIT 1
-                """,
-                (project_id,),
-            ).fetchone()
-            audit_rows = [
-                dict(row_to_dict(row), detail=parse_json_field(row["detail_json"], {}))
-                for row in conn.execute("SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at", (project_id,))
-            ]
-        if not project:
-            self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
-            return
+@app.get("/api/projects/{project_id}/review-summary")
+def review_summary(project_id: str, user: dict = Depends(require_user)):
+    with connect() as conn:
+        project = get_project_or_404(conn, project_id)
+        statements = sort_statements_by_code([
+            row_to_dict(row)
+            for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
+        ])
+        conversion_row = conn.execute(
+            "SELECT output_json FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        validation = validate_statement_records(project, statements) if statements else None
+    conversion = parse_json_field(conversion_row["output_json"], {}) if conversion_row else None
+    return build_review_summary(statements, conversion, validation)
+
+
+@app.post("/api/projects/{project_id}/review", status_code=201)
+def record_review(project_id: str, payload: ReviewRequest, user: dict = Depends(require_write_user)):
+    if payload.decision not in {"approved", "changes_requested"}:
+        raise HTTPException(400, {"error": "Decision must be approved or changes_requested."})
+
+    reviewer_name = payload.reviewer_name.strip() or "Unassigned reviewer"
+    memo = payload.memo.strip()
+    review = {
+        "id": str(uuid.uuid4()),
+        "project_id": project_id,
+        "reviewer_name": reviewer_name,
+        "decision": payload.decision,
+        "memo": memo,
+        "created_at": utc_now(),
+    }
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        conversion = conn.execute(
+            "SELECT id FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
         if not conversion:
-            self.respond_json({"error": "Generate a conversion draft before export."}, HTTPStatus.BAD_REQUEST)
-            return
-        output = parse_json_field(conversion["output_json"], {})
-        if export_name == "adjustments.csv":
-            self.respond_download(conversion_adjustments_csv(output), "text/csv", "gtf_adjustments.csv")
-            return
-        if export_name == "basis-report.txt":
-            self.respond_download(conversion_basis_report(output), "text/plain", "gtf_basis_report.txt")
-            return
-        if export_name == "review-workbook.xlsx":
-            extraction_rows = dart_raw_rows_from_upload(row_to_dict(latest_extraction) if latest_extraction else None)
-            if not extraction_rows and latest_extraction:
-                extraction_rows = parse_json_field(latest_extraction["rows_json"], [])
-            workbook = review_workbook_bytes(row_to_dict(project), extraction_rows, statements, output, audit_rows)
-            self.respond_binary_download(
-                workbook,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "gtf_review_workbook.xlsx",
-            )
-            return
-        self.respond_json({"error": "Unknown export type"}, HTTPStatus.NOT_FOUND)
+            raise HTTPException(400, {"error": "Generate a conversion draft before review."})
+        if payload.decision == "approved":
+            # 2차 승인 게이트: 오류 수준(미분류 잔존)은 승인을 차단, 경고는 검토자 판단에 맡긴다.
+            unclassified = conn.execute(
+                "SELECT COUNT(*) AS count FROM statements WHERE project_id = ? AND standard_code = ?",
+                (project_id, "X9999"),
+            ).fetchone()["count"]
+            if unclassified:
+                raise HTTPException(
+                    409,
+                    {
+                        "error": f"미분류 계정 {unclassified}건이 남아 있어 승인할 수 없습니다. 담당자 분류 또는 AI 제안 승인(1차 승인) 후 다시 시도하세요.",
+                        "unclassified_count": unclassified,
+                    },
+                )
+        conn.execute(
+            "INSERT INTO reviews (id, project_id, reviewer_name, decision, memo, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                review["id"], review["project_id"], review["reviewer_name"],
+                review["decision"], review["memo"], review["created_at"],
+            ),
+        )
+        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", (payload.decision, utc_now(), project_id))
+        log_event(
+            conn,
+            project_id,
+            "review.recorded",
+            {"review_id": review["id"], "decision": payload.decision, "memo": memo, "conversion_id": conversion["id"]},
+            actor=reviewer_name,
+        )
+    return review
 
-    def log_message(self, format: str, *args: object) -> None:
-        print(f"{self.address_string()} - {format % args}")
+
+@app.get("/api/projects/{project_id}/audit")
+def list_audit(project_id: str, user: dict = Depends(require_user)):
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at DESC", (project_id,)
+        ).fetchall()
+    return [dict(row_to_dict(row), detail=parse_json_field(row["detail_json"], {})) for row in rows]
+
+
+# --- 내보내기 ---
+
+@app.get("/api/projects/{project_id}/exports/{export_name}")
+def export_project(project_id: str, export_name: str, user: dict = Depends(require_user)):
+    with connect() as conn:
+        project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        conversion = conn.execute(
+            "SELECT output_json FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        statements = sort_statements_by_code([
+            dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
+            for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
+        ])
+        latest_extraction = conn.execute(
+            """
+            SELECT e.rows_json, u.file_bytes
+            FROM extractions e
+            LEFT JOIN uploads u ON u.id = e.upload_id
+            WHERE e.project_id = ?
+            ORDER BY e.created_at DESC
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+        audit_rows = [
+            dict(row_to_dict(row), detail=parse_json_field(row["detail_json"], {}))
+            for row in conn.execute("SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at", (project_id,))
+        ]
+    if not project:
+        raise HTTPException(404, {"error": "Project not found"})
+    if not conversion:
+        raise HTTPException(400, {"error": "Generate a conversion draft before export."})
+    output = parse_json_field(conversion["output_json"], {})
+    if export_name == "adjustments.csv":
+        return Response(
+            content=conversion_adjustments_csv(output).encode("utf-8-sig"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="gtf_adjustments.csv"'},
+        )
+    if export_name == "basis-report.txt":
+        return Response(
+            content=conversion_basis_report(output),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="gtf_basis_report.txt"'},
+        )
+    if export_name == "review-workbook.xlsx":
+        extraction_rows = dart_raw_rows_from_upload(row_to_dict(latest_extraction) if latest_extraction else None)
+        if not extraction_rows and latest_extraction:
+            extraction_rows = parse_json_field(latest_extraction["rows_json"], [])
+        workbook = review_workbook_bytes(row_to_dict(project), extraction_rows, statements, output, audit_rows)
+        return Response(
+            content=workbook,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": 'attachment; filename="gtf_review_workbook.xlsx"'},
+        )
+    raise HTTPException(404, {"error": "Unknown export type"})
+
+
+# --- 정적 파일(React 빌드)·SPA 진입점 — API 라우트보다 뒤에 두어야 catch-all이 API를 가리지 않는다 ---
+
+@app.get("/styles.css")
+def styles():
+    return PlainTextResponse(STYLES_CSS, media_type="text/css")
+
+
+@app.get("/app.js")
+def script():
+    return PlainTextResponse(APP_JS, media_type="application/javascript")
+
+
+@app.get("/{full_path:path}")
+def serve_frontend(full_path: str):
+    """React 빌드 정적 파일을 서빙하고, 없으면 SPA 진입점(index.html)을 돌려준다."""
+    static = figma_static_file("/" + full_path)
+    if static is not None:
+        cache = "no-cache" if static.name == "index.html" else "public, max-age=31536000, immutable"
+        return FileResponse(static, headers={"Cache-Control": cache})
+    if full_path.startswith("api/"):
+        raise HTTPException(404, {"error": "Not found"})
+    index = figma_static_file("/")
+    return FileResponse(index, headers={"Cache-Control": "no-cache"}) if index else HTMLResponse(INDEX_HTML)
 
 
 def main() -> None:
-    init_db()
     port = int(os.environ.get("PORT", "4173"))
     host = os.environ.get("HOST", "127.0.0.1")
-    server = ThreadingHTTPServer((host, port), AppHandler)
-    print(f"GTF server running on http://{host}:{port}")
-    server.serve_forever()
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
