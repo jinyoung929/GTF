@@ -144,19 +144,11 @@ class AiClassificationCallTest(unittest.TestCase):
         self.assertTrue(result["human_review_required"])
 
     def _fake_openai(self, items):
-        body = json.dumps({"output_text": json.dumps({"items": items}, ensure_ascii=False)}).encode("utf-8")
-
-        class FakeResponse:
-            def read(self):
-                return body
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-        return FakeResponse()
+        # requests.post 반환값 흉내: raise_for_status()는 통과, json()은 OpenAI 응답 형태
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"output_text": json.dumps({"items": items}, ensure_ascii=False)}
+        return response
 
     def test_connected_response_builds_validated_suggestions(self):
         items = [
@@ -170,7 +162,7 @@ class AiClassificationCallTest(unittest.TestCase):
             {"account_name": "모르는계정", "suggested_account_key": "other", "confidence": "low", "rationale": "-"},
         ]
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
-            with mock.patch.object(server.url_request, "urlopen", return_value=self._fake_openai(items)):
+            with mock.patch.object(server.requests, "post", return_value=self._fake_openai(items)):
                 result = server.call_ai_classification(["임차보증금", "이상한계정", "모르는계정"])
         self.assertEqual(result["status"], "connected")
         self.assertEqual(set(result["suggestions"].keys()), {"임차보증금"})
@@ -192,7 +184,7 @@ class AiClassificationCallTest(unittest.TestCase):
             }
         ]
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
-            with mock.patch.object(server.url_request, "urlopen", return_value=self._fake_openai(items)):
+            with mock.patch.object(server.requests, "post", return_value=self._fake_openai(items)):
                 rows, result = server.attach_ai_classification(rows)
         self.assertEqual(result["status"], "connected")
         self.assertIn("ai_suggestion", rows[0])

@@ -23,9 +23,9 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import xml.etree.ElementTree as ET
-from urllib import error as url_error
-from urllib import request as url_request
 from urllib.parse import parse_qs, urlparse
+
+import requests
 
 from gtf_app.auth import (
     admin_config,
@@ -1023,18 +1023,18 @@ def openai_embed(texts: list[str]) -> list[list[float]] | None:
     if not api_key or not texts:
         return None
     payload = {"model": EMBEDDING_MODEL, "input": texts}
-    request = url_request.Request(
-        OPENAI_EMBEDDING_ENDPOINT,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        method="POST",
-    )
     try:
-        with url_request.urlopen(request, timeout=45) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        response = requests.post(
+            OPENAI_EMBEDDING_ENDPOINT,
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=45,
+        )
+        response.raise_for_status()
+        body = response.json()
         vectors = [item["embedding"] for item in body.get("data", [])]
         return vectors if len(vectors) == len(texts) else None
-    except (url_error.HTTPError, url_error.URLError, OSError, KeyError, ValueError):
+    except (requests.RequestException, KeyError, ValueError):
         return None
 
 
@@ -1266,41 +1266,27 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
             }
         },
     }
-    request = url_request.Request(
-        OPENAI_API_ENDPOINT,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
-
     try:
-        with url_request.urlopen(request, timeout=45) as response:
-            response_payload = json.loads(response.read().decode("utf-8"))
-    except url_error.HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")[:500]
+        response = requests.post(
+            OPENAI_API_ENDPOINT,
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=45,
+        )
+        response.raise_for_status()
+        response_payload = response.json()
+    except requests.HTTPError as exc:
+        message = exc.response.text[:500]
         return {
             "provider": "openai",
             "model": config["model"],
             "status": "failed",
             "items": [],
             "overall_note": "OpenAI 판단 보조 요청이 실패했습니다. 변환 초안은 저장되며 사람이 검토해야 합니다.",
-            "issues": [f"OpenAI 요청 실패: HTTP {exc.code}", message],
+            "issues": [f"OpenAI 요청 실패: HTTP {exc.response.status_code}", message],
             "human_review_required": True,
         }
-    except url_error.URLError as exc:
-        return {
-            "provider": "openai",
-            "model": config["model"],
-            "status": "failed",
-            "items": [],
-            "overall_note": "OpenAI 판단 보조 네트워크 오류가 발생했습니다.",
-            "issues": [f"OpenAI 네트워크 오류: {exc.reason}"],
-            "human_review_required": True,
-        }
-    except TimeoutError:
+    except requests.Timeout:
         return {
             "provider": "openai",
             "model": config["model"],
@@ -1308,6 +1294,16 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
             "items": [],
             "overall_note": "OpenAI 판단 보조 요청 시간이 초과되었습니다.",
             "issues": ["OpenAI 요청 시간이 초과되었습니다."],
+            "human_review_required": True,
+        }
+    except requests.RequestException as exc:
+        return {
+            "provider": "openai",
+            "model": config["model"],
+            "status": "failed",
+            "items": [],
+            "overall_note": "OpenAI 판단 보조 네트워크 오류가 발생했습니다.",
+            "issues": [f"OpenAI 네트워크 오류: {exc}"],
             "human_review_required": True,
         }
 
@@ -1430,28 +1426,25 @@ def call_ai_classification(unmapped_accounts: list[str]) -> dict:
             }
         },
     }
-    request = url_request.Request(
-        OPENAI_API_ENDPOINT,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
     try:
-        with url_request.urlopen(request, timeout=45) as response:
-            response_payload = json.loads(response.read().decode("utf-8"))
-    except url_error.HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")[:500]
+        response = requests.post(
+            OPENAI_API_ENDPOINT,
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=45,
+        )
+        response.raise_for_status()
+        response_payload = response.json()
+    except requests.HTTPError as exc:
+        message = exc.response.text[:500]
         return {
             **base,
             "status": "failed",
             "suggestions": {},
             "note": "AI 1차 분류 요청이 실패해 미분류 계정은 담당자가 직접 분류해야 합니다.",
-            "issues": [f"OpenAI 분류 요청 실패: HTTP {exc.code}", message],
+            "issues": [f"OpenAI 분류 요청 실패: HTTP {exc.response.status_code}", message],
         }
-    except (url_error.URLError, TimeoutError) as exc:
+    except requests.RequestException as exc:
         return {
             **base,
             "status": "failed",
@@ -1599,23 +1592,17 @@ def call_gemini_ocr(file_path: Path, mime_type: str, model: str) -> tuple[list[d
         },
     }
     endpoint = "https://generativelanguage.googleapis.com/v1beta/interactions"
-    request = url_request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-
     try:
-        with url_request.urlopen(request, timeout=45) as response:
-            response_payload = json.loads(response.read().decode("utf-8"))
-    except url_error.HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")[:500]
-        return [], [f"Gemini OCR 요청 실패: HTTP {exc.code}", message]
-    except url_error.URLError as exc:
-        return [], [f"Gemini OCR 네트워크 오류: {exc.reason}"]
-    except TimeoutError:
+        response = requests.post(endpoint, json=payload, headers={"x-goog-api-key": api_key}, timeout=45)
+        response.raise_for_status()
+        response_payload = response.json()
+    except requests.HTTPError as exc:
+        message = exc.response.text[:500]
+        return [], [f"Gemini OCR 요청 실패: HTTP {exc.response.status_code}", message]
+    except requests.Timeout:
         return [], ["Gemini OCR 요청 시간이 초과되었습니다."]
+    except requests.RequestException as exc:
+        return [], [f"Gemini OCR 네트워크 오류: {exc}"]
 
     text = gemini_response_text(response_payload)
     if not text:

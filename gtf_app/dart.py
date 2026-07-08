@@ -4,13 +4,11 @@ import io
 import json
 import os
 import re
-import ssl
 import zipfile
 from datetime import date
 import xml.etree.ElementTree as ET
-from urllib import error as url_error
-from urllib import request as url_request
-from urllib.parse import quote
+
+import requests
 
 from gtf_app.domain import normalize_account_name, parse_amount
 
@@ -90,20 +88,10 @@ def dart_fs_div(value: str) -> str:
     return aliases.get(text, "CFS")
 
 
-def dart_ssl_context() -> ssl.SSLContext:
-    try:
-        import certifi
-
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
-
-
 def dart_json_request(url: str, params: dict[str, str], timeout: int = 30) -> dict:
-    query = "&".join(f"{key}={quote(str(value))}" for key, value in params.items() if value is not None)
-    request = url_request.Request(f"{url}?{query}", headers={"Accept": "application/json"})
-    with url_request.urlopen(request, timeout=timeout, context=dart_ssl_context()) as response:
-        return json.loads(response.read().decode("utf-8"))
+    response = requests.get(url, params=params, headers={"Accept": "application/json"}, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
 
 def normalize_dart_amount(value) -> float:
@@ -308,13 +296,13 @@ def parse_dart_corp_codes(zip_bytes: bytes) -> list[dict]:
 
 def lookup_dart_corp_code(api_key: str, company_name: str = "", stock_code: str = "") -> tuple[str, list[str]]:
     try:
-        request = url_request.Request(f"{DART_CORP_CODE_ENDPOINT}?crtfc_key={quote(api_key)}")
-        with url_request.urlopen(request, timeout=30, context=dart_ssl_context()) as response:
-            companies = parse_dart_corp_codes(response.read())
-    except url_error.HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")[:300]
-        return "", [f"DART 고유번호 조회 실패: HTTP {exc.code}", message]
-    except (url_error.URLError, TimeoutError, zipfile.BadZipFile, ET.ParseError) as exc:
+        response = requests.get(DART_CORP_CODE_ENDPOINT, params={"crtfc_key": api_key}, timeout=30)
+        response.raise_for_status()
+        companies = parse_dart_corp_codes(response.content)
+    except requests.HTTPError as exc:
+        message = exc.response.text[:300]
+        return "", [f"DART 고유번호 조회 실패: HTTP {exc.response.status_code}", message]
+    except (requests.RequestException, zipfile.BadZipFile, ET.ParseError) as exc:
         return "", [f"DART 고유번호 조회 실패: {exc}"]
 
     normalized_stock = re.sub(r"\D+", "", stock_code or "")
@@ -363,10 +351,10 @@ def fetch_dart_available_reports(payload: dict) -> tuple[list[dict], list[str], 
     }
     try:
         response_payload = dart_json_request(DART_DISCLOSURE_LIST_ENDPOINT, params)
-    except url_error.HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")[:300]
-        return [], [f"DART 보고서 목록 조회 실패: HTTP {exc.code}", message], {"api_key_ready": True, "corp_code": corp_code}
-    except (url_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except requests.HTTPError as exc:
+        message = exc.response.text[:300]
+        return [], [f"DART 보고서 목록 조회 실패: HTTP {exc.response.status_code}", message], {"api_key_ready": True, "corp_code": corp_code}
+    except (requests.RequestException, json.JSONDecodeError) as exc:
         return [], [f"DART 보고서 목록 조회 실패: {exc}"], {"api_key_ready": True, "corp_code": corp_code}
 
     status = str(response_payload.get("status") or "")
@@ -436,10 +424,10 @@ def fetch_dart_statement_rows(payload: dict, aliases: dict) -> tuple[list[dict],
 
     try:
         response_payload = dart_json_request(DART_API_ENDPOINT, params)
-    except url_error.HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")[:300]
-        return [], [f"DART 재무제표 조회 실패: HTTP {exc.code}", message], {"api_key_ready": True, "corp_code": corp_code, **params}
-    except (url_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except requests.HTTPError as exc:
+        message = exc.response.text[:300]
+        return [], [f"DART 재무제표 조회 실패: HTTP {exc.response.status_code}", message], {"api_key_ready": True, "corp_code": corp_code, **params}
+    except (requests.RequestException, json.JSONDecodeError) as exc:
         return [], [f"DART 재무제표 조회 실패: {exc}"], {"api_key_ready": True, "corp_code": corp_code, **params}
 
     raw_rows = dart_raw_statement_rows(response_payload, aliases)
