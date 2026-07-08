@@ -168,16 +168,16 @@ def dart_reference_only_reason(name: str) -> str:
     return ""
 
 
-def dart_account_key(name: str) -> str:
+def dart_account_key(name: str, aliases: dict) -> str:
     compact = re.sub(r"\s+", "", str(name or ""))
     if not compact:
         return "other"
     if dart_structural_exclusion_reason(name) or dart_reference_only_reason(name):
         return "other"
-    return normalize_account_name(name)
+    return normalize_account_name(name, aliases)
 
 
-def dart_account_filter_reason(item: dict) -> str:
+def dart_account_filter_reason(item: dict, aliases: dict) -> str:
     name = str(item.get("account_nm") or "").strip()
     if not name:
         return "계정명 없음"
@@ -187,7 +187,7 @@ def dart_account_filter_reason(item: dict) -> str:
     reference_reason = dart_reference_only_reason(name)
     if reference_reason:
         return reference_reason
-    account_key = normalize_account_name(name)
+    account_key = normalize_account_name(name, aliases)
     if account_key == "other":
         return "현재 표준계정 사전에 없는 계정"
     amount = normalize_dart_amount(item.get("thstrm_amount"))
@@ -199,8 +199,8 @@ def dart_account_filter_reason(item: dict) -> str:
     return ""
 
 
-def should_keep_dart_account(item: dict) -> bool:
-    return not dart_account_filter_reason(item)
+def should_keep_dart_account(item: dict, aliases: dict) -> bool:
+    return not dart_account_filter_reason(item, aliases)
 
 
 def summarize_filter_reasons(reasons: dict[str, int]) -> str:
@@ -210,13 +210,13 @@ def summarize_filter_reasons(reasons: dict[str, int]) -> str:
     return "제외 사유: " + ", ".join(parts)
 
 
-def dart_raw_statement_rows(payload: dict) -> list[dict]:
+def dart_raw_statement_rows(payload: dict, aliases: dict) -> list[dict]:
     rows: list[dict] = []
     for item in payload.get("list") or []:
         account_name = str(item.get("account_nm") or "").strip()
         if not account_name:
             continue
-        filter_reason = dart_account_filter_reason(item)
+        filter_reason = dart_account_filter_reason(item, aliases)
         rows.append(
             {
                 "account_name": account_name,
@@ -224,7 +224,7 @@ def dart_raw_statement_rows(payload: dict) -> list[dict]:
                 "statement_type": item.get("sj_nm") or item.get("sj_div") or "",
                 "currency": item.get("currency") or "KRW",
                 "dart_account_id": item.get("account_id") or "",
-                "account_key": dart_account_key(account_name),
+                "account_key": dart_account_key(account_name, aliases),
                 "conversion_candidate": not bool(filter_reason),
                 "filter_reason": filter_reason,
                 "source": "dart_api_raw",
@@ -233,7 +233,7 @@ def dart_raw_statement_rows(payload: dict) -> list[dict]:
     return rows
 
 
-def dart_statement_rows(payload: dict) -> tuple[list[dict], list[str]]:
+def dart_statement_rows(payload: dict, aliases: dict) -> tuple[list[dict], list[str]]:
     status = str(payload.get("status") or "")
     message = str(payload.get("message") or "").strip()
     if status and status != "000":
@@ -253,8 +253,8 @@ def dart_statement_rows(payload: dict) -> tuple[list[dict], list[str]]:
             skipped_count += 1
             skip_reasons["계정명 없음"] = skip_reasons.get("계정명 없음", 0) + 1
             continue
-        account_key = dart_account_key(account_name)
-        filter_reason = dart_account_filter_reason(item)
+        account_key = dart_account_key(account_name, aliases)
+        filter_reason = dart_account_filter_reason(item, aliases)
         if filter_reason:
             skipped_count += 1
             skip_reasons[filter_reason] = skip_reasons.get(filter_reason, 0) + 1
@@ -410,7 +410,7 @@ def fetch_dart_available_reports(payload: dict) -> tuple[list[dict], list[str], 
     return reports, issues, {"api_key_ready": True, "corp_code": corp_code, "from_year": from_year, "to_year": to_year}
 
 
-def fetch_dart_statement_rows(payload: dict) -> tuple[list[dict], list[str], dict]:
+def fetch_dart_statement_rows(payload: dict, aliases: dict) -> tuple[list[dict], list[str], dict]:
     api_key = os.environ.get("DART_API_KEY", "").strip()
     if not api_key:
         return [], ["DART_API_KEY가 서버 환경변수에 설정되지 않았습니다."], {"api_key_ready": False}
@@ -442,8 +442,8 @@ def fetch_dart_statement_rows(payload: dict) -> tuple[list[dict], list[str], dic
     except (url_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         return [], [f"DART 재무제표 조회 실패: {exc}"], {"api_key_ready": True, "corp_code": corp_code, **params}
 
-    raw_rows = dart_raw_statement_rows(response_payload)
-    rows, issues = dart_statement_rows(response_payload)
+    raw_rows = dart_raw_statement_rows(response_payload, aliases)
+    rows, issues = dart_statement_rows(response_payload, aliases)
     metadata = {
         "api_key_ready": True,
         "corp_code": corp_code,

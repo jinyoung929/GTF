@@ -1,11 +1,13 @@
 """
-계정명 별칭 DB 단일 출처 + 부분문자열 충돌 해결 테스트
+계정명 별칭 DB 단일 출처 + 기준정보 계약 검증 테스트
 =====================================================
 
 핵심 검증:
+  - 별칭 사전은 seeds/kgaap_accounts.sql → DB가 단일 출처 (코드에 별칭 데이터 없음)
   - 긴 별칭 우선 매칭으로 부분문자열 충돌 해결 (금융상품 ⊃ 상품, 퇴직급여충당부채 ⊃ 충당부채)
-  - 코드 폴백(ACCOUNT_ALIASES)과 DB 로드 맵이 동일한 정규화 결과를 낸다
   - ensure_account_aliases 시드가 멱등하며 우선순위(길이)를 저장한다
+  - verify_reference_contract: 계산기가 요구하는 계정키·체크리스트 키가 시드에 빠지면
+    서버 시작이 실패한다 (조정액 0 무증상 버그 방지)
   - 계정 행 표시 순서가 계정코드 기반으로 정렬된다
 
 실행:
@@ -13,7 +15,6 @@
 """
 
 import os
-import sqlite3
 import sys
 import unittest
 
@@ -24,7 +25,18 @@ for _candidate in (_HERE, os.path.dirname(_HERE)):
         break
 
 import server  # noqa: E402
-from gtf_app.domain import ACCOUNT_ALIASES, normalize_account_name  # noqa: E402
+from gtf_app.domain import (  # noqa: E402
+    CALC_ACCOUNT_KEYS,
+    CALC_CHECKLIST_KEYS,
+    ReferenceData,
+    normalize_account_name,
+    verify_reference_contract,
+)
+
+sys.path.insert(0, _HERE)
+from reference_fixture import load_reference, seeded_connection  # noqa: E402
+
+REF = load_reference()
 
 
 # 부분문자열이 서로 포함되지만 계정이 다른, 순서에 취약한 쌍들
@@ -41,13 +53,13 @@ COLLISION_CASES = [
 ]
 
 
-class CodeFallbackNormalizationTest(unittest.TestCase):
-    def test_substring_collisions_resolve_with_code_dict(self):
+class DbNormalizationTest(unittest.TestCase):
+    def test_substring_collisions_resolve_with_db_aliases(self):
         for name, expected in COLLISION_CASES:
-            self.assertEqual(normalize_account_name(name), expected, f"{name} 오분류")
+            self.assertEqual(normalize_account_name(name, REF.aliases), expected, f"{name} 오분류")
 
     def test_unknown_returns_other(self):
-        self.assertEqual(normalize_account_name("가수금"), "other")
+        self.assertEqual(normalize_account_name("가수금", REF.aliases), "other")
 
     def test_longer_alias_wins_regardless_of_dict_order(self):
         # 짧은 별칭을 먼저 나열해도 긴 별칭이 우선되어야 한다
@@ -58,54 +70,79 @@ class CodeFallbackNormalizationTest(unittest.TestCase):
 
 class AliasDbSingleSourceTest(unittest.TestCase):
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
-        self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(server.SQLITE_SCHEMA_PATH.read_text(encoding="utf-8"))
-        server.ensure_reference_accounts(self.conn)  # FK 대상 먼저
-        server.ensure_account_aliases(self.conn)
+        self.conn = seeded_connection()
 
     def tearDown(self):
         self.conn.close()
 
-    def test_all_aliases_seeded(self):
+    def test_aliases_seeded_and_loaded(self):
         count = self.conn.execute("SELECT COUNT(*) AS c FROM kgaap_accounts").fetchone()["c"]
-        self.assertEqual(count, len(ACCOUNT_ALIASES))
+        self.assertGreater(count, 0)
+        self.assertEqual(count, len(REF.aliases))
 
     def test_match_priority_is_alias_length(self):
         rows = self.conn.execute("SELECT kgaap_name, match_priority FROM kgaap_accounts").fetchall()
         for row in rows:
             self.assertEqual(row["match_priority"], len(row["kgaap_name"]))
 
-    def test_db_map_matches_code_fallback(self):
-        alias_map = server.load_account_alias_map(self.conn)
-        samples = [
-            "현금", "재고자산", "리스부채", "개발비", "이연법인세부채", "정부보조금",
-            "차입원가", "유형자산", "투자부동산", "자본금", "가수금", *[c[0] for c in COLLISION_CASES],
-        ]
-        for name in samples:
-            self.assertEqual(
-                normalize_account_name(name, alias_map),
-                normalize_account_name(name),
-                f"{name}: DB 맵과 코드 폴백 결과 불일치",
-            )
-
-    def test_db_map_resolves_collisions(self):
-        alias_map = server.load_account_alias_map(self.conn)
-        for name, expected in COLLISION_CASES:
-            self.assertEqual(normalize_account_name(name, alias_map), expected)
+    def test_alias_targets_exist_in_standard_accounts(self):
+        # 별칭이 가리키는 계정키가 표준계정 테이블에 실재해야 한다 (시드 간 정합성)
+        orphans = self.conn.execute(
+            "SELECT kgaap_name FROM kgaap_accounts k "
+            "WHERE NOT EXISTS (SELECT 1 FROM standard_accounts s WHERE s.account_key = k.account_key)"
+        ).fetchall()
+        self.assertEqual([row["kgaap_name"] for row in orphans], [])
 
     def test_seed_is_idempotent(self):
+        before = self.conn.execute("SELECT COUNT(*) AS c FROM kgaap_accounts").fetchone()["c"]
         server.ensure_account_aliases(self.conn)
         server.ensure_account_aliases(self.conn)
-        self.assertEqual(
-            self.conn.execute("SELECT COUNT(*) AS c FROM kgaap_accounts").fetchone()["c"],
-            len(ACCOUNT_ALIASES),
-        )
+        after = self.conn.execute("SELECT COUNT(*) AS c FROM kgaap_accounts").fetchone()["c"]
+        self.assertEqual(after, before)
 
-    def test_build_statement_record_uses_injected_map(self):
-        alias_map = server.load_account_alias_map(self.conn)
-        record = server.build_statement_record("2024", {"account_name": "금융상품", "amount": 100}, alias_map)
+    def test_build_statement_record_uses_injected_reference(self):
+        record = server.build_statement_record("2024", {"account_name": "금융상품", "amount": 100}, REF)
         self.assertEqual(record["standard_code"], "F1000")
+
+
+class ReferenceContractTest(unittest.TestCase):
+    """SQL 시드와 계산기 코드가 어긋나면 서버 시작이 실패해야 한다."""
+
+    def test_seeded_db_passes_contract(self):
+        self.assertEqual(verify_reference_contract(REF), [])
+
+    def test_empty_reference_reports_all_calc_keys(self):
+        errors = verify_reference_contract(ReferenceData())
+        for key in CALC_ACCOUNT_KEYS:
+            self.assertTrue(any(key in e for e in errors), f"{key} 누락이 보고되지 않음")
+
+    def test_missing_checklist_key_fails_startup(self):
+        conn = seeded_connection()
+        try:
+            conn.execute("DELETE FROM checklist_items WHERE account_key='lease' AND item_key='discount_rate'")
+            with self.assertRaises(RuntimeError) as ctx:
+                server.refresh_reference_cache(conn)
+            self.assertIn("discount_rate", str(ctx.exception))
+        finally:
+            conn.close()
+            load_reference()  # 전역 REFERENCE 캐시를 정상 상태로 복원
+
+    def test_missing_account_key_fails_startup(self):
+        conn = seeded_connection()
+        try:
+            conn.execute("DELETE FROM kgaap_accounts WHERE account_key='provision'")
+            conn.execute("DELETE FROM checklist_items WHERE account_key='provision'")
+            conn.execute("DELETE FROM standard_accounts WHERE account_key='provision'")
+            with self.assertRaises(RuntimeError) as ctx:
+                server.refresh_reference_cache(conn)
+            self.assertIn("provision", str(ctx.exception))
+        finally:
+            conn.close()
+            load_reference()
+
+    def test_calc_checklist_keys_cover_all_judgment_calculators(self):
+        # 계약 정의 자체의 자기 검증: 계산기 키는 모두 표준계정 키 안에 있어야 한다
+        self.assertTrue(set(CALC_CHECKLIST_KEYS).issubset(CALC_ACCOUNT_KEYS))
 
 
 class StatementCodeOrderingTest(unittest.TestCase):

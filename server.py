@@ -44,12 +44,8 @@ from gtf_app.dart import (
     normalize_dart_amount,
 )
 from gtf_app.domain import (
-    ACCOUNT_ALIASES,
-    CHECKLISTS,
-    STANDARD_ACCOUNTS,
-    STANDARDS_PARAGRAPHS,
+    ReferenceData,
     account_presentation_order,
-    alias_match_priority,
     build_review_summary,
     build_statement_record,
     conversion_adjustments_csv,
@@ -59,6 +55,7 @@ from gtf_app.domain import (
     normalize_account_name,
     parse_amount,
     parse_statement_rows,
+    verify_reference_contract,
     validate_statement_records,
 )
 from gtf_app.excel_export import review_workbook_bytes
@@ -70,7 +67,8 @@ DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "gtf.sqlite3"
 SQLITE_SCHEMA_PATH = ROOT / "sqlite" / "schema.sql"
-STATEMENT_TEMPLATES_SEED_PATH = ROOT / "seeds" / "financial_statement_templates.sql"
+SEED_DIR = ROOT / "seeds"
+STATEMENT_TEMPLATES_SEED_PATH = SEED_DIR / "financial_statement_templates.sql"
 FIGMA_DIST_DIR = ROOT / "figma_make" / "dist"
 ENV_PATHS = (ROOT / ".env", ROOT / ".env.local")
 GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024
@@ -225,6 +223,29 @@ def connect():
     return conn
 
 
+# 기준정보(계정·별칭·체크리스트·양식·문단)를 DB에서 한 번 로드해 두는 서버 캐시.
+# 시드 이후에만 바뀌므로(런타임 변경 없음) 매 요청 재조회 대신 이 캐시를 읽는다.
+# init_db 끝에서 refresh_reference_cache가 채우고, 계약 검증까지 통과해야 서버가 뜬다.
+REFERENCE = ReferenceData()
+
+
+def refresh_reference_cache(conn) -> ReferenceData:
+    """DB 기준정보를 로드해 계약을 검증하고 전역 REFERENCE 캐시를 갱신한다.
+
+    계산기가 요구하는 계정키·체크리스트 키가 SQL 시드에 빠져 있으면(조정=0 무증상 버그)
+    여기서 RuntimeError로 서버 시작을 실패시킨다.
+    """
+    global REFERENCE
+    ref = load_reference_data(conn)
+    errors = verify_reference_contract(ref)
+    if errors:
+        raise RuntimeError(
+            "기준정보 계약 검증 실패 (SQL 시드와 계산기 코드가 어긋남):\n  - " + "\n  - ".join(errors)
+        )
+    REFERENCE = ref
+    return ref
+
+
 def init_db() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(exist_ok=True)
@@ -237,12 +258,15 @@ def init_db() -> None:
             conn.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_bytes bytea")
             ensure_auth_tables(conn)
             conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_read_only boolean NOT NULL DEFAULT false")
-            ensure_standards_paragraphs(conn)
-            ensure_paragraph_embeddings(conn)
+            # FK 순서: 표준계정(부모) → 체크리스트·별칭·양식(자식) → 문단 → 임베딩
             ensure_reference_accounts(conn)
+            ensure_checklist_items(conn)
             ensure_account_aliases(conn)
             ensure_statement_templates(conn)
+            ensure_standards_paragraphs(conn)
+            ensure_paragraph_embeddings(conn)
             ensure_admin_user(conn)
+            refresh_reference_cache(conn)  # 기준정보 캐시 채우기 + 계약 검증(실패 시 시작 중단)
         return
     with connect() as conn:
         conn.executescript(SQLITE_SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -257,30 +281,25 @@ def init_db() -> None:
             conn.execute("ALTER TABLE projects ADD COLUMN owner_user_id TEXT")
         if "is_test" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
-        seed_reference_data(conn)
-        ensure_standards_paragraphs(conn)
-        ensure_paragraph_embeddings(conn)
+        # FK 순서: 표준계정(부모) → 체크리스트·별칭·양식(자식) → 문단 → 임베딩.
+        # seed_reference_data(보조 조회 테이블)는 위 핵심 테이블을 읽으므로 반드시 뒤에 온다.
         ensure_reference_accounts(conn)
+        ensure_checklist_items(conn)
         ensure_account_aliases(conn)
         ensure_statement_templates(conn)
+        ensure_standards_paragraphs(conn)
+        ensure_paragraph_embeddings(conn)
+        seed_reference_data(conn)
         ensure_admin_user(conn)
-
-
-def paragraph_embedding_text(para: dict) -> str:
-    """임베딩 대상 텍스트. 이 값이 바뀌어야 재임베딩이 필요하다."""
-    return f"{para['reference_code']} {para['title']} {para['content']}"
-
-
-def paragraph_content_hash(para: dict) -> str:
-    return hashlib.sha256(paragraph_embedding_text(para).encode("utf-8")).hexdigest()
+        refresh_reference_cache(conn)  # 기준정보 캐시 채우기 + 계약 검증(실패 시 시작 중단)
 
 
 def ensure_standards_paragraphs(conn) -> None:
-    """K-GAAP/K-IFRS 기준서 문단 검색 테이블을 생성하고 시드한다 (SQLite/Postgres 공용).
+    """기준서 문단을 seeds/standards_paragraphs.sql(단일 출처)에서 upsert한다.
 
-    삭제 후 재삽입이 아니라 upsert(ON CONFLICT DO UPDATE)로 시드해 멱등성을 지키면서
-    임베딩을 보존한다. 문단 내용이 바뀐 행만 embedding을 비워 재임베딩 대상으로 표시하고,
-    코드에서 제거된 문단은 DB에서도 삭제해 코드와 DB 상태를 일치시킨다.
+    upsert(ON CONFLICT DO UPDATE)로 멱등성을 지키면서 embedding을 보존하고, content_hash가
+    바뀐 행만 embedding을 비워 재임베딩 대상으로 표시한다. SQL 시드가 content와 content_hash를
+    함께 제공하므로(gen_seeds로 일관 생성), 내용이 바뀌면 hash도 바뀌어 재임베딩이 트리거된다.
     """
     conn.execute(
         """
@@ -309,48 +328,15 @@ def ensure_standards_paragraphs(conn) -> None:
         if "content_hash" not in columns:
             conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN content_hash TEXT")
 
-    existing = {
-        row_to_dict(row)["id"]: row_to_dict(row)["content_hash"]
-        for row in conn.execute("SELECT id, content_hash FROM standards_paragraphs").fetchall()
-    }
-
-    for para in STANDARDS_PARAGRAPHS:
-        content_hash = paragraph_content_hash(para)
-        conn.execute(
-            """
-            INSERT INTO standards_paragraphs (
-                id, standard_set, reference_code, paragraph_label, account_key, title, content, keywords, content_hash
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (id) DO UPDATE SET
-                standard_set = excluded.standard_set,
-                reference_code = excluded.reference_code,
-                paragraph_label = excluded.paragraph_label,
-                account_key = excluded.account_key,
-                title = excluded.title,
-                content = excluded.content,
-                keywords = excluded.keywords,
-                content_hash = excluded.content_hash
-            """,
-            (
-                para["id"],
-                para["standard_set"],
-                para["reference_code"],
-                para["paragraph_label"],
-                para["account_key"],
-                para["title"],
-                para["content"],
-                para["keywords"],
-                content_hash,
-            ),
-        )
-        if existing.get(para["id"]) != content_hash:
-            # 새 문단이거나 내용이 바뀐 문단만 재임베딩 대상으로 표시 (내용 그대로면 임베딩 보존)
-            conn.execute("UPDATE standards_paragraphs SET embedding = NULL WHERE id = ?", (para["id"],))
-
-    stale_ids = set(existing) - {para["id"] for para in STANDARDS_PARAGRAPHS}
-    for stale_id in stale_ids:
-        conn.execute("DELETE FROM standards_paragraphs WHERE id = ?", (stale_id,))
+    # 시드 실행 전 기존 해시를 기록해두고, 시드 후 해시가 바뀐 문단만 embedding을 비운다.
+    before = {row_to_dict(r)["id"]: row_to_dict(r)["content_hash"]
+              for r in conn.execute("SELECT id, content_hash FROM standards_paragraphs")}
+    # 시드 SQL은 embedding 컬럼을 건드리지 않으므로 기존 임베딩은 보존된다.
+    run_seed(conn, "standards_paragraphs")
+    for r in conn.execute("SELECT id, content_hash FROM standards_paragraphs"):
+        d = row_to_dict(r)
+        if before.get(d["id"]) != d["content_hash"]:
+            conn.execute("UPDATE standards_paragraphs SET embedding = NULL WHERE id = ?", (d["id"],))
 
 
 def find_standards_paragraphs(conn, account_key: str | None = None, query: str | None = None, standard_set: str | None = None) -> list[dict]:
@@ -469,49 +455,40 @@ def ensure_demo_user(conn) -> dict | None:
     return row_to_dict(conn.execute("SELECT * FROM app_users WHERE id = ?", (DEMO_USER_ID,)).fetchone())
 
 
-def ensure_reference_accounts(conn) -> None:
-    """표준계정을 SQLite/Postgres 양쪽에 upsert한다.
+def run_seed(conn, name: str) -> None:
+    """seeds/<name>.sql(SQLite/Postgres 공통 upsert 단일 문장)을 실행한다."""
+    conn.execute((SEED_DIR / f"{name}.sql").read_text(encoding="utf-8"))
 
-    표준양식 라인 시드가 account_key 외래키를 참조하므로 반드시 먼저 실행되어야 하며,
-    Postgres 배포에서도 코드의 계정 카탈로그 확장이 재배포만으로 반영되게 한다.
+
+def ensure_reference_accounts(conn) -> None:
+    """표준계정을 seeds/standard_accounts.sql(단일 출처)에서 upsert한다.
+
+    표준양식 라인·체크리스트·별칭 시드가 account_key 외래키를 참조하므로 먼저 실행되어야 한다.
+    upsert라 재배포만으로 계정 카탈로그 확장이 라이브 DB에 반영된다.
     """
-    now = utc_now()
-    for account_key, account in STANDARD_ACCOUNTS.items():
-        conn.execute(
-            """
-            INSERT INTO standard_accounts (
-                account_key, standard_code, internal_label, ifrs_account, mapping_type, rule_summary, active, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, true, ?)
-            ON CONFLICT (account_key) DO UPDATE SET
-                standard_code = excluded.standard_code,
-                internal_label = excluded.internal_label,
-                ifrs_account = excluded.ifrs_account,
-                mapping_type = excluded.mapping_type,
-                rule_summary = excluded.rule_summary,
-                active = true,
-                updated_at = excluded.updated_at
-            """,
-            (account_key, account["code"], account["label"], account["ifrs"], account["type"], account["rule"], now),
-        )
+    run_seed(conn, "standard_accounts")
+
+
+def ensure_checklist_items(conn) -> None:
+    """판단 체크리스트 항목을 seeds/checklist_items.sql(단일 출처)에서 시드한다.
+
+    다른 테이블이 참조하지 않으므로 전체 삭제 후 재삽입으로 코드와 일치시킨다.
+    """
+    conn.execute("DELETE FROM checklist_items")
+    run_seed(conn, "checklist_items")
 
 
 def ensure_statement_templates(conn) -> None:
-    """표준 재무제표 양식 라인 기준 테이블을 SQL 시드 파일(단일 출처)에서 upsert한다.
-
-    파일은 SQLite/Postgres 공통 문법(INSERT ... ON CONFLICT DO UPDATE) 단일 문장이라
-    양쪽 백엔드에서 그대로 실행된다.
-    """
-    conn.execute(STATEMENT_TEMPLATES_SEED_PATH.read_text(encoding="utf-8"))
+    """표준 재무제표 양식 라인 기준 테이블을 SQL 시드 파일(단일 출처)에서 upsert한다."""
+    run_seed(conn, "financial_statement_templates")
 
 
 def ensure_account_aliases(conn) -> None:
-    """계정명 별칭 사전(kgaap_accounts)을 domain.ACCOUNT_ALIASES 단일 출처에서 시드한다.
+    """계정명 별칭 사전(kgaap_accounts)을 seeds/kgaap_accounts.sql(단일 출처)에서 시드한다.
 
-    정규화(normalize_account_name)가 런타임에 load_account_alias_map으로 이 테이블을 읽는다.
-    match_priority(별칭 길이)를 저장해 '긴 별칭 먼저' 매칭 순서를 DB에서도 표현한다.
-    표준계정 FK를 참조하므로 ensure_reference_accounts 뒤에 호출해야 한다.
-    다른 테이블이 이 테이블을 참조하지 않으므로 전체 삭제 후 재삽입으로 코드와 일치시킨다.
+    match_priority(별칭 길이)로 '긴 별칭 먼저' 매칭 순서를 DB에 표현한다. 표준계정 FK를
+    참조하므로 ensure_reference_accounts 뒤에 호출해야 한다. 옛 형식 id를 남기지 않도록
+    전체 삭제 후 재삽입한다(참조하는 테이블 없음).
     """
     if database_config()["backend"] == "postgres":
         conn.execute("ALTER TABLE kgaap_accounts ADD COLUMN IF NOT EXISTS match_priority integer NOT NULL DEFAULT 0")
@@ -520,14 +497,7 @@ def ensure_account_aliases(conn) -> None:
         if "match_priority" not in columns:
             conn.execute("ALTER TABLE kgaap_accounts ADD COLUMN match_priority INTEGER NOT NULL DEFAULT 0")
     conn.execute("DELETE FROM kgaap_accounts")
-    for index, (alias, account_key) in enumerate(ACCOUNT_ALIASES.items(), start=1):
-        conn.execute(
-            """
-            INSERT INTO kgaap_accounts (id, account_key, kgaap_name, normalized_name, active, match_priority)
-            VALUES (?, ?, ?, ?, 1, ?)
-            """,
-            (f"alias_{index}", account_key, alias, STANDARD_ACCOUNTS[account_key]["label"], alias_match_priority(alias)),
-        )
+    run_seed(conn, "kgaap_accounts")
 
 
 def load_account_alias_map(conn) -> dict:
@@ -536,6 +506,33 @@ def load_account_alias_map(conn) -> dict:
         "SELECT kgaap_name, account_key FROM kgaap_accounts WHERE active = true ORDER BY match_priority DESC, kgaap_name"
     ).fetchall()
     return {row_to_dict(row)["kgaap_name"]: row_to_dict(row)["account_key"] for row in rows}
+
+
+def load_reference_data(conn) -> ReferenceData:
+    """DB 기준정보 테이블을 읽어 domain에 주입할 ReferenceData로 묶는다 (코드에 하드코딩 없음)."""
+    accounts = {
+        row_to_dict(r)["account_key"]: {
+            "code": row_to_dict(r)["standard_code"],
+            "label": row_to_dict(r)["internal_label"],
+            "ifrs": row_to_dict(r)["ifrs_account"],
+            "type": row_to_dict(r)["mapping_type"],
+            "rule": row_to_dict(r)["rule_summary"],
+        }
+        for r in conn.execute("SELECT * FROM standard_accounts")
+    }
+    checklists: dict[str, list] = {}
+    for r in conn.execute("SELECT * FROM checklist_items ORDER BY account_key, display_order"):
+        d = row_to_dict(r)
+        checklists.setdefault(d["account_key"], []).append(
+            {"key": d["item_key"], "label": d["label"], "type": d["input_type"], "required": bool(d["required"])}
+        )
+    return ReferenceData(
+        accounts=accounts,
+        aliases=load_account_alias_map(conn),
+        checklists=checklists,
+        templates=load_statement_template_map(conn),
+        paragraphs=load_standards_paragraph_map(conn),
+    )
 
 
 def sort_statements_by_code(statements: list[dict]) -> list[dict]:
@@ -551,42 +548,23 @@ def sort_statements_by_code(statements: list[dict]) -> list[dict]:
 
 
 def seed_reference_data(conn: sqlite3.Connection) -> None:
-    now = utc_now()
-    standard_refs = {
-        "cash": ("K-IFRS 제1007호", "현금및현금성자산", "사용 제한 여부와 현금성자산 요건을 확인합니다."),
-        "receivables": ("K-IFRS 제1109호", "매출채권", "분류와 기대신용손실 충당금을 검토합니다."),
-        "inventory": ("K-IFRS 제1002호", "재고자산", "원가와 순실현가능가치 비교를 검토합니다."),
-        "lease": ("K-IFRS 제1116호", "리스", "리스기간, 지급액, 선택권, 할인율을 확인합니다."),
-        "development": ("K-IFRS 제1038호", "개발비", "개발단계 자산화 요건 충족 여부를 검토합니다."),
-        "revenue": ("K-IFRS 제1115호", "수익", "수행의무와 수익인식 시점을 확인합니다."),
-        "financial_instrument": ("K-IFRS 제1109호", "금융상품", "사업모형과 계약상 현금흐름 특성을 검토합니다."),
-        "provision": ("K-IFRS 제1037호", "충당부채", "현재의무, 유출가능성, 신뢰성 있는 추정을 검토합니다."),
-        "other": ("담당자 검토", "미분류 계정", "담당자 분류 검토가 필요합니다."),
-    }
+    """조회용 보조 기준정보 테이블(ifrs_accounts / mapping_rules / standards_references)을 채운다.
 
-    for account_key, account in STANDARD_ACCOUNTS.items():
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO standard_accounts (
-                account_key, standard_code, internal_label, ifrs_account, mapping_type, rule_summary, active, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-            """,
-            (
-                account_key,
-                account["code"],
-                account["label"],
-                account["ifrs"],
-                account["type"],
-                account["rule"],
-                now,
-            ),
+    핵심 기준정보(표준계정·체크리스트·별칭·양식라인·문단)는 seeds/*.sql이 단일 출처이며 별도
+    ensure_* 함수가 시드한다. 여기서는 그 결과(DB의 standard_accounts / checklist_items)를 읽어
+    기준정보 화면의 요약 카운트용 보조 테이블만 파생 생성한다(코드에 하드코딩된 데이터 없음).
+    SQLite 전용 문법(INSERT OR REPLACE)이므로 SQLite 경로에서만 호출된다.
+    """
+    accounts = [row_to_dict(r) for r in conn.execute("SELECT * FROM standard_accounts")]
+    checklist_by_account: dict[str, list] = {}
+    for r in conn.execute("SELECT * FROM checklist_items ORDER BY account_key, display_order"):
+        d = row_to_dict(r)
+        checklist_by_account.setdefault(d["account_key"], []).append(
+            {"key": d["item_key"], "label": d["label"], "type": d["input_type"], "required": bool(d["required"])}
         )
-        # kgaap_accounts(계정명 별칭) 시드는 ensure_account_aliases가 domain.ACCOUNT_ALIASES를
-        # 단일 출처로 담당한다. 여기서는 시드하지 않는다.
-        ref_code, title, summary = standard_refs.get(
-            account_key, (account["ifrs"], account["label"], account["rule"])
-        )
+
+    for account in accounts:
+        key = account["account_key"]
         conn.execute(
             """
             INSERT OR REPLACE INTO ifrs_accounts (
@@ -596,67 +574,36 @@ def seed_reference_data(conn: sqlite3.Connection) -> None:
             VALUES (?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
-                account_key,
-                account_key,
-                account["ifrs"],
-                ref_code,
-                summary,
-                account["rule"],
+                key, key, account["ifrs_account"], account["rule_summary"],
+                account["rule_summary"], account["rule_summary"],
                 "검토 결과와 주요 판단 근거를 주석 초안에 반영합니다.",
             ),
         )
-        checklist = CHECKLISTS.get(account_key, [])
         conn.execute(
             """
             INSERT OR REPLACE INTO mapping_rules (
                 id, account_key, source_standard, target_standard, mapping_type,
                 rule_summary, checklist_json, active, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+            VALUES (?, ?, 'K-GAAP', 'IFRS', ?, ?, ?, 1, ?)
             """,
             (
-                f"{account_key}_kgaap_ifrs",
-                account_key,
-                "K-GAAP",
-                "IFRS",
-                account["type"],
-                account["rule"],
-                json.dumps(checklist, ensure_ascii=False),
-                now,
+                f"{key}_kgaap_ifrs", key, account["mapping_type"], account["rule_summary"],
+                json.dumps(checklist_by_account.get(key, []), ensure_ascii=False), utc_now(),
             ),
         )
-        conn.execute("DELETE FROM checklist_items WHERE account_key = ?", (account_key,))
-        for order, item in enumerate(checklist, start=1):
-            conn.execute(
-                """
-                INSERT INTO checklist_items (
-                    id, account_key, item_key, label, input_type, required, display_order
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    f"{account_key}_{item['key']}",
-                    account_key,
-                    item["key"],
-                    item["label"],
-                    item["type"],
-                    1 if item.get("required") else 0,
-                    order,
-                ),
-            )
 
-    references = sorted({standard_refs[key][0] for key in standard_refs})
+    references = sorted({p["reference_code"] for p in
+                         (row_to_dict(r) for r in conn.execute("SELECT reference_code FROM standards_paragraphs"))})
     for ref in references:
         conn.execute(
             """
             INSERT OR REPLACE INTO standards_references (id, standard_set, reference_code, title, summary)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (ref.lower().replace(" ", "_"), "IFRS", ref, ref, "기준서 원문 연결 전까지 요약 기준정보로 사용합니다."),
+            (ref.lower().replace(" ", "_").replace(".", ""), "K-IFRS", ref, ref,
+             "기준서 원문 연결 전까지 요약 기준정보로 사용합니다."),
         )
-
-    # 표준 재무제표 양식 라인은 seeds/financial_statement_templates.sql이 단일 출처이며
-    # init_db에서 ensure_statement_templates가 양쪽 백엔드에 upsert한다.
 
 
 def row_to_dict(row) -> dict:
@@ -836,7 +783,7 @@ def pdf_statement_account_key(name: str) -> str:
     ]
     if any(token in compact for token in exclusions):
         return "other"
-    return normalize_account_name(name)
+    return normalize_account_name(name, REFERENCE.aliases)
 
 
 def pdf_row_current_amount(row: list) -> float | None:
@@ -1120,7 +1067,7 @@ def ensure_paragraph_embeddings(conn) -> None:
     ]
     if not rows:
         return  # 재임베딩할 문단이 없음 → OpenAI 호출 0회
-    texts = [paragraph_embedding_text(row) for row in rows]
+    texts = [f"{row['reference_code']} {row['title']} {row['content']}" for row in rows]
     vectors = openai_embed(texts)
     if not vectors:
         return
@@ -1427,7 +1374,7 @@ def call_ai_classification(unmapped_accounts: list[str]) -> dict:
 
     candidates = [
         {"account_key": key, "label": account["label"], "ifrs": account["ifrs"], "rule": account["rule"]}
-        for key, account in STANDARD_ACCOUNTS.items()
+        for key, account in REFERENCE.accounts.items()
         if key != "other"
     ]
     prompt = {
@@ -1523,11 +1470,11 @@ def call_ai_classification(unmapped_accounts: list[str]) -> dict:
     for item in items:
         name = str(item.get("account_name") or "").strip()
         suggested_key = str(item.get("suggested_account_key") or "").strip()
-        if not name or suggested_key not in STANDARD_ACCOUNTS or suggested_key == "other":
+        if not name or suggested_key not in REFERENCE.accounts or suggested_key == "other":
             continue
         suggestions[name] = {
             "account_key": suggested_key,
-            "label": STANDARD_ACCOUNTS[suggested_key]["label"],
+            "label": REFERENCE.accounts[suggested_key]["label"],
             "confidence": str(item.get("confidence") or "unknown"),
             "rationale": str(item.get("rationale") or "").strip(),
             "provider": "openai",
@@ -1549,7 +1496,7 @@ def attach_ai_classification(rows: list[dict]) -> tuple[list[dict], dict]:
             str(row.get("account_name") or "").strip()
             for row in rows
             if str(row.get("account_name") or "").strip()
-            and normalize_account_name(str(row.get("account_name") or "")) == "other"
+            and normalize_account_name(str(row.get("account_name") or ""), REFERENCE.aliases) == "other"
         }
     )
     result = call_ai_classification(unmapped)
@@ -2541,7 +2488,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
                 return
 
-        rows, issues, metadata = fetch_dart_statement_rows(payload)
+        rows, issues, metadata = fetch_dart_statement_rows(payload, REFERENCE.aliases)
         rows, ai_classification = attach_ai_classification(rows)
         if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
             issues = [*issues, ai_classification["note"]]
@@ -2663,8 +2610,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
             rows = parse_json_field(extraction["rows_json"], [])
             rows, decision_summary = apply_ai_decisions(rows, ai_decisions)
-            alias_map = load_account_alias_map(conn)  # DB 별칭 사전으로 정규화
-            records = [build_statement_record(project["period"], row, alias_map) for row in rows]
+            records = [build_statement_record(project["period"], row, REFERENCE) for row in rows]
             for record in records:
                 conn.execute(
                     """
@@ -2816,11 +2762,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
                 for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
             ])
-            templates = load_statement_template_map(conn)
-            standards_map = load_standards_paragraph_map(conn)
-            alias_map = load_account_alias_map(conn)
             project = row_to_dict(project_row)
-            output = generate_conversion(project, statement_rows, responses, templates, standards_map, alias_map)
+            output = generate_conversion(project, statement_rows, responses, REFERENCE)
             # RAG: 판단 필요 항목마다 계정명·근거를 질의로 관련 기준서 문단을 시맨틱 검색해
             # AI 판단 보조의 근거(context)로 주입한다. 검색 결과는 조정 금액이 아니라 근거 설명에만 쓰인다.
             retrieved_context = []

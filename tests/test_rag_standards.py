@@ -99,7 +99,7 @@ class RagStandardsTest(unittest.TestCase):
 
 
 class ParagraphSeedIdempotencyTest(unittest.TestCase):
-    """시드는 upsert(멱등)이며, 내용이 바뀐 문단만 재임베딩한다."""
+    """SQL 시드는 upsert(멱등)이며, content_hash가 바뀐 문단만 재임베딩한다."""
 
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
@@ -126,7 +126,8 @@ class ParagraphSeedIdempotencyTest(unittest.TestCase):
 
     def test_first_seed_embeds_everything_once(self):
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.count("embedding IS NOT NULL"), len(server.STANDARDS_PARAGRAPHS))
+        self.assertGreater(self.count(), 0)
+        self.assertEqual(self.count("embedding IS NOT NULL"), self.count())  # 전 문단 임베딩됨
 
     def test_restart_is_idempotent_and_does_not_reembed(self):
         before_rows, before_calls = self.count(), len(self.calls)
@@ -136,35 +137,27 @@ class ParagraphSeedIdempotencyTest(unittest.TestCase):
         self.assertEqual(len(self.calls), before_calls)  # OpenAI 호출 0회
 
     def test_only_changed_paragraph_is_reembedded(self):
-        target = server.STANDARDS_PARAGRAPHS[0]
-        original = target["content"]
-        target["content"] = original + " (개정)"
-        try:
-            before_calls = len(self.calls)
-            server.ensure_standards_paragraphs(self.conn)
-            self.assertEqual(self.count("embedding IS NULL"), 1)  # 바뀐 하나만 비워짐
-            server.ensure_paragraph_embeddings(self.conn)
-            self.assertEqual(len(self.calls) - before_calls, 1)
-            self.assertEqual(len(self.calls[-1]), 1)  # 그 문단 하나만 임베딩 요청
-            self.assertEqual(self.count("embedding IS NULL"), 0)
-        finally:
-            target["content"] = original
+        # 시드 SQL의 문단 내용이 개정되면 content_hash가 달라진다.
+        # DB 쪽 해시를 옛 값으로 되돌려 '개정 배포' 상황을 재현한다.
+        target_id = self.conn.execute("SELECT id FROM standards_paragraphs ORDER BY id LIMIT 1").fetchone()["id"]
+        self.conn.execute("UPDATE standards_paragraphs SET content_hash = '개정전해시' WHERE id = ?", (target_id,))
+        before_calls = len(self.calls)
+        server.ensure_standards_paragraphs(self.conn)
+        self.assertEqual(self.count("embedding IS NULL"), 1)  # 바뀐 하나만 비워짐
+        server.ensure_paragraph_embeddings(self.conn)
+        self.assertEqual(len(self.calls) - before_calls, 1)
+        self.assertEqual(len(self.calls[-1]), 1)  # 그 문단 하나만 임베딩 요청
+        self.assertEqual(self.count("embedding IS NULL"), 0)
 
-    def test_paragraph_removed_from_code_is_deleted_from_db(self):
-        removed = server.STANDARDS_PARAGRAPHS.pop()
-        try:
-            server.ensure_standards_paragraphs(self.conn)
-            self.assertEqual(self.count(), len(server.STANDARDS_PARAGRAPHS))
-            self.assertEqual(self.count(f"id = '{removed['id']}'"), 0)
-        finally:
-            server.STANDARDS_PARAGRAPHS.append(removed)
+    def test_content_hash_matches_content(self):
+        # 시드가 넣은 content_hash는 실제 임베딩 대상 텍스트의 sha256과 일치해야 한다
+        import hashlib
 
-    def test_content_hash_is_stored(self):
         row = self.conn.execute(
-            "SELECT content_hash FROM standards_paragraphs WHERE id = ?",
-            (server.STANDARDS_PARAGRAPHS[0]["id"],),
+            "SELECT reference_code, title, content, content_hash FROM standards_paragraphs ORDER BY id LIMIT 1"
         ).fetchone()
-        self.assertEqual(row["content_hash"], server.paragraph_content_hash(server.STANDARDS_PARAGRAPHS[0]))
+        text = f"{row['reference_code']} {row['title']} {row['content']}"
+        self.assertEqual(row["content_hash"], hashlib.sha256(text.encode("utf-8")).hexdigest())
 
 
 if __name__ == "__main__":

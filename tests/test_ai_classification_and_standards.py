@@ -31,12 +31,17 @@ for _candidate in (_HERE, os.path.dirname(_HERE)):
 
 import server  # noqa: E402
 from gtf_app.domain import (  # noqa: E402
-    STANDARDS_PARAGRAPHS,
     build_statement_record,
     conversion_basis_report,
     generate_conversion,
 )
 from gtf_app.excel_export import review_workbook_bytes  # noqa: E402
+
+sys.path.insert(0, _HERE)
+from reference_fixture import load_reference  # noqa: E402
+
+# 기준정보는 운영과 동일하게 SQL 시드 → DB 조회로 로드해 주입한다
+REF = load_reference()
 
 
 PROJECT = {
@@ -59,15 +64,15 @@ class StandardsParagraphsSeedTest(unittest.TestCase):
     def test_both_standard_sets_are_seeded_separately(self):
         conn = seeded_connection()
         rows = server.find_standards_paragraphs(conn)
-        self.assertEqual(len(rows), len(STANDARDS_PARAGRAPHS))
+        self.assertTrue(rows)
         sets = {row["standard_set"] for row in rows}
         self.assertEqual(sets, {"K-GAAP", "K-IFRS"})
 
     def test_seed_is_idempotent(self):
         conn = seeded_connection()
+        before = len(server.find_standards_paragraphs(conn))
         server.ensure_standards_paragraphs(conn)
-        rows = server.find_standards_paragraphs(conn)
-        self.assertEqual(len(rows), len(STANDARDS_PARAGRAPHS))
+        self.assertEqual(len(server.find_standards_paragraphs(conn)), before)
 
     def test_judgment_account_has_paragraphs_from_both_sets(self):
         conn = seeded_connection()
@@ -106,26 +111,19 @@ class ConversionParagraphAttachmentTest(unittest.TestCase):
         }
 
     def test_judgment_item_includes_both_standard_sets(self):
-        conn = seeded_connection()
-        standards_map = server.load_standards_paragraph_map(conn)
-        output = generate_conversion(PROJECT, [self.make_statement("리스부채")], {}, {}, standards_map)
+        output = generate_conversion(PROJECT, [self.make_statement("리스부채")], {}, REF)
         paragraphs = output["judgment_items"][0]["standards_paragraphs"]
         self.assertTrue(paragraphs)
         self.assertEqual({p["standard_set"] for p in paragraphs}, {"K-GAAP", "K-IFRS"})
 
-    def test_fallback_without_db_map_uses_domain_data(self):
-        output = generate_conversion(PROJECT, [self.make_statement("리스부채")], {})
-        paragraphs = output["judgment_items"][0]["standards_paragraphs"]
-        self.assertEqual({p["standard_set"] for p in paragraphs}, {"K-GAAP", "K-IFRS"})
-
     def test_basis_report_lists_paragraphs(self):
-        output = generate_conversion(PROJECT, [self.make_statement("리스부채")], {})
+        output = generate_conversion(PROJECT, [self.make_statement("리스부채")], {}, REF)
         report = conversion_basis_report(output)
         self.assertIn("K-IFRS 제1116호", report)
         self.assertIn("일반기업회계기준 제13장", report)
 
     def test_excel_workbook_review_sheet_contains_paragraphs(self):
-        output = generate_conversion(PROJECT, [self.make_statement("리스부채")], {})
+        output = generate_conversion(PROJECT, [self.make_statement("리스부채")], {}, REF)
         workbook = review_workbook_bytes(PROJECT, [], [], output, [])
         with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
             sheet4 = archive.read("xl/worksheets/sheet4.xml").decode("utf-8")
@@ -203,10 +201,8 @@ class AiClassificationCallTest(unittest.TestCase):
 
 class ExpandedStandardCatalogTest(unittest.TestCase):
     def test_catalog_includes_ifrs_accounts_beyond_core_eight(self):
-        from gtf_app.domain import STANDARD_ACCOUNTS
-
         for key in ("ppe", "deferred_tax_asset", "prepaid_expense", "share_capital", "retained_earnings", "cost_of_sales"):
-            self.assertIn(key, STANDARD_ACCOUNTS)
+            self.assertIn(key, REF.accounts)
 
     def test_ai_can_suggest_expanded_account(self):
         # 임차보증금은 키워드 사전에 없어 미분류(X9999)로 빠지므로 AI 제안 대상이 된다.
@@ -215,27 +211,25 @@ class ExpandedStandardCatalogTest(unittest.TestCase):
             "amount": 60000000,
             "ai_suggestion": {"account_key": "deposits", "label": "보증금", "confidence": "high", "rationale": "반환 예정 보증금은 금융자산 성격"},
         }
-        record = build_statement_record("2024", row)
+        record = build_statement_record("2024", row, REF)
         self.assertEqual(record["standard_code"], "A1400")
         self.assertEqual(record["mapping_source"], "ai_suggested_human_accepted")
 
     def test_classification_candidates_exclude_only_other(self):
-        from gtf_app.domain import STANDARD_ACCOUNTS
-
-        candidates = [key for key in STANDARD_ACCOUNTS if key != "other"]
+        candidates = [key for key in REF.accounts if key != "other"]
         self.assertGreater(len(candidates), 8)
         self.assertNotIn("other", candidates)
 
     def test_seed_reference_data_handles_expanded_accounts(self):
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        with open(os.path.join(os.path.dirname(_HERE), "sqlite", "schema.sql"), encoding="utf-8") as handle:
-            conn.executescript(handle.read())
-        server.seed_reference_data(conn)
-        from gtf_app.domain import STANDARD_ACCOUNTS
+        # 보조 조회 테이블(ifrs_accounts 등)은 핵심 시드 테이블에서 파생 생성된다
+        from reference_fixture import seeded_connection as fixture_connection
 
-        count = conn.execute("SELECT COUNT(*) AS c FROM standard_accounts").fetchone()["c"]
-        self.assertEqual(count, len(STANDARD_ACCOUNTS))
+        conn = fixture_connection()
+        server.seed_reference_data(conn)
+        accounts = conn.execute("SELECT COUNT(*) AS c FROM standard_accounts").fetchone()["c"]
+        derived = conn.execute("SELECT COUNT(*) AS c FROM ifrs_accounts").fetchone()["c"]
+        self.assertEqual(derived, accounts)
+        self.assertEqual(accounts, len(REF.accounts))
 
 
 class StatementTemplateSeedTest(unittest.TestCase):
@@ -259,16 +253,14 @@ class StatementTemplateSeedTest(unittest.TestCase):
         ).fetchall()
 
     def test_every_standard_account_has_a_template_line(self):
-        from gtf_app.domain import STANDARD_ACCOUNTS
-
         mapped = {row["account_key"] for row in self.rows()}
-        self.assertEqual(mapped, set(STANDARD_ACCOUNTS.keys()))
+        self.assertEqual(mapped, set(REF.accounts.keys()))
 
     def test_display_order_matches_account_code_derivation(self):
-        from gtf_app.domain import STANDARD_ACCOUNTS, account_presentation_order
+        from gtf_app.domain import account_presentation_order
 
         for row in self.rows():
-            code = STANDARD_ACCOUNTS[row["account_key"]]["code"]
+            code = REF.accounts[row["account_key"]]["code"]
             self.assertEqual(
                 row["display_order"],
                 account_presentation_order(code),
@@ -276,17 +268,11 @@ class StatementTemplateSeedTest(unittest.TestCase):
             )
 
     def test_seed_is_idempotent(self):
-        from gtf_app.domain import STANDARD_ACCOUNTS
-
         server.ensure_reference_accounts(self.conn)
         server.ensure_statement_templates(self.conn)
-        self.assertEqual(len(self.rows()), len(STANDARD_ACCOUNTS))
+        self.assertEqual(len(self.rows()), len(REF.accounts))
 
     def test_new_catalog_accounts_get_statement_lines_in_conversion(self):
-        templates = {
-            row["account_key"]: dict(row)
-            for row in self.conn.execute("SELECT * FROM financial_statement_templates").fetchall()
-        }
         statement = build_statement_record(
             "2024",
             {
@@ -294,8 +280,9 @@ class StatementTemplateSeedTest(unittest.TestCase):
                 "amount": 35000000.0,
                 "ai_suggestion": {"account_key": "deferred_tax_asset", "label": "이연법인세자산", "confidence": "high", "rationale": "IAS 12"},
             },
+            REF,
         )
-        output = generate_conversion(PROJECT, [statement], {}, templates)
+        output = generate_conversion(PROJECT, [statement], {}, REF)
         entry = output["entries"][0]
         self.assertEqual(entry["statement_line_item"], "이연법인세자산")
         self.assertEqual(entry["statement_type"], "재무상태표")
@@ -321,12 +308,12 @@ class PresentationOrderTest(unittest.TestCase):
 
     def test_conversion_entries_sorted_by_code(self):
         stmts = [
-            build_statement_record("2024", {"account_name": "매출액", "amount": 1000}),
-            build_statement_record("2024", {"account_name": "현금및현금성자산", "amount": 1000}),
-            build_statement_record("2024", {"account_name": "충당부채", "amount": 1000}),
-            build_statement_record("2024", {"account_name": "매출채권", "amount": 1000}),
+            build_statement_record("2024", {"account_name": "매출액", "amount": 1000}, REF),
+            build_statement_record("2024", {"account_name": "현금및현금성자산", "amount": 1000}, REF),
+            build_statement_record("2024", {"account_name": "충당부채", "amount": 1000}, REF),
+            build_statement_record("2024", {"account_name": "매출채권", "amount": 1000}, REF),
         ]
-        output = generate_conversion(PROJECT, stmts, {})
+        output = generate_conversion(PROJECT, stmts, {}, REF)
         codes = [entry["standard_code"] for entry in output["entries"]]
         self.assertEqual(codes, sorted(codes, key=lambda c: __import__("server").account_presentation_order(c)))
         self.assertEqual(codes[0], "A1000")  # 현금이 맨 앞
@@ -344,23 +331,23 @@ class AiSuggestionHumanAcceptanceTest(unittest.TestCase):
     }
 
     def test_suggestion_applied_only_for_unmapped_account(self):
-        record = build_statement_record("2024", {"account_name": "임차보증금", "amount": 500.0, "ai_suggestion": self.SUGGESTION})
+        record = build_statement_record("2024", {"account_name": "임차보증금", "amount": 500.0, "ai_suggestion": self.SUGGESTION}, REF)
         self.assertEqual(record["standard_code"], "F1000")
         self.assertEqual(record["mapping_source"], "ai_suggested_human_accepted")
         self.assertIn("[AI 1차 분류 제안", record["rule_summary"])
 
     def test_suggestion_ignored_when_rule_mapping_succeeds(self):
-        record = build_statement_record("2024", {"account_name": "리스부채", "amount": 500.0, "ai_suggestion": self.SUGGESTION})
+        record = build_statement_record("2024", {"account_name": "리스부채", "amount": 500.0, "ai_suggestion": self.SUGGESTION}, REF)
         self.assertEqual(record["standard_code"], "A2100")
         self.assertEqual(record["mapping_source"], "rule_based")
 
     def test_invalid_suggestion_key_falls_back_to_manual_review(self):
-        record = build_statement_record("2024", {"account_name": "임차보증금", "amount": 500.0, "ai_suggestion": {"account_key": "없는키"}})
+        record = build_statement_record("2024", {"account_name": "임차보증금", "amount": 500.0, "ai_suggestion": {"account_key": "없는키"}}, REF)
         self.assertEqual(record["standard_code"], "X9999")
         self.assertEqual(record["mapping_source"], "rule_based")
 
     def test_plain_record_keeps_previous_shape(self):
-        record = build_statement_record("2024", {"account_name": "현금", "amount": 1.0})
+        record = build_statement_record("2024", {"account_name": "현금", "amount": 1.0}, REF)
         self.assertEqual(record["standard_code"], "A1000")
         self.assertEqual(record["mapping_source"], "rule_based")
         self.assertIsNone(record["ai_suggestion"])

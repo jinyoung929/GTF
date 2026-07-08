@@ -10,196 +10,72 @@ from datetime import datetime, timezone
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-# ifrs 필드는 변환 결과의 target_account(K-IFRS 표시 계정명)로 쓰이며, 한국 회사가
-# K-IFRS로 작성하는 재무제표 산출물에 맞춰 한국어 공식 표시명으로 둔다.
-# rule 필드의 기준서 번호는 국제 번호(IFRS 16 등) 대신 K-IFRS 체계(제1116호 등)를 사용한다.
-STANDARD_ACCOUNTS = {
-    "cash": {
-        "code": "A1000",
-        "label": "현금및현금성자산",
-        "ifrs": "현금및현금성자산",
-        "type": "simple",
-        "rule": "사용 제한 여부를 확인한 뒤 현금및현금성자산으로 단순 매핑합니다.",
-    },
-    "receivables": {
-        "code": "A1100",
-        "label": "매출채권",
-        "ifrs": "매출채권및기타채권",
-        "type": "judgment",
-        "rule": "K-IFRS 제1109호에 따라 매출채권 분류와 기대신용손실 충당금을 검토합니다.",
-    },
-    "inventory": {
-        "code": "A1200",
-        "label": "재고자산",
-        "ifrs": "재고자산",
-        "type": "simple",
-        "rule": "K-IFRS 제1002호에 따라 재고자산으로 매핑하고 원가와 순실현가능가치 비교를 검토합니다.",
-    },
-    "lease": {
-        "code": "A2100",
-        "label": "리스",
-        "ifrs": "사용권자산 및 리스부채",
-        "type": "judgment",
-        "rule": "K-IFRS 제1116호 측정을 위해 리스기간, 지급액, 선택권, 할인율을 추가 확인합니다.",
-    },
-    "development": {
-        "code": "A3100",
-        "label": "개발비",
-        "ifrs": "무형자산 또는 연구개발비",
-        "type": "judgment",
-        "rule": "K-IFRS 제1038호 개발단계 자산화 요건 충족 여부를 검토합니다.",
-    },
-    "revenue": {
-        "code": "R1000",
-        "label": "수익",
-        "ifrs": "고객과의 계약에서 생기는 수익",
-        "type": "judgment",
-        "rule": "K-IFRS 제1115호에 따라 수행의무와 수익인식 시점을 확인합니다.",
-    },
-    "financial_instrument": {
-        "code": "F1000",
-        "label": "금융상품",
-        "ifrs": "금융자산·금융부채",
-        "type": "judgment",
-        "rule": "K-IFRS 제1109호에 따라 사업모형과 계약상 현금흐름 특성을 검토합니다.",
-    },
-    "provision": {
-        "code": "L2200",
-        "label": "충당부채",
-        "ifrs": "충당부채",
-        "type": "judgment",
-        "rule": "K-IFRS 제1037호에 따라 현재의무, 유출가능성, 신뢰성 있는 추정 여부를 검토합니다.",
-    },
-    # 아래는 판단 체크리스트가 필요 없는 표시 매핑 계정으로, 키워드 사전에는 없지만
-    # AI 1차 분류가 미분류 계정을 K-IFRS 표시 라인으로 제안할 때 후보로 사용된다.
-    "ppe": {
-        "code": "A1500",
-        "label": "유형자산",
-        "ifrs": "유형자산",
-        "type": "judgment",
-        "rule": "K-IFRS 제1016·1036호에 따라 원가모형과 재평가모형 중 선택하고 손상 징후가 있으면 회수가능액과 비교해 손상차손을 인식합니다.",
-    },
-    "prepaid_expense": {
-        "code": "A1300",
-        "label": "선급비용",
-        "ifrs": "선급비용",
-        "type": "simple",
-        "rule": "선급비용을 K-IFRS 선급비용 라인으로 매핑합니다.",
-    },
-    "deposits": {
-        "code": "A1400",
-        "label": "보증금",
-        "ifrs": "장기보증금(금융자산)",
-        "type": "simple",
-        "rule": "임차보증금 등 반환 예정 보증금을 금융자산 성격의 예치금으로 매핑합니다.",
-    },
-    "deferred_tax_asset": {
-        "code": "A1600",
-        "label": "이연법인세자산",
-        "ifrs": "이연법인세자산",
-        "type": "judgment",
-        "rule": "K-IFRS 제1012호에 따라 일시적차이에 세율을 적용해 총액법으로 이연법인세자산을 인식하고 회수가능성을 검토합니다.",
-    },
-    "trade_payables": {
-        "code": "L1000",
-        "label": "매입채무",
-        "ifrs": "매입채무및기타채무",
-        "type": "simple",
-        "rule": "매입채무와 미지급금을 K-IFRS 매입채무 라인으로 매핑합니다.",
-    },
-    "other_payables": {
-        "code": "L1100",
-        "label": "미지급금",
-        "ifrs": "기타채무 및 미지급비용",
-        "type": "simple",
-        "rule": "미지급금, 미지급비용을 기타채무 라인으로 매핑합니다.",
-    },
-    "current_tax_liability": {
-        "code": "L1200",
-        "label": "미지급법인세",
-        "ifrs": "당기법인세부채",
-        "type": "simple",
-        "rule": "미지급법인세를 K-IFRS 제1012호 당기법인세부채로 매핑합니다.",
-    },
-    "deferred_tax_liability": {
-        "code": "L2100",
-        "label": "이연법인세부채",
-        "ifrs": "이연법인세부채",
-        "type": "simple",
-        "rule": "K-IFRS 제1012호 이연법인세부채로 매핑합니다.",
-    },
-    "share_capital": {
-        "code": "E1000",
-        "label": "자본금",
-        "ifrs": "자본금",
-        "type": "simple",
-        "rule": "자본금을 K-IFRS 자본금 라인으로 매핑합니다.",
-    },
-    "capital_surplus": {
-        "code": "E1100",
-        "label": "자본잉여금",
-        "ifrs": "자본잉여금",
-        "type": "simple",
-        "rule": "자본잉여금을 주식발행초과금 등 자본잉여 라인으로 매핑합니다.",
-    },
-    "retained_earnings": {
-        "code": "E1200",
-        "label": "이익잉여금",
-        "ifrs": "이익잉여금",
-        "type": "simple",
-        "rule": "이익잉여금 또는 결손금을 K-IFRS 이익잉여금 라인으로 매핑합니다.",
-    },
-    "cost_of_sales": {
-        "code": "R2000",
-        "label": "매출원가",
-        "ifrs": "매출원가",
-        "type": "simple",
-        "rule": "매출원가를 K-IFRS 매출원가 라인으로 매핑합니다.",
-    },
-    "operating_expense": {
-        "code": "R3000",
-        "label": "판매비와관리비",
-        "ifrs": "판매비와관리비",
-        "type": "simple",
-        "rule": "판매비와관리비, 영업비용을 K-IFRS 판매비와관리비 라인으로 매핑합니다.",
-    },
-    # K-GAAP↔K-IFRS 차이가 큰 판단 필요 영역 (측정·인식 조정 발생)
-    "retirement_benefit": {
-        "code": "L2300",
-        "label": "퇴직급여충당부채",
-        "ifrs": "순확정급여부채",
-        "type": "judgment",
-        "rule": "K-IFRS 제1019호에 따라 확정급여채무를 보험수리적으로 평가하고 사외적립자산을 차감해 순확정급여부채를 측정하며, 재측정요소는 기타포괄손익으로 인식합니다.",
-    },
-    "investment_property": {
-        "code": "A1700",
-        "label": "투자부동산",
-        "ifrs": "투자부동산",
-        "type": "judgment",
-        "rule": "K-IFRS 제1040호에 따라 원가모형과 공정가치모형 중 회계정책을 선택하고, 공정가치모형이면 평가손익을 당기손익에 반영합니다.",
-    },
-    "government_grant": {
-        "code": "L2400",
-        "label": "정부보조금",
-        "ifrs": "이연정부보조금수익",
-        "type": "judgment",
-        "rule": "K-IFRS 제1020호에 따라 자산관련 보조금의 표시 방법(자산 차감법 또는 이연수익법)을 결정하고 체계적으로 수익 인식합니다.",
-    },
-    "borrowing_cost": {
-        "code": "R4000",
-        "label": "차입원가",
-        "ifrs": "금융원가(차입원가 자본화 조정)",
-        "type": "judgment",
-        "rule": "K-IFRS 제1023호에 따라 적격자산 취득에 직접 관련된 차입원가를 자본화 대상으로 판단합니다.",
-    },
-    "other": {
-        "code": "X9999",
-        "label": "미분류 계정",
-        "ifrs": "검토 필요",
-        "type": "judgment",
-        "rule": "자동 매핑 신뢰도가 낮아 담당자 분류 검토가 필요합니다.",
-    },
+
+# ── 계산 계약(contract) ─────────────────────────────────────────────────────
+# 기준정보 데이터(계정·체크리스트·별칭·문단)는 전부 DB에서 온다. 하지만 변환 계산기는
+# 특정 account_key로 분기하고(=함수 이름 같은 개념 식별자) 특정 체크리스트 item_key를 읽는다.
+# 이 식별자들은 데이터가 아니라 로직이므로 코드에 남으며, 서버 시작 시 verify_reference_contract가
+# "계산기가 요구하는 이 키들이 실제로 DB 기준정보에 존재하는가"를 검사해 SQL 시드 편집 실수를
+# 조용한 오류(예: 조정액이 0으로 나옴)가 아니라 즉시 실패로 드러낸다.
+CALC_ACCOUNT_KEYS = frozenset({
+    "lease", "development", "revenue", "financial_instrument", "receivables",
+    "provision", "retirement_benefit", "ppe", "investment_property",
+    "deferred_tax_asset", "government_grant", "borrowing_cost",
+})
+CALC_CHECKLIST_KEYS = {
+    "lease": {"lease_term_months", "monthly_payment", "discount_rate"},
+    "development": {"technical_feasibility", "intention_to_complete", "probable_future_benefits", "reliable_measurement"},
+    "revenue": {"recognition_timing"},
+    "provision": {"present_obligation", "probable_outflow", "reliable_estimate"},
+    "retirement_benefit": {"dbo_amount", "plan_assets"},
+    "ppe": {"measurement_model", "fair_value", "recoverable_amount"},
+    "investment_property": {"measurement_model", "fair_value"},
+    "deferred_tax_asset": {"temporary_difference", "tax_rate", "realizable"},
+    "government_grant": {"grant_relation", "presentation_method"},
+    "borrowing_cost": {"qualifying_asset", "expenditure", "capitalization_rate", "capitalization_months"},
 }
+
+
+class ReferenceData:
+    """DB에서 로드한 기준정보 묶음. domain 순수 함수에 주입되어 코드가 DB를 직접 모르게 한다.
+
+    accounts   : {account_key: {code, label, ifrs, type, rule}}
+    aliases    : {별칭: account_key}  — 매칭 우선순위(긴 별칭 먼저) 순서 유지
+    checklists : {account_key: [{key, label, type, required}]}
+    templates  : {account_key: {statement_type, section, line_item, basis, display_order}}
+    paragraphs : {account_key: [{standard_set, reference_code, paragraph_label, title, content, ...}]}
+    """
+
+    __slots__ = ("accounts", "aliases", "checklists", "templates", "paragraphs")
+
+    def __init__(self, accounts=None, aliases=None, checklists=None, templates=None, paragraphs=None):
+        self.accounts = accounts or {}
+        self.aliases = aliases or {}
+        self.checklists = checklists or {}
+        self.templates = templates or {}
+        self.paragraphs = paragraphs or {}
+
+
+def verify_reference_contract(reference: "ReferenceData") -> list[str]:
+    """계산기가 요구하는 계정키·체크리스트 키가 DB 기준정보에 모두 있는지 검사.
+
+    누락이 있으면 오류 메시지 목록을 반환한다(호출부에서 서버 시작을 실패시킨다).
+    """
+    errors: list[str] = []
+    for account_key in sorted(CALC_ACCOUNT_KEYS):
+        if account_key not in reference.accounts:
+            errors.append(f"계산 대상 계정 '{account_key}'가 standard_accounts에 없습니다.")
+    for account_key, required_keys in CALC_CHECKLIST_KEYS.items():
+        present = {item["key"] for item in reference.checklists.get(account_key, [])}
+        missing = required_keys - present
+        if missing:
+            errors.append(
+                f"'{account_key}' 체크리스트에 계산기가 요구하는 항목이 없습니다: {', '.join(sorted(missing))}"
+            )
+    return errors
+
+# 표준계정 정의(코드·라벨·IFRS 표시명·유형·규칙)는 seeds/standard_accounts.sql이 단일 출처이며
+# 서버 시작 시 standard_accounts 테이블로 upsert된다. 런타임 조회는 server.load_reference_data가 수행한다.
 
 
 # 표시 순서는 개별 display_order를 손으로 매기지 않고 계정코드에서 도출한다.
@@ -218,14 +94,14 @@ def account_presentation_order(code: str) -> int:
     return SECTION_ORDER.get(prefix, 8) * 100000 + number
 
 
-def account_key_for_statement(item: dict, alias_map: dict | None = None) -> str:
+def account_key_for_statement(item: dict, reference: "ReferenceData") -> str:
     """계정 행이 확정한 표준코드에서 계정키를 복원한다.
 
     담당자가 AI 제안을 승인해 재분류한 계정(예: 임차보증금 → F1000)은 계정명 키워드로는
     다시 찾을 수 없으므로, 저장된 standard_code를 우선하고 없을 때만 계정명 정규화로 보완한다.
     """
-    code_to_key = {account["code"]: key for key, account in STANDARD_ACCOUNTS.items()}
-    return code_to_key.get(str(item.get("standard_code") or "")) or normalize_account_name(item["account_name"], alias_map)
+    code_to_key = {account["code"]: key for key, account in reference.accounts.items()}
+    return code_to_key.get(str(item.get("standard_code") or "")) or normalize_account_name(item["account_name"], reference.aliases)
 
 
 # 표준 재무제표 양식 라인(계정 → 표시 라인 매핑)은 seeds/financial_statement_templates.sql이
@@ -233,446 +109,27 @@ def account_key_for_statement(item: dict, alias_map: dict | None = None) -> str:
 # 런타임 조회는 server.load_statement_template_map이 DB에서 수행한다.
 
 
-CHECKLISTS = {
-    "lease": [
-        {"key": "lease_term_months", "label": "리스기간(개월)", "type": "number", "required": True},
-        {"key": "monthly_payment", "label": "월 리스료", "type": "number", "required": True},
-        {"key": "discount_rate", "label": "증분차입이자율(%)", "type": "number", "required": True},
-        {"key": "renewal_option", "label": "연장선택권 행사가 상당히 확실한가?", "type": "boolean", "required": False},
-    ],
-    "development": [
-        {"key": "technical_feasibility", "label": "기술적 실현가능성이 입증되었는가?", "type": "boolean", "required": True},
-        {"key": "intention_to_complete", "label": "완성 의도와 능력이 있는가?", "type": "boolean", "required": True},
-        {"key": "probable_future_benefits", "label": "미래경제적효익이 개연적인가?", "type": "boolean", "required": True},
-        {"key": "reliable_measurement", "label": "원가를 신뢰성 있게 측정할 수 있는가?", "type": "boolean", "required": True},
-    ],
-    "revenue": [
-        {"key": "contract_type", "label": "계약 유형", "type": "text", "required": True},
-        {"key": "performance_obligations", "label": "수행의무", "type": "text", "required": True},
-        {"key": "recognition_timing", "label": "한 시점 또는 기간에 걸친 인식", "type": "text", "required": True},
-        {"key": "variable_consideration", "label": "변동대가가 있는가?", "type": "boolean", "required": False},
-    ],
-    "financial_instrument": [
-        {"key": "instrument_terms", "label": "주요 계약조건", "type": "text", "required": True},
-        {"key": "business_model", "label": "보유 사업모형", "type": "text", "required": True},
-        {"key": "sppi_passed", "label": "원금과 이자 지급만으로 구성된 현금흐름(SPPI) 요건을 충족하는가?", "type": "boolean", "required": True},
-    ],
-    "provision": [
-        {"key": "present_obligation", "label": "현재의무가 존재하는가?", "type": "boolean", "required": True},
-        {"key": "probable_outflow", "label": "자원 유출 가능성이 높은가?", "type": "boolean", "required": True},
-        {"key": "reliable_estimate", "label": "금액을 신뢰성 있게 추정할 수 있는가?", "type": "boolean", "required": True},
-    ],
-    "receivables": [
-        {"key": "credit_risk_method", "label": "기대신용손실 산정 방식", "type": "text", "required": True},
-        {"key": "aging_available", "label": "연령분석표가 있는가?", "type": "boolean", "required": True},
-    ],
-    "ppe": [
-        {"key": "measurement_model", "label": "측정모형 (원가모형 / 재평가모형)", "type": "text", "required": True},
-        {"key": "fair_value", "label": "재평가모형 선택 시 공정가치", "type": "number", "required": False},
-        {"key": "recoverable_amount", "label": "회수가능액 (손상검토용, 없으면 0)", "type": "number", "required": False},
-    ],
-    "deferred_tax_asset": [
-        {"key": "temporary_difference", "label": "차감할 일시적차이 총액", "type": "number", "required": True},
-        {"key": "tax_rate", "label": "적용 세율(%)", "type": "number", "required": True},
-        {"key": "realizable", "label": "미래 과세소득으로 회수 가능성이 높은가?", "type": "boolean", "required": True},
-    ],
-    "retirement_benefit": [
-        {"key": "dbo_amount", "label": "확정급여채무 현재가치(보험수리적 평가액)", "type": "number", "required": True},
-        {"key": "plan_assets", "label": "사외적립자산 공정가치", "type": "number", "required": False},
-        {"key": "discount_rate", "label": "할인율(%)", "type": "number", "required": False},
-    ],
-    "investment_property": [
-        {"key": "measurement_model", "label": "측정모형 (원가모형 / 공정가치모형)", "type": "text", "required": True},
-        {"key": "fair_value", "label": "공정가치모형 선택 시 공정가치", "type": "number", "required": False},
-    ],
-    "government_grant": [
-        {"key": "grant_relation", "label": "보조금 성격 (자산관련 / 수익관련)", "type": "text", "required": True},
-        {"key": "presentation_method", "label": "자산관련 표시 방법 (자산차감법 / 이연수익법)", "type": "text", "required": True},
-    ],
-    "borrowing_cost": [
-        {"key": "qualifying_asset", "label": "적격자산(취득에 상당한 기간 소요)인가?", "type": "boolean", "required": True},
-        {"key": "expenditure", "label": "적격자산에 대한 평균 지출액", "type": "number", "required": False},
-        {"key": "capitalization_rate", "label": "자본화이자율(%)", "type": "number", "required": False},
-        {"key": "capitalization_months", "label": "자본화 기간(개월)", "type": "number", "required": False},
-    ],
-    "other": [
-        {"key": "management_memo", "label": "경영진 분류 메모", "type": "text", "required": True},
-    ],
-}
+# 체크리스트 정의는 seeds/checklist_items.sql이 단일 출처이며 checklist_items 테이블로 시드된다.
+# 계산기가 읽는 item_key는 CALC_CHECKLIST_KEYS 계약으로 코드에 남고 verify_reference_contract가 검증한다.
 
+# 기준서 문단(RAG 코퍼스)은 seeds/standards_paragraphs.sql이 단일 출처이며 standards_paragraphs
+# 테이블로 시드된다. 런타임 코사인 검색은 server가 수행하고 ReferenceData.paragraphs로 주입한다.
 
-# K-GAAP(일반기업회계기준)과 K-IFRS 기준서 문단을 standard_set으로 분리해 보관하는
-# 검색용 기준정보. 서버 시작 시 standards_paragraphs 테이블에 시드되고,
-# 판단 필요 항목의 검토 근거로 함께 제시된다. 문단 내용은 기준서 원문의 요약이며
-# 최종 판단 시에는 기준서 원문을 확인해야 한다.
-STANDARDS_PARAGRAPHS = [
-    {
-        "id": "kifrs_1116_p22",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1116호 리스",
-        "paragraph_label": "문단 22",
-        "account_key": "lease",
-        "title": "사용권자산과 리스부채의 인식",
-        "content": "리스이용자는 리스개시일에 사용권자산과 리스부채를 인식한다.",
-        "keywords": "리스,사용권자산,리스부채,인식,리스개시일",
-    },
-    {
-        "id": "kifrs_1116_p26",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1116호 리스",
-        "paragraph_label": "문단 26",
-        "account_key": "lease",
-        "title": "리스부채의 최초 측정",
-        "content": "리스개시일에 리스부채는 그날 현재 지급되지 않은 리스료의 현재가치로 측정한다. 리스의 내재이자율을 쉽게 산정할 수 있으면 그 이자율로, 산정할 수 없으면 리스이용자의 증분차입이자율로 할인한다.",
-        "keywords": "리스부채,현재가치,할인율,내재이자율,증분차입이자율",
-    },
-    {
-        "id": "kifrs_1116_p18",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1116호 리스",
-        "paragraph_label": "문단 18",
-        "account_key": "lease",
-        "title": "리스기간의 산정",
-        "content": "리스기간은 리스의 해지불능기간에, 연장선택권을 행사할 것이 상당히 확실한 경우 그 대상 기간과 종료선택권을 행사하지 않을 것이 상당히 확실한 경우 그 대상 기간을 포함하여 산정한다.",
-        "keywords": "리스기간,연장선택권,종료선택권,해지불능기간",
-    },
-    {
-        "id": "kifrs_1038_p57",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1038호 무형자산",
-        "paragraph_label": "문단 57",
-        "account_key": "development",
-        "title": "개발활동 지출의 자산 인식 요건",
-        "content": "개발활동에서 발생한 무형자산은 기술적 실현가능성, 완성하여 사용하거나 판매하려는 의도와 능력, 미래경제적효익을 창출하는 방법, 개발을 완료하는 데 필요한 자원의 입수가능성, 관련 지출의 신뢰성 있는 측정을 모두 제시할 수 있는 경우에만 인식한다.",
-        "keywords": "개발비,무형자산,자산화,기술적 실현가능성,미래경제적효익",
-    },
-    {
-        "id": "kifrs_1038_p54",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1038호 무형자산",
-        "paragraph_label": "문단 54",
-        "account_key": "development",
-        "title": "연구단계 지출의 비용 처리",
-        "content": "연구(또는 내부 프로젝트의 연구단계)에 대한 지출은 무형자산으로 인식하지 않고 발생시점에 비용으로 인식한다.",
-        "keywords": "연구비,연구단계,비용,연구개발",
-    },
-    {
-        "id": "kifrs_1115_p31",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1115호 고객과의 계약에서 생기는 수익",
-        "paragraph_label": "문단 31",
-        "account_key": "revenue",
-        "title": "수행의무 이행 시 수익 인식",
-        "content": "기업이 고객에게 약속한 재화나 용역, 즉 자산을 이전하여 수행의무를 이행할 때 또는 이행하는 대로 수익을 인식한다. 자산은 고객이 그 자산을 통제할 때 이전된다.",
-        "keywords": "수익,수행의무,통제 이전,수익인식 시점",
-    },
-    {
-        "id": "kifrs_1115_p50",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1115호 고객과의 계약에서 생기는 수익",
-        "paragraph_label": "문단 50",
-        "account_key": "revenue",
-        "title": "변동대가의 추정",
-        "content": "계약에서 약속한 대가에 변동금액이 포함된 경우, 고객에게 약속한 재화나 용역을 이전하고 그 대가로 받을 권리를 갖게 될 금액을 추정한다.",
-        "keywords": "변동대가,대가 추정,리베이트,할인",
-    },
-    {
-        "id": "kifrs_1109_p411",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1109호 금융상품",
-        "paragraph_label": "문단 4.1.1",
-        "account_key": "financial_instrument",
-        "title": "금융자산의 분류 기준",
-        "content": "금융자산은 금융자산의 관리를 위한 사업모형과 금융자산의 계약상 현금흐름 특성에 근거하여 상각후원가, 기타포괄손익-공정가치, 당기손익-공정가치 측정 범주로 분류한다.",
-        "keywords": "금융자산,분류,사업모형,SPPI,계약상 현금흐름",
-    },
-    {
-        "id": "kifrs_1109_p5515",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1109호 금융상품",
-        "paragraph_label": "문단 5.5.15",
-        "account_key": "receivables",
-        "title": "매출채권 기대신용손실 간편법",
-        "content": "매출채권과 계약자산 등에 대해서는 전체기간 기대신용손실에 해당하는 금액으로 손실충당금을 측정하는 간편법을 적용할 수 있다.",
-        "keywords": "매출채권,기대신용손실,ECL,손실충당금,간편법",
-    },
-    {
-        "id": "kifrs_1037_p14",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1037호 충당부채, 우발부채 및 우발자산",
-        "paragraph_label": "문단 14",
-        "account_key": "provision",
-        "title": "충당부채의 인식 요건",
-        "content": "충당부채는 과거사건의 결과로 현재의무(법적의무 또는 의제의무)가 존재하고, 그 의무를 이행하기 위해 경제적효익이 있는 자원의 유출 가능성이 높으며, 의무 금액을 신뢰성 있게 추정할 수 있는 경우에 인식한다.",
-        "keywords": "충당부채,현재의무,자원 유출,신뢰성 있는 추정",
-    },
-    {
-        "id": "kifrs_1002_p9",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1002호 재고자산",
-        "paragraph_label": "문단 9",
-        "account_key": "inventory",
-        "title": "재고자산의 저가 측정",
-        "content": "재고자산은 취득원가와 순실현가능가치 중 낮은 금액으로 측정한다.",
-        "keywords": "재고자산,저가법,순실현가능가치,취득원가",
-    },
-    {
-        "id": "kifrs_1007_p6",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1007호 현금흐름표",
-        "paragraph_label": "문단 6",
-        "account_key": "cash",
-        "title": "현금성자산의 정의",
-        "content": "현금성자산은 유동성이 매우 높은 단기 투자자산으로서, 확정된 금액의 현금으로 전환이 용이하고 가치변동의 위험이 경미한 자산을 말한다.",
-        "keywords": "현금성자산,현금,단기투자,유동성",
-    },
-    {
-        "id": "kgaap_ch13_lease",
-        "standard_set": "K-GAAP",
-        "reference_code": "일반기업회계기준 제13장 리스",
-        "paragraph_label": "리스의 분류",
-        "account_key": "lease",
-        "title": "금융리스와 운용리스의 분류",
-        "content": "리스는 소유에 따른 위험과 보상의 대부분이 이전되는지에 따라 금융리스와 운용리스로 분류한다. 운용리스의 리스이용자는 리스료를 리스기간에 걸쳐 비용으로 인식하며 리스부채를 계상하지 않는다. K-IFRS 전환 시 사용권자산과 리스부채 계상 여부를 검토해야 한다.",
-        "keywords": "리스,운용리스,금융리스,비용 인식,부외",
-    },
-    {
-        "id": "kgaap_ch11_development",
-        "standard_set": "K-GAAP",
-        "reference_code": "일반기업회계기준 제11장 무형자산",
-        "paragraph_label": "개발비의 인식",
-        "account_key": "development",
-        "title": "개발단계 지출의 자산 인식",
-        "content": "개발단계에서 발생한 지출은 기술적 실현가능성, 사용·판매 의도와 능력, 미래경제적효익 창출 가능성, 신뢰성 있는 측정 등 자산 인식요건을 모두 충족하는 경우 개발비의 과목으로 무형자산으로 인식하고, 그 외에는 발생한 기간의 비용으로 처리한다.",
-        "keywords": "개발비,무형자산,자산화,경상개발비",
-    },
-    {
-        "id": "kgaap_ch16_revenue",
-        "standard_set": "K-GAAP",
-        "reference_code": "일반기업회계기준 제16장 수익",
-        "paragraph_label": "재화 판매 수익의 인식",
-        "account_key": "revenue",
-        "title": "위험과 보상 이전에 따른 수익 인식",
-        "content": "재화의 판매 수익은 재화 소유에 따른 유의적인 위험과 보상이 구매자에게 이전되고, 수익금액을 신뢰성 있게 측정할 수 있으며, 경제적 효익의 유입 가능성이 매우 높은 경우 등에 인식한다. K-IFRS 제1115호의 수행의무·통제 이전 모형과 접근 방식이 다르다.",
-        "keywords": "수익,위험과 보상,재화 판매,인도기준",
-    },
-    {
-        "id": "kgaap_ch6_securities",
-        "standard_set": "K-GAAP",
-        "reference_code": "일반기업회계기준 제6장 금융자산·금융부채",
-        "paragraph_label": "유가증권의 분류",
-        "account_key": "financial_instrument",
-        "title": "보유 목적에 따른 유가증권 분류",
-        "content": "유가증권은 취득 목적과 보유 의도에 따라 단기매매증권, 매도가능증권, 만기보유증권 등으로 분류한다. K-IFRS 제1109호의 사업모형·계약상 현금흐름 특성 기준과 분류 체계가 다르므로 전환 시 재분류를 검토해야 한다.",
-        "keywords": "유가증권,단기매매증권,매도가능증권,만기보유증권,분류",
-    },
-    {
-        "id": "kgaap_ch6_receivables",
-        "standard_set": "K-GAAP",
-        "reference_code": "일반기업회계기준 제6장 금융자산·금융부채",
-        "paragraph_label": "대손충당금",
-        "account_key": "receivables",
-        "title": "대손충당금의 설정",
-        "content": "매출채권 등 수취채권은 회수가 불확실한 금액을 합리적이고 객관적인 기준에 따라 산출한 대손추산액을 대손충당금으로 설정한다. 발생손실에 기초한 접근으로, K-IFRS 제1109호의 기대신용손실 모형과 차이가 있다.",
-        "keywords": "매출채권,대손충당금,대손추산액,발생손실",
-    },
-    {
-        "id": "kgaap_ch14_provision",
-        "standard_set": "K-GAAP",
-        "reference_code": "일반기업회계기준 제14장 충당부채",
-        "paragraph_label": "충당부채의 인식",
-        "account_key": "provision",
-        "title": "충당부채의 인식 요건",
-        "content": "충당부채는 과거사건의 결과로 현재의무가 존재하고, 그 의무를 이행하기 위해 자원이 유출될 가능성이 매우 높으며, 의무 금액을 신뢰성 있게 추정할 수 있을 때 인식한다.",
-        "keywords": "충당부채,현재의무,자원 유출,추정",
-    },
-    {
-        "id": "kgaap_ch7_inventory",
-        "standard_set": "K-GAAP",
-        "reference_code": "일반기업회계기준 제7장 재고자산",
-        "paragraph_label": "재고자산의 평가",
-        "account_key": "inventory",
-        "title": "저가법 평가",
-        "content": "재고자산은 취득원가로 측정하되, 시가가 취득원가보다 낮은 경우에는 시가를 장부금액으로 하는 저가법으로 평가한다.",
-        "keywords": "재고자산,저가법,시가,평가손실",
-    },
-    {
-        "id": "kgaap_ch2_cash",
-        "standard_set": "K-GAAP",
-        "reference_code": "일반기업회계기준 제2장 재무제표의 작성과 표시",
-        "paragraph_label": "현금및현금성자산",
-        "account_key": "cash",
-        "title": "현금및현금성자산의 범위",
-        "content": "현금및현금성자산은 통화 및 통화대용증권과 취득 당시 만기가 3개월 이내에 도래하는 유동성이 높은 금융상품 등을 포함한다.",
-        "keywords": "현금,현금성자산,통화대용증권,만기 3개월",
-    },
-    {
-        "id": "kifrs_1019_p57",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1019호 종업원급여",
-        "paragraph_label": "문단 57",
-        "account_key": "retirement_benefit",
-        "title": "순확정급여부채(자산)의 인식",
-        "content": "확정급여제도의 순확정급여부채(자산)는 확정급여채무의 현재가치에서 사외적립자산의 공정가치를 차감하여 결정한다. 확정급여채무는 예측단위적립방식으로 보험수리적 평가하며, 순확정급여부채(자산)의 재측정요소는 기타포괄손익으로 인식한다.",
-        "keywords": "퇴직급여,확정급여채무,사외적립자산,순확정급여부채,보험수리적,재측정,OCI",
-    },
-    {
-        "id": "kgaap_ch21_severance",
-        "standard_set": "K-GAAP",
-        "reference_code": "일반기업회계기준 제21장 종업원급여",
-        "paragraph_label": "퇴직급여충당부채",
-        "account_key": "retirement_benefit",
-        "title": "퇴직금추계액 기준 충당부채",
-        "content": "확정급여형 퇴직급여제도의 퇴직급여충당부채는 보고기간말 현재 전 종업원이 일시에 퇴직할 경우 지급하여야 할 퇴직금추계액을 기준으로 인식한다(보험수리적 평가를 요구하지 않음).",
-        "keywords": "퇴직급여충당부채,퇴직금추계액,확정급여형",
-    },
-    {
-        "id": "kifrs_1016_p31",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1016호 유형자산",
-        "paragraph_label": "문단 31",
-        "account_key": "ppe",
-        "title": "재평가모형",
-        "content": "재평가모형을 선택한 경우 공정가치를 신뢰성 있게 측정할 수 있는 유형자산은 재평가일의 공정가치에서 이후의 감가상각누계액과 손상차손누계액을 차감한 재평가금액을 장부금액으로 한다. 재평가로 증가한 금액은 기타포괄손익으로, 감소한 금액은 당기손익으로 인식한다.",
-        "keywords": "유형자산,재평가모형,공정가치,재평가잉여금,OCI",
-    },
-    {
-        "id": "kifrs_1036_p59",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1036호 자산손상",
-        "paragraph_label": "문단 59",
-        "account_key": "ppe",
-        "title": "손상차손의 인식",
-        "content": "자산의 회수가능액이 장부금액에 미달하면 장부금액을 회수가능액으로 감액하고 그 차액을 손상차손으로 당기손익에 인식한다. 회수가능액은 순공정가치와 사용가치 중 큰 금액이다.",
-        "keywords": "손상,회수가능액,손상차손,사용가치,순공정가치",
-    },
-    {
-        "id": "kifrs_1040_p33",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1040호 투자부동산",
-        "paragraph_label": "문단 33",
-        "account_key": "investment_property",
-        "title": "공정가치모형",
-        "content": "공정가치모형을 선택한 경우 투자부동산을 공정가치로 측정하고, 공정가치 변동으로 발생하는 손익은 발생한 기간의 당기손익에 반영한다. 공정가치모형에서는 감가상각을 하지 않는다.",
-        "keywords": "투자부동산,공정가치모형,평가손익,당기손익",
-    },
-    {
-        "id": "kifrs_1012_p24",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1012호 법인세",
-        "paragraph_label": "문단 24",
-        "account_key": "deferred_tax_asset",
-        "title": "이연법인세자산의 인식",
-        "content": "차감할 일시적차이가 사용될 수 있는 미래 과세소득의 발생가능성이 높은 경우 그 차이에 대하여 이연법인세자산을 인식한다. 이연법인세자산과 부채는 상계하지 않고 총액으로 인식하며 할인하지 않는다.",
-        "keywords": "이연법인세자산,일시적차이,총액법,회수가능성,과세소득",
-    },
-    {
-        "id": "kifrs_1020_p24",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1020호 정부보조금",
-        "paragraph_label": "문단 24",
-        "account_key": "government_grant",
-        "title": "자산관련 보조금의 표시",
-        "content": "자산관련 정부보조금은 이연수익으로 표시하거나 자산의 장부금액에서 차감하여 표시한다. 어느 방법을 선택하든 관련 자산의 내용연수에 걸쳐 체계적인 기준으로 당기손익에 인식한다.",
-        "keywords": "정부보조금,자산관련,이연수익,자산차감법",
-    },
-    {
-        "id": "kifrs_1023_p8",
-        "standard_set": "K-IFRS",
-        "reference_code": "K-IFRS 제1023호 차입원가",
-        "paragraph_label": "문단 8",
-        "account_key": "borrowing_cost",
-        "title": "적격자산 차입원가의 자본화",
-        "content": "적격자산의 취득, 건설 또는 생산과 직접 관련된 차입원가는 해당 자산 원가의 일부로 자본화한다. 적격자산은 의도된 용도로 사용하거나 판매할 수 있는 상태가 되는 데 상당한 기간을 필요로 하는 자산이다. 그 밖의 차입원가는 발생 기간의 비용으로 인식한다.",
-        "keywords": "차입원가,적격자산,자본화,자본화이자율",
-    },
-]
-
-
-def standards_paragraphs_for_accounts(account_keys) -> dict:
-    """계정키별로 K-GAAP과 K-IFRS 문단을 함께 묶어 반환한다 (DB 미사용 폴백)."""
-    keys = set(account_keys)
-    grouped: dict[str, list[dict]] = {}
-    for para in STANDARDS_PARAGRAPHS:
-        if para["account_key"] in keys:
-            grouped.setdefault(para["account_key"], []).append(para)
-    return grouped
-
-
-# K-GAAP 계정명 별칭 → 내부 표준계정 키. 이 사전이 kgaap_accounts 테이블의 시드 원천이며,
-# 런타임에는 DB에서 로드한 맵(load_account_alias_map)을 주입받아 사용한다(없으면 이 상수로 폴백).
-# 부분 문자열(in) 매칭이라 매칭 우선순위는 '긴 별칭 먼저'여야 한다. 예: "퇴직급여충당부채"가
-# "충당부채"보다, "금융상품"이 "상품"보다 먼저 검사되어야 오분류가 없다. 우선순위는 별칭 길이에서
-# 자동 도출하므로 아래 나열 순서를 사람이 맞출 필요가 없다.
-ACCOUNT_ALIASES = {
-    "현금및현금성자산": "cash",
-    "현금": "cash",
-    "cash": "cash",
-    "매출채권": "receivables",
-    "대손충당금": "receivables",
-    "미수금": "receivables",
-    "미수수익": "receivables",
-    "계약자산": "receivables",
-    "trade receivable": "receivables",
-    "금융자산": "financial_instrument",
-    "금융부채": "financial_instrument",
-    "금융상품": "financial_instrument",
-    "파생상품": "financial_instrument",
-    "전환사채": "financial_instrument",
-    "장기차입금": "financial_instrument",
-    "단기차입금": "financial_instrument",
-    "차입금": "financial_instrument",
-    "사채상환할증금": "financial_instrument",
-    "전환권조정": "financial_instrument",
-    "재고자산": "inventory",
-    "상품": "inventory",
-    "제품": "inventory",
-    "원재료": "inventory",
-    "inventory": "inventory",
-    "리스": "lease",
-    "사용권자산": "lease",
-    "리스부채": "lease",
-    "lease": "lease",
-    "개발비": "development",
-    "무형자산": "development",
-    "development": "development",
-    "매출액": "revenue",
-    "매출": "revenue",
-    "영업수익": "revenue",
-    "수익": "revenue",
-    "revenue": "revenue",
-    "퇴직급여충당부채": "retirement_benefit",
-    "확정급여채무": "retirement_benefit",
-    "순확정급여부채": "retirement_benefit",
-    "퇴직급여": "retirement_benefit",
-    "충당부채": "provision",
-    "provision": "provision",
-    "투자부동산": "investment_property",
-    "정부보조금": "government_grant",
-    "국고보조금": "government_grant",
-    "차입원가": "borrowing_cost",
-    "유형자산": "ppe",
-    "토지": "ppe",
-    "건물": "ppe",
-    "기계장치": "ppe",
-    "이연법인세자산": "deferred_tax_asset",
-    "이연법인세부채": "deferred_tax_liability",
-}
-
+# 계정명 별칭(별칭 → 계정키)은 seeds/kgaap_accounts.sql이 단일 출처이며 kgaap_accounts 테이블로
+# 시드된다. 부분 문자열 매칭이라 매칭 우선순위는 별칭 길이(match_priority)로 DB에 저장된다.
 
 def alias_match_priority(alias: str) -> int:
     """부분 문자열 매칭 우선순위. 긴 별칭이 짧은 별칭보다 먼저 검사되도록 길이를 쓴다."""
     return len(alias or "")
 
 
-def normalize_account_name(name: str, alias_map: dict | None = None) -> str:
+def normalize_account_name(name: str, aliases: dict) -> str:
     """계정명을 내부 표준계정 키로 정규화한다.
 
-    alias_map(별칭 → 계정키)이 주어지면 그것을, 없으면 코드 상수 ACCOUNT_ALIASES를 사용한다.
+    aliases(별칭 → 계정키)는 DB에서 로드해 주입받는다(코드에 하드코딩된 사전 없음).
     긴 별칭부터 검사해 '금융상품 ⊃ 상품', '퇴직급여충당부채 ⊃ 충당부채' 같은 부분 문자열
     충돌을 정확히 해결한다. domain.py가 DB를 직접 모르도록 맵을 인자로 주입받는다(순수 함수).
     """
-    aliases = alias_map if alias_map is not None else ACCOUNT_ALIASES
     text = re.sub(r"\s+", " ", name.strip().lower())
     compact = text.replace(" ", "")
     for needle in sorted(aliases, key=alias_match_priority, reverse=True):
@@ -719,18 +176,18 @@ def looks_numeric(value) -> bool:
         return False
     return bool(re.fullmatch(r"\(?-?[\d,]+(?:\.\d+)?\)?", text.replace(" ", "")))
 
-def build_statement_record(project_period: str, row: dict, alias_map: dict | None = None) -> dict:
-    account_key = normalize_account_name(row["account_name"], alias_map)
+def build_statement_record(project_period: str, row: dict, reference: "ReferenceData") -> dict:
+    account_key = normalize_account_name(row["account_name"], reference.aliases)
     mapping_source = "rule_based"
     ai_suggestion = row.get("ai_suggestion") or {}
     suggested_key = ai_suggestion.get("account_key")
-    if account_key == "other" and suggested_key in STANDARD_ACCOUNTS and suggested_key != "other":
+    if account_key == "other" and suggested_key in reference.accounts and suggested_key != "other":
         # 키워드 매핑 실패 계정에 대한 AI 1차 분류 제안. 추출 결과를 담당자가
         # 확인하고 반영하는 시점에 적용되며, 확정 권한은 사람에게 있다.
         account_key = suggested_key
         mapping_source = "ai_suggested_human_accepted"
-    standard = STANDARD_ACCOUNTS[account_key]
-    checklist = CHECKLISTS.get(account_key, []) if standard["type"] == "judgment" else []
+    standard = reference.accounts[account_key]
+    checklist = reference.checklists.get(account_key, []) if standard["type"] == "judgment" else []
     rule_summary = standard["rule"]
     if mapping_source == "ai_suggested_human_accepted":
         rationale = str(ai_suggestion.get("rationale") or "").strip()
@@ -903,22 +360,17 @@ def generate_conversion(
     project: dict,
     statements: list[dict],
     responses: dict,
-    templates: dict | None = None,
-    standards_map: dict | None = None,
-    alias_map: dict | None = None,
+    reference: "ReferenceData",
 ) -> dict:
-    templates = templates or {}
-    if standards_map is None:
-        standards_map = standards_paragraphs_for_accounts(
-            account_key_for_statement(item, alias_map) for item in statements
-        )
+    templates = reference.templates
+    standards_map = reference.paragraphs
     entries = []
     notes = []
     judgment_items = []
 
     for item in statements:
-        account_key = account_key_for_statement(item, alias_map)
-        standard = STANDARD_ACCOUNTS[account_key]
+        account_key = account_key_for_statement(item, reference)
+        standard = reference.accounts[account_key]
         checklist_response = responses.get(item["id"], {})
         entry = {
             "source_account": item["account_name"],

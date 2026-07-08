@@ -24,6 +24,11 @@ for _candidate in (_HERE, os.path.dirname(_HERE)):
 import server  # noqa: E402
 from gtf_app.domain import build_review_summary, build_statement_record  # noqa: E402
 
+sys.path.insert(0, _HERE)
+from reference_fixture import load_reference  # noqa: E402
+
+REF = load_reference()
+
 
 SUGGESTION = {"account_key": "financial_instrument", "label": "금융상품", "confidence": "medium", "rationale": "테스트"}
 
@@ -43,7 +48,7 @@ class ApplyAiDecisionsTest(unittest.TestCase):
         rows, summary = server.apply_ai_decisions([suggested_row("임차보증금")], {"임차보증금": "rejected"})
         self.assertNotIn("ai_suggestion", rows[0])
         self.assertEqual(summary["rejected"], ["임차보증금"])
-        record = build_statement_record("2024", rows[0])
+        record = build_statement_record("2024", rows[0], REF)
         self.assertEqual(record["standard_code"], "X9999")
 
     def test_undecided_suggestion_is_not_applied(self):
@@ -70,10 +75,10 @@ class ApplyAiDecisionsTest(unittest.TestCase):
 
 class BuildReviewSummaryTest(unittest.TestCase):
     def lease_statement(self):
-        return build_statement_record("2024", {"account_name": "리스부채", "amount": 1000.0})
+        return build_statement_record("2024", {"account_name": "리스부채", "amount": 1000.0}, REF)
 
     def unclassified_statement(self):
-        return build_statement_record("2024", {"account_name": "이상한계정", "amount": 10.0})
+        return build_statement_record("2024", {"account_name": "이상한계정", "amount": 10.0}, REF)
 
     def conversion_for(self, statement, response=None, paragraphs=3):
         return {
@@ -127,7 +132,7 @@ class BuildReviewSummaryTest(unittest.TestCase):
         self.assertFalse(summary["has_conversion"])
 
     def test_simple_accounts_are_not_listed_as_judgment(self):
-        statement = build_statement_record("2024", {"account_name": "현금", "amount": 100.0})
+        statement = build_statement_record("2024", {"account_name": "현금", "amount": 100.0}, REF)
         summary = build_review_summary([statement], {"judgment_items": []}, None)
         self.assertEqual(summary["judgment"], [])
         self.assertTrue(summary["can_approve"])

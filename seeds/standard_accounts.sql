@@ -1,0 +1,37 @@
+-- 내부 표준계정 정의. 계산 로직은 account_key(개념 식별자)로 분기하고, 계정코드·라벨·규칙 등
+-- 표시 데이터는 이 테이블(단일 출처)에서 런타임에 조회한다. updated_at은 시드 기준 고정값.
+INSERT INTO standard_accounts (account_key, standard_code, internal_label, ifrs_account, mapping_type, rule_summary, active, updated_at)
+VALUES
+  ('cash', 'A1000', '현금및현금성자산', '현금및현금성자산', 'simple', '사용 제한 여부를 확인한 뒤 현금및현금성자산으로 단순 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('receivables', 'A1100', '매출채권', '매출채권및기타채권', 'judgment', 'K-IFRS 제1109호에 따라 매출채권 분류와 기대신용손실 충당금을 검토합니다.', true, '1970-01-01T00:00:00Z'),
+  ('inventory', 'A1200', '재고자산', '재고자산', 'simple', 'K-IFRS 제1002호에 따라 재고자산으로 매핑하고 원가와 순실현가능가치 비교를 검토합니다.', true, '1970-01-01T00:00:00Z'),
+  ('lease', 'A2100', '리스', '사용권자산 및 리스부채', 'judgment', 'K-IFRS 제1116호 측정을 위해 리스기간, 지급액, 선택권, 할인율을 추가 확인합니다.', true, '1970-01-01T00:00:00Z'),
+  ('development', 'A3100', '개발비', '무형자산 또는 연구개발비', 'judgment', 'K-IFRS 제1038호 개발단계 자산화 요건 충족 여부를 검토합니다.', true, '1970-01-01T00:00:00Z'),
+  ('revenue', 'R1000', '수익', '고객과의 계약에서 생기는 수익', 'judgment', 'K-IFRS 제1115호에 따라 수행의무와 수익인식 시점을 확인합니다.', true, '1970-01-01T00:00:00Z'),
+  ('financial_instrument', 'F1000', '금융상품', '금융자산·금융부채', 'judgment', 'K-IFRS 제1109호에 따라 사업모형과 계약상 현금흐름 특성을 검토합니다.', true, '1970-01-01T00:00:00Z'),
+  ('provision', 'L2200', '충당부채', '충당부채', 'judgment', 'K-IFRS 제1037호에 따라 현재의무, 유출가능성, 신뢰성 있는 추정 여부를 검토합니다.', true, '1970-01-01T00:00:00Z'),
+  ('ppe', 'A1500', '유형자산', '유형자산', 'judgment', 'K-IFRS 제1016·1036호에 따라 원가모형과 재평가모형 중 선택하고 손상 징후가 있으면 회수가능액과 비교해 손상차손을 인식합니다.', true, '1970-01-01T00:00:00Z'),
+  ('prepaid_expense', 'A1300', '선급비용', '선급비용', 'simple', '선급비용을 K-IFRS 선급비용 라인으로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('deposits', 'A1400', '보증금', '장기보증금(금융자산)', 'simple', '임차보증금 등 반환 예정 보증금을 금융자산 성격의 예치금으로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('deferred_tax_asset', 'A1600', '이연법인세자산', '이연법인세자산', 'judgment', 'K-IFRS 제1012호에 따라 일시적차이에 세율을 적용해 총액법으로 이연법인세자산을 인식하고 회수가능성을 검토합니다.', true, '1970-01-01T00:00:00Z'),
+  ('trade_payables', 'L1000', '매입채무', '매입채무및기타채무', 'simple', '매입채무와 미지급금을 K-IFRS 매입채무 라인으로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('other_payables', 'L1100', '미지급금', '기타채무 및 미지급비용', 'simple', '미지급금, 미지급비용을 기타채무 라인으로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('current_tax_liability', 'L1200', '미지급법인세', '당기법인세부채', 'simple', '미지급법인세를 K-IFRS 제1012호 당기법인세부채로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('deferred_tax_liability', 'L2100', '이연법인세부채', '이연법인세부채', 'simple', 'K-IFRS 제1012호 이연법인세부채로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('share_capital', 'E1000', '자본금', '자본금', 'simple', '자본금을 K-IFRS 자본금 라인으로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('capital_surplus', 'E1100', '자본잉여금', '자본잉여금', 'simple', '자본잉여금을 주식발행초과금 등 자본잉여 라인으로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('retained_earnings', 'E1200', '이익잉여금', '이익잉여금', 'simple', '이익잉여금 또는 결손금을 K-IFRS 이익잉여금 라인으로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('cost_of_sales', 'R2000', '매출원가', '매출원가', 'simple', '매출원가를 K-IFRS 매출원가 라인으로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('operating_expense', 'R3000', '판매비와관리비', '판매비와관리비', 'simple', '판매비와관리비, 영업비용을 K-IFRS 판매비와관리비 라인으로 매핑합니다.', true, '1970-01-01T00:00:00Z'),
+  ('retirement_benefit', 'L2300', '퇴직급여충당부채', '순확정급여부채', 'judgment', 'K-IFRS 제1019호에 따라 확정급여채무를 보험수리적으로 평가하고 사외적립자산을 차감해 순확정급여부채를 측정하며, 재측정요소는 기타포괄손익으로 인식합니다.', true, '1970-01-01T00:00:00Z'),
+  ('investment_property', 'A1700', '투자부동산', '투자부동산', 'judgment', 'K-IFRS 제1040호에 따라 원가모형과 공정가치모형 중 회계정책을 선택하고, 공정가치모형이면 평가손익을 당기손익에 반영합니다.', true, '1970-01-01T00:00:00Z'),
+  ('government_grant', 'L2400', '정부보조금', '이연정부보조금수익', 'judgment', 'K-IFRS 제1020호에 따라 자산관련 보조금의 표시 방법(자산 차감법 또는 이연수익법)을 결정하고 체계적으로 수익 인식합니다.', true, '1970-01-01T00:00:00Z'),
+  ('borrowing_cost', 'R4000', '차입원가', '금융원가(차입원가 자본화 조정)', 'judgment', 'K-IFRS 제1023호에 따라 적격자산 취득에 직접 관련된 차입원가를 자본화 대상으로 판단합니다.', true, '1970-01-01T00:00:00Z'),
+  ('other', 'X9999', '미분류 계정', '검토 필요', 'judgment', '자동 매핑 신뢰도가 낮아 담당자 분류 검토가 필요합니다.', true, '1970-01-01T00:00:00Z')
+ON CONFLICT (account_key) DO UPDATE SET
+  standard_code = excluded.standard_code,
+  internal_label = excluded.internal_label,
+  ifrs_account = excluded.ifrs_account,
+  mapping_type = excluded.mapping_type,
+  rule_summary = excluded.rule_summary,
+  active = excluded.active;

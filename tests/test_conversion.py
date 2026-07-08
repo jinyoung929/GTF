@@ -32,6 +32,16 @@ for _candidate in (_HERE, os.path.dirname(_HERE)):
 
 import server  # noqa: E402
 
+sys.path.insert(0, _HERE)
+from reference_fixture import load_reference  # noqa: E402
+
+# 기준정보는 운영과 동일하게 SQL 시드 → DB 조회로 로드해 주입한다 (코드에 데이터 없음)
+REF = load_reference()
+
+
+def norm(name):
+    return server.normalize_account_name(name, REF.aliases)
+
 
 # ---------------------------------------------------------------------------
 # 테스트 헬퍼
@@ -65,7 +75,7 @@ def convert_single(account_name, amount, mapping_type, response=None,
     stmt = make_statement(account_name, amount, mapping_type,
                           standard_code=standard_code)
     responses = {stmt["id"]: (response or {})}
-    result = server.generate_conversion(PROJECT, [stmt], responses)
+    result = server.generate_conversion(PROJECT, [stmt], responses, REF)
     return result, result["entries"][0]
 
 
@@ -243,7 +253,7 @@ class TestMappingAggregation(unittest.TestCase):
                        "probable_outflow": True,
                        "reliable_estimate": True},
         }
-        result = server.generate_conversion(PROJECT, [cash, prov], responses)
+        result = server.generate_conversion(PROJECT, [cash, prov], responses, REF)
 
         # judgment 항목만 judgment_items / draft_notes 에 잡혀야 한다
         self.assertEqual(len(result["judgment_items"]), 1)
@@ -263,29 +273,29 @@ class TestMappingAggregation(unittest.TestCase):
 class TestNormalizeAccountName(unittest.TestCase):
 
     def test_known_aliases_resolve(self):
-        self.assertEqual(server.normalize_account_name("현금및현금성자산"), "cash")
-        self.assertEqual(server.normalize_account_name("리스부채"), "lease")
-        self.assertEqual(server.normalize_account_name("충당부채"), "provision")
+        self.assertEqual(norm("현금및현금성자산"), "cash")
+        self.assertEqual(norm("리스부채"), "lease")
+        self.assertEqual(norm("충당부채"), "provision")
 
     def test_whitespace_and_case_are_ignored(self):
-        self.assertEqual(server.normalize_account_name("  Cash  "), "cash")
+        self.assertEqual(norm("  Cash  "), "cash")
 
     def test_unknown_account_falls_back_to_other(self):
-        self.assertEqual(server.normalize_account_name("가수금"), "other")
+        self.assertEqual(norm("가수금"), "other")
 
     def test_expanded_kifrs_difference_accounts_resolve(self):
-        self.assertEqual(server.normalize_account_name("퇴직급여충당부채"), "retirement_benefit")
-        self.assertEqual(server.normalize_account_name("투자부동산"), "investment_property")
-        self.assertEqual(server.normalize_account_name("정부보조금"), "government_grant")
-        self.assertEqual(server.normalize_account_name("차입원가"), "borrowing_cost")
-        self.assertEqual(server.normalize_account_name("이연법인세자산"), "deferred_tax_asset")
-        self.assertEqual(server.normalize_account_name("유형자산"), "ppe")
+        self.assertEqual(norm("퇴직급여충당부채"), "retirement_benefit")
+        self.assertEqual(norm("투자부동산"), "investment_property")
+        self.assertEqual(norm("정부보조금"), "government_grant")
+        self.assertEqual(norm("차입원가"), "borrowing_cost")
+        self.assertEqual(norm("이연법인세자산"), "deferred_tax_asset")
+        self.assertEqual(norm("유형자산"), "ppe")
 
     def test_known_limitation_substring_overmatch(self):
         # [한계 문서화] 부분문자열 매칭이라 '무형자산'이 무조건 development로 감.
         # 무형자산이 개발비만은 아니므로 오탐 가능 — 리팩터링 시 이 테스트가 신호가 됨.
-        self.assertEqual(server.normalize_account_name("영업권"), "other")   # 무형자산이지만 별칭 없음
-        self.assertEqual(server.normalize_account_name("무형자산"), "development")  # 현재 동작(주의)
+        self.assertEqual(norm("영업권"), "other")   # 무형자산이지만 별칭 없음
+        self.assertEqual(norm("무형자산"), "development")  # 현재 동작(주의)
 
 
 # ---------------------------------------------------------------------------
@@ -296,8 +306,8 @@ class TestKifrsDifferenceAreas(unittest.TestCase):
     """퇴직급여·유형자산·투자부동산·이연법인세·정부보조금·차입원가 측정/분류 로직."""
 
     def _entry(self, account_name, amount, response):
-        stmt = server.build_statement_record("2024", {"account_name": account_name, "amount": amount})
-        result = server.generate_conversion(PROJECT, [stmt], {stmt["id"]: response})
+        stmt = server.build_statement_record("2024", {"account_name": account_name, "amount": amount}, REF)
+        result = server.generate_conversion(PROJECT, [stmt], {stmt["id"]: response}, REF)
         return result["entries"][0]
 
     def test_retirement_benefit_net_liability(self):
@@ -354,7 +364,7 @@ class TestKifrsDifferenceAreas(unittest.TestCase):
 
     def test_all_new_areas_are_judgment(self):
         for name in ["퇴직급여충당부채", "유형자산", "투자부동산", "이연법인세자산", "정부보조금", "차입원가"]:
-            stmt = server.build_statement_record("2024", {"account_name": name, "amount": 100})
+            stmt = server.build_statement_record("2024", {"account_name": name, "amount": 100}, REF)
             self.assertEqual(stmt["mapping_type"], "judgment", f"{name}이 판단 필요가 아님")
             self.assertTrue(stmt["checklist"], f"{name}에 체크리스트가 없음")
 
