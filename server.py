@@ -25,7 +25,9 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, urlparse
 
+import openai
 import requests
+from openai import OpenAI
 
 from gtf_app.auth import (
     admin_config,
@@ -72,9 +74,7 @@ STATEMENT_TEMPLATES_SEED_PATH = SEED_DIR / "financial_statement_templates.sql"
 FIGMA_DIST_DIR = ROOT / "figma_make" / "dist"
 ENV_PATHS = (ROOT / ".env", ROOT / ".env.local")
 GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024
-OPENAI_API_ENDPOINT = "https://api.openai.com/v1/responses"
 OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
-OPENAI_EMBEDDING_ENDPOINT = "https://api.openai.com/v1/embeddings"
 EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small").strip() or "text-embedding-3-small"
 SESSION_COOKIE = "gtf_session"
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
@@ -996,22 +996,6 @@ def gemini_response_text(response: dict) -> str:
     return "\n".join(candidate_texts).strip()
 
 
-def openai_response_text(response: dict) -> str:
-    if isinstance(response.get("output_text"), str):
-        return response["output_text"].strip()
-    content = response.get("content") or []
-    texts = []
-    output = response.get("output") or []
-    for item in output:
-        for part in item.get("content", []) if isinstance(item, dict) else []:
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
-                texts.append(part["text"])
-    for part in content:
-        if isinstance(part, dict) and isinstance(part.get("text"), str):
-            texts.append(part["text"])
-    return "\n".join(texts).strip()
-
-
 def openai_embed(texts: list[str]) -> list[list[float]] | None:
     """텍스트 목록을 OpenAI 임베딩 벡터로 변환한다.
 
@@ -1022,19 +1006,12 @@ def openai_embed(texts: list[str]) -> list[list[float]] | None:
     texts = [str(t) for t in (texts or []) if str(t).strip()]
     if not api_key or not texts:
         return None
-    payload = {"model": EMBEDDING_MODEL, "input": texts}
     try:
-        response = requests.post(
-            OPENAI_EMBEDDING_ENDPOINT,
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=45,
-        )
-        response.raise_for_status()
-        body = response.json()
-        vectors = [item["embedding"] for item in body.get("data", [])]
+        client = OpenAI(api_key=api_key, timeout=45)
+        result = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+        vectors = [item.embedding for item in result.data]
         return vectors if len(vectors) == len(texts) else None
-    except (requests.RequestException, KeyError, ValueError):
+    except openai.OpenAIError:
         return None
 
 
@@ -1267,26 +1244,19 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
         },
     }
     try:
-        response = requests.post(
-            OPENAI_API_ENDPOINT,
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=45,
-        )
-        response.raise_for_status()
-        response_payload = response.json()
-    except requests.HTTPError as exc:
-        message = exc.response.text[:500]
+        client = OpenAI(api_key=api_key, timeout=45)
+        response = client.responses.create(**payload)
+    except openai.APIStatusError as exc:
         return {
             "provider": "openai",
             "model": config["model"],
             "status": "failed",
             "items": [],
             "overall_note": "OpenAI 판단 보조 요청이 실패했습니다. 변환 초안은 저장되며 사람이 검토해야 합니다.",
-            "issues": [f"OpenAI 요청 실패: HTTP {exc.response.status_code}", message],
+            "issues": [f"OpenAI 요청 실패: HTTP {exc.status_code}", exc.response.text[:500]],
             "human_review_required": True,
         }
-    except requests.Timeout:
+    except openai.APITimeoutError:
         return {
             "provider": "openai",
             "model": config["model"],
@@ -1296,7 +1266,7 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
             "issues": ["OpenAI 요청 시간이 초과되었습니다."],
             "human_review_required": True,
         }
-    except requests.RequestException as exc:
+    except openai.OpenAIError as exc:
         return {
             "provider": "openai",
             "model": config["model"],
@@ -1307,7 +1277,7 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
             "human_review_required": True,
         }
 
-    text = openai_response_text(response_payload)
+    text = (response.output_text or "").strip()
     if not text:
         return {
             "provider": "openai",
@@ -1427,24 +1397,17 @@ def call_ai_classification(unmapped_accounts: list[str]) -> dict:
         },
     }
     try:
-        response = requests.post(
-            OPENAI_API_ENDPOINT,
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=45,
-        )
-        response.raise_for_status()
-        response_payload = response.json()
-    except requests.HTTPError as exc:
-        message = exc.response.text[:500]
+        client = OpenAI(api_key=api_key, timeout=45)
+        response = client.responses.create(**payload)
+    except openai.APIStatusError as exc:
         return {
             **base,
             "status": "failed",
             "suggestions": {},
             "note": "AI 1차 분류 요청이 실패해 미분류 계정은 담당자가 직접 분류해야 합니다.",
-            "issues": [f"OpenAI 분류 요청 실패: HTTP {exc.response.status_code}", message],
+            "issues": [f"OpenAI 분류 요청 실패: HTTP {exc.status_code}", exc.response.text[:500]],
         }
-    except requests.RequestException as exc:
+    except openai.OpenAIError as exc:
         return {
             **base,
             "status": "failed",
@@ -1453,7 +1416,7 @@ def call_ai_classification(unmapped_accounts: list[str]) -> dict:
             "issues": [f"OpenAI 분류 네트워크 오류: {exc}"],
         }
 
-    text = openai_response_text(response_payload)
+    text = (response.output_text or "").strip()
     try:
         parsed = extract_json_object(text) if text else {}
     except json.JSONDecodeError:
