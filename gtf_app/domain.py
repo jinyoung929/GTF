@@ -218,14 +218,14 @@ def account_presentation_order(code: str) -> int:
     return SECTION_ORDER.get(prefix, 8) * 100000 + number
 
 
-def account_key_for_statement(item: dict) -> str:
+def account_key_for_statement(item: dict, alias_map: dict | None = None) -> str:
     """계정 행이 확정한 표준코드에서 계정키를 복원한다.
 
     담당자가 AI 제안을 승인해 재분류한 계정(예: 임차보증금 → F1000)은 계정명 키워드로는
     다시 찾을 수 없으므로, 저장된 standard_code를 우선하고 없을 때만 계정명 정규화로 보완한다.
     """
     code_to_key = {account["code"]: key for key, account in STANDARD_ACCOUNTS.items()}
-    return code_to_key.get(str(item.get("standard_code") or "")) or normalize_account_name(item["account_name"])
+    return code_to_key.get(str(item.get("standard_code") or "")) or normalize_account_name(item["account_name"], alias_map)
 
 
 # 표준 재무제표 양식 라인(계정 → 표시 라인 매핑)은 seeds/financial_statement_templates.sql이
@@ -599,66 +599,85 @@ def standards_paragraphs_for_accounts(account_keys) -> dict:
     return grouped
 
 
-def normalize_account_name(name: str) -> str:
+# K-GAAP 계정명 별칭 → 내부 표준계정 키. 이 사전이 kgaap_accounts 테이블의 시드 원천이며,
+# 런타임에는 DB에서 로드한 맵(load_account_alias_map)을 주입받아 사용한다(없으면 이 상수로 폴백).
+# 부분 문자열(in) 매칭이라 매칭 우선순위는 '긴 별칭 먼저'여야 한다. 예: "퇴직급여충당부채"가
+# "충당부채"보다, "금융상품"이 "상품"보다 먼저 검사되어야 오분류가 없다. 우선순위는 별칭 길이에서
+# 자동 도출하므로 아래 나열 순서를 사람이 맞출 필요가 없다.
+ACCOUNT_ALIASES = {
+    "현금및현금성자산": "cash",
+    "현금": "cash",
+    "cash": "cash",
+    "매출채권": "receivables",
+    "대손충당금": "receivables",
+    "미수금": "receivables",
+    "미수수익": "receivables",
+    "계약자산": "receivables",
+    "trade receivable": "receivables",
+    "금융자산": "financial_instrument",
+    "금융부채": "financial_instrument",
+    "금융상품": "financial_instrument",
+    "파생상품": "financial_instrument",
+    "전환사채": "financial_instrument",
+    "장기차입금": "financial_instrument",
+    "단기차입금": "financial_instrument",
+    "차입금": "financial_instrument",
+    "사채상환할증금": "financial_instrument",
+    "전환권조정": "financial_instrument",
+    "재고자산": "inventory",
+    "상품": "inventory",
+    "제품": "inventory",
+    "원재료": "inventory",
+    "inventory": "inventory",
+    "리스": "lease",
+    "사용권자산": "lease",
+    "리스부채": "lease",
+    "lease": "lease",
+    "개발비": "development",
+    "무형자산": "development",
+    "development": "development",
+    "매출액": "revenue",
+    "매출": "revenue",
+    "영업수익": "revenue",
+    "수익": "revenue",
+    "revenue": "revenue",
+    "퇴직급여충당부채": "retirement_benefit",
+    "확정급여채무": "retirement_benefit",
+    "순확정급여부채": "retirement_benefit",
+    "퇴직급여": "retirement_benefit",
+    "충당부채": "provision",
+    "provision": "provision",
+    "투자부동산": "investment_property",
+    "정부보조금": "government_grant",
+    "국고보조금": "government_grant",
+    "차입원가": "borrowing_cost",
+    "유형자산": "ppe",
+    "토지": "ppe",
+    "건물": "ppe",
+    "기계장치": "ppe",
+    "이연법인세자산": "deferred_tax_asset",
+    "이연법인세부채": "deferred_tax_liability",
+}
+
+
+def alias_match_priority(alias: str) -> int:
+    """부분 문자열 매칭 우선순위. 긴 별칭이 짧은 별칭보다 먼저 검사되도록 길이를 쓴다."""
+    return len(alias or "")
+
+
+def normalize_account_name(name: str, alias_map: dict | None = None) -> str:
+    """계정명을 내부 표준계정 키로 정규화한다.
+
+    alias_map(별칭 → 계정키)이 주어지면 그것을, 없으면 코드 상수 ACCOUNT_ALIASES를 사용한다.
+    긴 별칭부터 검사해 '금융상품 ⊃ 상품', '퇴직급여충당부채 ⊃ 충당부채' 같은 부분 문자열
+    충돌을 정확히 해결한다. domain.py가 DB를 직접 모르도록 맵을 인자로 주입받는다(순수 함수).
+    """
+    aliases = alias_map if alias_map is not None else ACCOUNT_ALIASES
     text = re.sub(r"\s+", " ", name.strip().lower())
-    replacements = {
-        "현금및현금성자산": "cash",
-        "현금": "cash",
-        "cash": "cash",
-        "매출채권": "receivables",
-        "대손충당금": "receivables",
-        "미수금": "receivables",
-        "미수수익": "receivables",
-        "계약자산": "receivables",
-        "trade receivable": "receivables",
-        "금융자산": "financial_instrument",
-        "금융부채": "financial_instrument",
-        "금융상품": "financial_instrument",
-        "파생상품": "financial_instrument",
-        "전환사채": "financial_instrument",
-        "장기차입금": "financial_instrument",
-        "단기차입금": "financial_instrument",
-        "차입금": "financial_instrument",
-        "사채상환할증금": "financial_instrument",
-        "전환권조정": "financial_instrument",
-        "재고자산": "inventory",
-        "상품": "inventory",
-        "제품": "inventory",
-        "원재료": "inventory",
-        "inventory": "inventory",
-        "리스": "lease",
-        "사용권자산": "lease",
-        "리스부채": "lease",
-        "lease": "lease",
-        "개발비": "development",
-        "무형자산": "development",
-        "development": "development",
-        "매출액": "revenue",
-        "매출": "revenue",
-        "영업수익": "revenue",
-        "수익": "revenue",
-        "revenue": "revenue",
-        "퇴직급여충당부채": "retirement_benefit",
-        "확정급여채무": "retirement_benefit",
-        "순확정급여부채": "retirement_benefit",
-        "퇴직급여": "retirement_benefit",
-        "충당부채": "provision",
-        "provision": "provision",
-        "투자부동산": "investment_property",
-        "정부보조금": "government_grant",
-        "국고보조금": "government_grant",
-        "차입원가": "borrowing_cost",
-        "유형자산": "ppe",
-        "토지": "ppe",
-        "건물": "ppe",
-        "기계장치": "ppe",
-        "이연법인세자산": "deferred_tax_asset",
-        "이연법인세부채": "deferred_tax_liability",
-    }
     compact = text.replace(" ", "")
-    for needle, account_key in replacements.items():
+    for needle in sorted(aliases, key=alias_match_priority, reverse=True):
         if needle in compact or needle in text:
-            return account_key
+            return aliases[needle]
     return "other"
 
 
@@ -700,8 +719,8 @@ def looks_numeric(value) -> bool:
         return False
     return bool(re.fullmatch(r"\(?-?[\d,]+(?:\.\d+)?\)?", text.replace(" ", "")))
 
-def build_statement_record(project_period: str, row: dict) -> dict:
-    account_key = normalize_account_name(row["account_name"])
+def build_statement_record(project_period: str, row: dict, alias_map: dict | None = None) -> dict:
+    account_key = normalize_account_name(row["account_name"], alias_map)
     mapping_source = "rule_based"
     ai_suggestion = row.get("ai_suggestion") or {}
     suggested_key = ai_suggestion.get("account_key")
@@ -886,18 +905,19 @@ def generate_conversion(
     responses: dict,
     templates: dict | None = None,
     standards_map: dict | None = None,
+    alias_map: dict | None = None,
 ) -> dict:
     templates = templates or {}
     if standards_map is None:
         standards_map = standards_paragraphs_for_accounts(
-            account_key_for_statement(item) for item in statements
+            account_key_for_statement(item, alias_map) for item in statements
         )
     entries = []
     notes = []
     judgment_items = []
 
     for item in statements:
-        account_key = account_key_for_statement(item)
+        account_key = account_key_for_statement(item, alias_map)
         standard = STANDARD_ACCOUNTS[account_key]
         checklist_response = responses.get(item["id"], {})
         entry = {

@@ -44,10 +44,12 @@ from gtf_app.dart import (
     normalize_dart_amount,
 )
 from gtf_app.domain import (
+    ACCOUNT_ALIASES,
     CHECKLISTS,
     STANDARD_ACCOUNTS,
     STANDARDS_PARAGRAPHS,
     account_presentation_order,
+    alias_match_priority,
     build_review_summary,
     build_statement_record,
     conversion_adjustments_csv,
@@ -238,6 +240,7 @@ def init_db() -> None:
             ensure_standards_paragraphs(conn)
             ensure_paragraph_embeddings(conn)
             ensure_reference_accounts(conn)
+            ensure_account_aliases(conn)
             ensure_statement_templates(conn)
             ensure_admin_user(conn)
         return
@@ -258,6 +261,7 @@ def init_db() -> None:
         ensure_standards_paragraphs(conn)
         ensure_paragraph_embeddings(conn)
         ensure_reference_accounts(conn)
+        ensure_account_aliases(conn)
         ensure_statement_templates(conn)
         ensure_admin_user(conn)
 
@@ -501,19 +505,53 @@ def ensure_statement_templates(conn) -> None:
     conn.execute(STATEMENT_TEMPLATES_SEED_PATH.read_text(encoding="utf-8"))
 
 
+def ensure_account_aliases(conn) -> None:
+    """계정명 별칭 사전(kgaap_accounts)을 domain.ACCOUNT_ALIASES 단일 출처에서 시드한다.
+
+    정규화(normalize_account_name)가 런타임에 load_account_alias_map으로 이 테이블을 읽는다.
+    match_priority(별칭 길이)를 저장해 '긴 별칭 먼저' 매칭 순서를 DB에서도 표현한다.
+    표준계정 FK를 참조하므로 ensure_reference_accounts 뒤에 호출해야 한다.
+    다른 테이블이 이 테이블을 참조하지 않으므로 전체 삭제 후 재삽입으로 코드와 일치시킨다.
+    """
+    if database_config()["backend"] == "postgres":
+        conn.execute("ALTER TABLE kgaap_accounts ADD COLUMN IF NOT EXISTS match_priority integer NOT NULL DEFAULT 0")
+    else:
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(kgaap_accounts)").fetchall()]
+        if "match_priority" not in columns:
+            conn.execute("ALTER TABLE kgaap_accounts ADD COLUMN match_priority INTEGER NOT NULL DEFAULT 0")
+    conn.execute("DELETE FROM kgaap_accounts")
+    for index, (alias, account_key) in enumerate(ACCOUNT_ALIASES.items(), start=1):
+        conn.execute(
+            """
+            INSERT INTO kgaap_accounts (id, account_key, kgaap_name, normalized_name, active, match_priority)
+            VALUES (?, ?, ?, ?, 1, ?)
+            """,
+            (f"alias_{index}", account_key, alias, STANDARD_ACCOUNTS[account_key]["label"], alias_match_priority(alias)),
+        )
+
+
+def load_account_alias_map(conn) -> dict:
+    """kgaap_accounts에서 별칭 → 계정키 맵을 매칭 우선순위(긴 별칭 먼저) 순으로 로드한다."""
+    rows = conn.execute(
+        "SELECT kgaap_name, account_key FROM kgaap_accounts WHERE active = true ORDER BY match_priority DESC, kgaap_name"
+    ).fetchall()
+    return {row_to_dict(row)["kgaap_name"]: row_to_dict(row)["account_key"] for row in rows}
+
+
+def sort_statements_by_code(statements: list[dict]) -> list[dict]:
+    """계정 행을 계정코드 기반 표시 순서(자산 → 부채 → 자본 → 손익)로 정렬한다.
+
+    SQL의 알파벳 정렬은 자본(E)이 부채(L)보다 앞서 어긋나므로 코드에서 도출한 순서로 정렬한다.
+    변환 결과(entries)와 동일한 기준이라 매핑 테이블·검토 화면·리포트가 같은 순서로 보인다.
+    """
+    return sorted(
+        statements,
+        key=lambda s: (account_presentation_order(str(s.get("standard_code") or "")), str(s.get("created_at") or "")),
+    )
+
+
 def seed_reference_data(conn: sqlite3.Connection) -> None:
     now = utc_now()
-    aliases = {
-        "cash": ["현금및현금성자산", "현금", "예금", "보통예금"],
-        "receivables": ["매출채권", "외상매출금", "받을어음"],
-        "inventory": ["재고자산", "상품", "제품", "원재료"],
-        "lease": ["리스부채", "사용권자산", "리스"],
-        "development": ["개발비", "개발원가", "무형자산개발비"],
-        "revenue": ["매출", "수익", "제품매출", "용역매출"],
-        "financial_instrument": ["전환사채", "금융상품", "파생상품", "상환전환우선주"],
-        "provision": ["충당부채", "판매보증충당부채", "복구충당부채"],
-        "other": ["미분류 계정"],
-    }
     standard_refs = {
         "cash": ("K-IFRS 제1007호", "현금및현금성자산", "사용 제한 여부와 현금성자산 요건을 확인합니다."),
         "receivables": ("K-IFRS 제1109호", "매출채권", "분류와 기대신용손실 충당금을 검토합니다."),
@@ -544,14 +582,8 @@ def seed_reference_data(conn: sqlite3.Connection) -> None:
                 now,
             ),
         )
-        for index, alias in enumerate(aliases.get(account_key, [account["label"]]), start=1):
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO kgaap_accounts (id, account_key, kgaap_name, normalized_name, active)
-                VALUES (?, ?, ?, ?, 1)
-                """,
-                (f"{account_key}_{index}", account_key, alias, account["label"]),
-            )
+        # kgaap_accounts(계정명 별칭) 시드는 ensure_account_aliases가 domain.ACCOUNT_ALIASES를
+        # 단일 출처로 담당한다. 여기서는 시드하지 않는다.
         ref_code, title, summary = standard_refs.get(
             account_key, (account["ifrs"], account["label"], account["rule"])
         )
@@ -2253,10 +2285,10 @@ class AppHandler(BaseHTTPRequestHandler):
             if not project:
                 self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
                 return
-            statements = [
+            statements = sort_statements_by_code([
                 dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
-                for row in conn.execute("SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,))
-            ]
+                for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
+            ])
             uploads = [
                 upload_public_dict(row)
                 for row in conn.execute("SELECT * FROM uploads WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
@@ -2631,7 +2663,8 @@ class AppHandler(BaseHTTPRequestHandler):
 
             rows = parse_json_field(extraction["rows_json"], [])
             rows, decision_summary = apply_ai_decisions(rows, ai_decisions)
-            records = [build_statement_record(project["period"], row) for row in rows]
+            alias_map = load_account_alias_map(conn)  # DB 별칭 사전으로 정규화
+            records = [build_statement_record(project["period"], row, alias_map) for row in rows]
             for record in records:
                 conn.execute(
                     """
@@ -2779,14 +2812,15 @@ class AppHandler(BaseHTTPRequestHandler):
             if not project_row:
                 self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
                 return
-            statement_rows = [
+            statement_rows = sort_statements_by_code([
                 dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
-                for row in conn.execute("SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,))
-            ]
+                for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
+            ])
             templates = load_statement_template_map(conn)
             standards_map = load_standards_paragraph_map(conn)
+            alias_map = load_account_alias_map(conn)
             project = row_to_dict(project_row)
-            output = generate_conversion(project, statement_rows, responses, templates, standards_map)
+            output = generate_conversion(project, statement_rows, responses, templates, standards_map, alias_map)
             # RAG: 판단 필요 항목마다 계정명·근거를 질의로 관련 기준서 문단을 시맨틱 검색해
             # AI 판단 보조의 근거(context)로 주입한다. 검색 결과는 조정 금액이 아니라 근거 설명에만 쓰인다.
             retrieved_context = []
@@ -2835,9 +2869,9 @@ class AppHandler(BaseHTTPRequestHandler):
             if not project:
                 self.respond_json({"error": "Project not found"}, HTTPStatus.NOT_FOUND)
                 return
-            statements = [row_to_dict(row) for row in conn.execute(
-                "SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,)
-            )]
+            statements = sort_statements_by_code([row_to_dict(row) for row in conn.execute(
+                "SELECT * FROM statements WHERE project_id = ?", (project_id,)
+            )])
             conversion_row = conn.execute(
                 "SELECT output_json FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
                 (project_id,),
@@ -2937,10 +2971,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 "SELECT output_json FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
                 (project_id,),
             ).fetchone()
-            statements = [
+            statements = sort_statements_by_code([
                 dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
-                for row in conn.execute("SELECT * FROM statements WHERE project_id = ? ORDER BY created_at", (project_id,))
-            ]
+                for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
+            ])
             latest_extraction = conn.execute(
                 """
                 SELECT e.rows_json, u.file_bytes
