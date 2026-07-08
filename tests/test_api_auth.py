@@ -17,6 +17,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import server
+from gtf_app.models import AppUser, Base
 
 
 class ApiAuthTests(unittest.TestCase):
@@ -91,8 +92,8 @@ class ApiAuthTests(unittest.TestCase):
         # demo@gtf.local은 admin_config가 항상 읽기 전용으로 강제하므로 별도 관리자로 재시드한다.
         os.environ["ADMIN_EMAIL"] = "admin@example.com"
         os.environ["ADMIN_PASSWORD"] = "write-pass"
-        with server.connect() as conn:
-            server.ensure_admin_user(conn)
+        with server.get_session() as session:
+            server.ensure_admin_user(session)
         self.login(email="admin@example.com", password="write-pass")
         response = self.client.post("/api/projects", json={"company_name": "테스트", "period": "2024"})
 
@@ -117,14 +118,14 @@ class ApiAuthTests(unittest.TestCase):
         self.client.post("/api/auth/logout")
         self.assertEqual(self.client.get("/api/projects").status_code, 401)
 
-    def test_sqlite_schema_is_loaded_from_separate_file(self):
-        schema = server.SQLITE_SCHEMA_PATH.read_text(encoding="utf-8")
-        self.assertIn("CREATE TABLE IF NOT EXISTS app_users", schema)
-        self.assertIn("is_read_only", schema)
-        with server.connect() as conn:
-            row = conn.execute("SELECT email, is_read_only FROM app_users WHERE id = ?", ("admin",)).fetchone()
-        self.assertEqual(row["email"], "demo@gtf.local")
-        self.assertEqual(int(row["is_read_only"]), 1)
+    def test_schema_comes_from_orm_models_and_admin_is_seeded(self):
+        # 스키마의 단일 출처는 ORM 모델(Base.metadata)이며, init_db가 create_all로 만든다.
+        self.assertIn("app_users", Base.metadata.tables)
+        self.assertIn("is_read_only", Base.metadata.tables["app_users"].columns)
+        with server.get_session() as session:
+            admin = session.get(AppUser, "admin")
+        self.assertEqual(admin.email, "demo@gtf.local")
+        self.assertTrue(admin.is_read_only)
 
 
 if __name__ == "__main__":

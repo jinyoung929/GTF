@@ -12,13 +12,14 @@ import mimetypes
 import os
 import re
 import secrets
-import sqlite3
 import uuid
 import zipfile
 from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path
 import xml.etree.ElementTree as ET
+from typing import Iterator
+
 import openai
 import requests
 import uvicorn
@@ -26,6 +27,31 @@ from fastapi import Body, Depends, FastAPI, File, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from openai import OpenAI
 from pydantic import BaseModel
+from sqlalchemy import delete, func, inspect, select, text, update
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from gtf_app.db import backend, create_db_engine, create_session_factory
+from gtf_app.models import (
+    AppUser,
+    AuditLog,
+    Base,
+    ChecklistItem,
+    Conversion,
+    Extraction,
+    FinancialStatementTemplate,
+    IfrsAccount,
+    KgaapAccount,
+    MappingRule,
+    Project,
+    Review,
+    StandardAccount,
+    StandardsParagraph,
+    StandardsReference,
+    Statement,
+    Upload,
+    UserSession,
+)
 
 from gtf_app.auth import (
     admin_config,
@@ -65,7 +91,6 @@ ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "gtf.sqlite3"
-SQLITE_SCHEMA_PATH = ROOT / "sqlite" / "schema.sql"
 SEED_DIR = ROOT / "seeds"
 STATEMENT_TEMPLATES_SEED_PATH = SEED_DIR / "financial_statement_templates.sql"
 FIGMA_DIST_DIR = ROOT / "figma_make" / "dist"
@@ -111,16 +136,17 @@ def utc_now() -> str:
 
 
 def database_config() -> dict:
-    backend = os.environ.get("DATABASE_BACKEND", "sqlite").strip().lower() or "sqlite"
+    """/healthz가 노출하는 DB 설정 요약 (실제 접속은 gtf_app/db.py의 엔진이 담당한다)."""
     database_url = os.environ.get("DATABASE_URL") or os.environ.get("NEON_DATABASE_URL") or ""
     postgres_driver_ready = importlib.util.find_spec("psycopg") is not None
+    current_backend = backend()
     return {
-        "backend": backend,
+        "backend": current_backend,
         "sqlite_path": str(DB_PATH),
         "sqlite_ready": DB_PATH.exists(),
         "database_url_ready": bool(database_url),
         "postgres_driver_ready": postgres_driver_ready,
-        "postgres_ready": backend == "postgres" and bool(database_url) and postgres_driver_ready,
+        "postgres_ready": current_backend == "postgres" and bool(database_url) and postgres_driver_ready,
     }
 
 
@@ -148,10 +174,10 @@ def parse_json_field(value, fallback):
     return value
 
 
-def upload_public_dict(row_or_upload) -> dict:
-    upload = row_to_dict(row_or_upload) if hasattr(row_or_upload, "keys") else dict(row_or_upload)
-    upload.pop("file_bytes", None)
-    upload["db_file_ready"] = bool(row_or_upload["file_bytes"]) if hasattr(row_or_upload, "keys") and "file_bytes" in row_or_upload.keys() else bool(row_or_upload.get("file_bytes"))
+def upload_public_dict(upload_or_dict) -> dict:
+    """업로드 응답에서 원본 바이트를 빼고, 파일이 DB에 있는지 여부만 노출한다."""
+    upload = dict(upload_or_dict) if isinstance(upload_or_dict, dict) else row_to_dict(upload_or_dict)
+    upload["db_file_ready"] = bool(upload.pop("file_bytes", None))
     return upload
 
 
@@ -167,57 +193,32 @@ def figma_static_file(path: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def postgres_param(value):
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.startswith("{") or stripped.startswith("["):
-            try:
-                from psycopg.types.json import Jsonb
-
-                return Jsonb(json.loads(stripped))
-            except (ImportError, json.JSONDecodeError):
-                return value
-    return value
+engine: Engine | None = None
+SessionLocal: sessionmaker[Session] | None = None
 
 
-class PostgresConnection:
-    def __init__(self, database_url: str):
-        import psycopg
-        from psycopg.rows import dict_row
+def configure_engine() -> Engine:
+    """현재 DB_PATH/환경변수로 엔진과 세션 팩토리를 (재)생성한다.
 
-        self.connection = psycopg.connect(database_url, row_factory=dict_row)
-
-    def __enter__(self):
-        self.connection.__enter__()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return self.connection.__exit__(exc_type, exc, tb)
-
-    def execute(self, sql: str, params: tuple | list = ()):
-        translated = sql.replace("?", "%s")
-        converted = tuple(postgres_param(value) for value in params)
-        cursor = self.connection.cursor()
-        cursor.execute(translated, converted)
-        return cursor
-
-    def executescript(self, _script: str):
-        raise RuntimeError("Postgres schema must be initialized with postgres/schema.sql before starting the app.")
+    테스트가 server.DB_PATH를 임시 경로로 바꾼 뒤 init_db()를 부르므로 재생성 가능해야 한다.
+    """
+    global engine, SessionLocal
+    engine = create_db_engine(DB_PATH)
+    SessionLocal = create_session_factory(engine)
+    return engine
 
 
-def connect():
-    config = database_config()
-    if config["backend"] == "postgres":
-        if not config["database_url_ready"]:
-            raise RuntimeError("DATABASE_BACKEND=postgres requires DATABASE_URL or NEON_DATABASE_URL.")
-        if not config["postgres_driver_ready"]:
-            raise RuntimeError("DATABASE_BACKEND=postgres requires psycopg. Run pip install -r requirements.txt.")
-        return PostgresConnection(os.environ.get("DATABASE_URL") or os.environ.get("NEON_DATABASE_URL") or "")
-    if config["backend"] != "sqlite":
-        raise RuntimeError(f"Unsupported DATABASE_BACKEND: {config['backend']}")
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def get_session() -> Session:
+    """세션 하나를 연다. 스크립트·시드 등 FastAPI 밖에서 쓴다."""
+    if SessionLocal is None:
+        configure_engine()
+    return SessionLocal()
+
+
+def get_db() -> Iterator[Session]:
+    """FastAPI 의존성: 요청마다 세션을 열고 끝나면 닫는다."""
+    with get_session() as session:
+        yield session
 
 
 # 기준정보(계정·별칭·체크리스트·양식·문단)를 DB에서 한 번 로드해 두는 서버 캐시.
@@ -226,14 +227,14 @@ def connect():
 REFERENCE = ReferenceData()
 
 
-def refresh_reference_cache(conn) -> ReferenceData:
+def refresh_reference_cache(session: Session) -> ReferenceData:
     """DB 기준정보를 로드해 계약을 검증하고 전역 REFERENCE 캐시를 갱신한다.
 
     계산기가 요구하는 계정키·체크리스트 키가 SQL 시드에 빠져 있으면(조정=0 무증상 버그)
     여기서 RuntimeError로 서버 시작을 실패시킨다.
     """
     global REFERENCE
-    ref = load_reference_data(conn)
+    ref = load_reference_data(session)
     errors = verify_reference_contract(ref)
     if errors:
         raise RuntimeError(
@@ -243,185 +244,147 @@ def refresh_reference_cache(conn) -> ReferenceData:
     return ref
 
 
+def migrate_legacy_columns(session: Session) -> None:
+    """기존 배포 DB에 없던 컬럼을 추가한다 (새 DB는 create_all이 이미 만들었다)."""
+    existing = {column["name"] for column in inspect(session.bind).get_columns("standards_paragraphs")}
+    is_postgres = backend() == "postgres"
+    if "embedding" not in existing:
+        session.execute(text("ALTER TABLE standards_paragraphs ADD COLUMN embedding text"))
+    if "content_hash" not in existing:
+        session.execute(text("ALTER TABLE standards_paragraphs ADD COLUMN content_hash text"))
+    alias_columns = {column["name"] for column in inspect(session.bind).get_columns("kgaap_accounts")}
+    if "match_priority" not in alias_columns:
+        default = "integer NOT NULL DEFAULT 0" if is_postgres else "INTEGER NOT NULL DEFAULT 0"
+        session.execute(text(f"ALTER TABLE kgaap_accounts ADD COLUMN match_priority {default}"))
+    session.commit()
+
+
 def init_db() -> None:
+    """스키마 생성 → 기준정보 시드 → 계약 검증. 두 백엔드가 같은 경로를 탄다."""
     DATA_DIR.mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(exist_ok=True)
-    if database_config()["backend"] == "postgres":
-        with connect() as conn:
-            conn.execute("SELECT 1")
-            conn.execute("ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_user_id text")
-            conn.execute("ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_test boolean NOT NULL DEFAULT false")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_owner_created_at ON projects(owner_user_id, created_at DESC)")
-            conn.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_bytes bytea")
-            ensure_auth_tables(conn)
-            conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_read_only boolean NOT NULL DEFAULT false")
-            # FK 순서: 표준계정(부모) → 체크리스트·별칭·양식(자식) → 문단 → 임베딩
-            ensure_reference_accounts(conn)
-            ensure_checklist_items(conn)
-            ensure_account_aliases(conn)
-            ensure_statement_templates(conn)
-            ensure_standards_paragraphs(conn)
-            ensure_paragraph_embeddings(conn)
-            ensure_admin_user(conn)
-            refresh_reference_cache(conn)  # 기준정보 캐시 채우기 + 계약 검증(실패 시 시작 중단)
-        return
-    with connect() as conn:
-        conn.executescript(SQLITE_SCHEMA_PATH.read_text(encoding="utf-8"))
-        user_columns = [row["name"] for row in conn.execute("PRAGMA table_info(app_users)").fetchall()]
-        if "is_read_only" not in user_columns:
-            conn.execute("ALTER TABLE app_users ADD COLUMN is_read_only INTEGER NOT NULL DEFAULT 0")
-        upload_columns = [row["name"] for row in conn.execute("PRAGMA table_info(uploads)").fetchall()]
-        if "file_bytes" not in upload_columns:
-            conn.execute("ALTER TABLE uploads ADD COLUMN file_bytes BLOB")
-        project_columns = [row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()]
-        if "owner_user_id" not in project_columns:
-            conn.execute("ALTER TABLE projects ADD COLUMN owner_user_id TEXT")
-        if "is_test" not in project_columns:
-            conn.execute("ALTER TABLE projects ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
+    db_engine = configure_engine()
+    Base.metadata.create_all(db_engine)  # ORM 모델이 스키마의 단일 출처
+    with get_session() as session:
+        migrate_legacy_columns(session)
         # FK 순서: 표준계정(부모) → 체크리스트·별칭·양식(자식) → 문단 → 임베딩.
         # seed_reference_data(보조 조회 테이블)는 위 핵심 테이블을 읽으므로 반드시 뒤에 온다.
-        ensure_reference_accounts(conn)
-        ensure_checklist_items(conn)
-        ensure_account_aliases(conn)
-        ensure_statement_templates(conn)
-        ensure_standards_paragraphs(conn)
-        ensure_paragraph_embeddings(conn)
-        seed_reference_data(conn)
-        ensure_admin_user(conn)
-        refresh_reference_cache(conn)  # 기준정보 캐시 채우기 + 계약 검증(실패 시 시작 중단)
+        ensure_reference_accounts(session)
+        ensure_checklist_items(session)
+        ensure_account_aliases(session)
+        ensure_statement_templates(session)
+        ensure_standards_paragraphs(session)
+        ensure_paragraph_embeddings(session)
+        seed_reference_data(session)
+        ensure_admin_user(session)
+        session.commit()
+        refresh_reference_cache(session)  # 기준정보 캐시 채우기 + 계약 검증(실패 시 시작 중단)
 
 
-def ensure_standards_paragraphs(conn) -> None:
+PARAGRAPH_PUBLIC_COLUMNS = (
+    StandardsParagraph.id,
+    StandardsParagraph.standard_set,
+    StandardsParagraph.reference_code,
+    StandardsParagraph.paragraph_label,
+    StandardsParagraph.account_key,
+    StandardsParagraph.title,
+    StandardsParagraph.content,
+    StandardsParagraph.keywords,
+)
+
+
+def ensure_standards_paragraphs(session: Session) -> None:
     """기준서 문단을 seeds/standards_paragraphs.sql(단일 출처)에서 upsert한다.
 
     upsert(ON CONFLICT DO UPDATE)로 멱등성을 지키면서 embedding을 보존하고, content_hash가
     바뀐 행만 embedding을 비워 재임베딩 대상으로 표시한다. SQL 시드가 content와 content_hash를
     함께 제공하므로(gen_seeds로 일관 생성), 내용이 바뀌면 hash도 바뀌어 재임베딩이 트리거된다.
     """
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS standards_paragraphs (
-            id TEXT PRIMARY KEY,
-            standard_set TEXT NOT NULL,
-            reference_code TEXT NOT NULL,
-            paragraph_label TEXT NOT NULL,
-            account_key TEXT NOT NULL,
-            title TEXT NOT NULL,
-            content TEXT NOT NULL,
-            keywords TEXT NOT NULL,
-            embedding TEXT,
-            content_hash TEXT
-        )
-        """
-    )
-    # 기존 배포 테이블에는 두 컬럼이 없으므로 백엔드별 안전 마이그레이션을 먼저 수행한다.
-    if database_config()["backend"] == "postgres":
-        conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN IF NOT EXISTS embedding text")
-        conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN IF NOT EXISTS content_hash text")
-    else:
-        columns = [row["name"] for row in conn.execute("PRAGMA table_info(standards_paragraphs)").fetchall()]
-        if "embedding" not in columns:
-            conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN embedding TEXT")
-        if "content_hash" not in columns:
-            conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN content_hash TEXT")
-
     # 시드 실행 전 기존 해시를 기록해두고, 시드 후 해시가 바뀐 문단만 embedding을 비운다.
-    before = {row_to_dict(r)["id"]: row_to_dict(r)["content_hash"]
-              for r in conn.execute("SELECT id, content_hash FROM standards_paragraphs")}
+    before = dict(session.execute(select(StandardsParagraph.id, StandardsParagraph.content_hash)).all())
     # 시드 SQL은 embedding 컬럼을 건드리지 않으므로 기존 임베딩은 보존된다.
-    run_seed(conn, "standards_paragraphs")
-    for r in conn.execute("SELECT id, content_hash FROM standards_paragraphs"):
-        d = row_to_dict(r)
-        if before.get(d["id"]) != d["content_hash"]:
-            conn.execute("UPDATE standards_paragraphs SET embedding = NULL WHERE id = ?", (d["id"],))
+    run_seed(session, "standards_paragraphs")
+    for paragraph_id, content_hash in session.execute(
+        select(StandardsParagraph.id, StandardsParagraph.content_hash)
+    ).all():
+        if before.get(paragraph_id) != content_hash:
+            session.execute(
+                update(StandardsParagraph).where(StandardsParagraph.id == paragraph_id).values(embedding=None)
+            )
+    session.commit()
 
 
-def find_standards_paragraphs(conn, account_key: str | None = None, query: str | None = None, standard_set: str | None = None) -> list[dict]:
-    sql = (
-        "SELECT id, standard_set, reference_code, paragraph_label, account_key, title, content, keywords "
-        "FROM standards_paragraphs WHERE 1=1"
-    )
-    params: list = []
+def find_standards_paragraphs(
+    session: Session, account_key: str | None = None, query: str | None = None, standard_set: str | None = None
+) -> list[dict]:
+    stmt = select(*PARAGRAPH_PUBLIC_COLUMNS)
     if account_key:
-        sql += " AND account_key = ?"
-        params.append(account_key)
+        stmt = stmt.where(StandardsParagraph.account_key == account_key)
     if standard_set:
-        sql += " AND standard_set = ?"
-        params.append(standard_set)
+        stmt = stmt.where(StandardsParagraph.standard_set == standard_set)
     if query:
         like = f"%{query.strip()}%"
-        sql += " AND (title LIKE ? OR content LIKE ? OR keywords LIKE ? OR reference_code LIKE ?)"
-        params.extend([like, like, like, like])
-    sql += " ORDER BY account_key, standard_set, reference_code, paragraph_label"
-    return [row_to_dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
+        stmt = stmt.where(
+            StandardsParagraph.title.like(like)
+            | StandardsParagraph.content.like(like)
+            | StandardsParagraph.keywords.like(like)
+            | StandardsParagraph.reference_code.like(like)
+        )
+    stmt = stmt.order_by(
+        StandardsParagraph.account_key,
+        StandardsParagraph.standard_set,
+        StandardsParagraph.reference_code,
+        StandardsParagraph.paragraph_label,
+    )
+    return [dict(row._mapping) for row in session.execute(stmt).all()]
 
 
-def load_standards_paragraph_map(conn) -> dict:
+def load_standards_paragraph_map(session: Session) -> dict:
     grouped: dict[str, list[dict]] = {}
-    for row in find_standards_paragraphs(conn):
+    for row in find_standards_paragraphs(session):
         grouped.setdefault(row["account_key"], []).append(row)
     return grouped
 
 
-def ensure_auth_tables(conn) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS app_users (
-            id TEXT PRIMARY KEY,
-            email TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            is_read_only BOOLEAN NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_sessions (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            token_hash TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES app_users(id)
-        )
-        """
-    )
-
-
-def ensure_admin_user(conn) -> None:
+def ensure_admin_user(session: Session) -> None:
+    """ADMIN_EMAIL/ADMIN_PASSWORD가 설정되어 있으면 관리자 계정을 시드·갱신한다."""
     config = admin_config()
     if not config["configured"]:
         return
-    now = utc_now()
-    row = conn.execute("SELECT id FROM app_users WHERE id = ?", (ADMIN_USER_ID,)).fetchone()
     password_hash = hash_password(os.environ.get("ADMIN_PASSWORD") or os.environ.get("GTF_ADMIN_PASSWORD") or "")
     read_only = bool(config["read_only"])
-    if row:
-        conflicting = conn.execute(
-            "SELECT id FROM app_users WHERE email = ? AND id != ?",
-            (config["email"], ADMIN_USER_ID),
-        ).fetchone()
+
+    admin = session.get(AppUser, ADMIN_USER_ID)
+    if admin:
+        # 같은 이메일을 쓰는 다른 계정이 있으면 UNIQUE 제약에 걸리므로 먼저 정리한다.
+        conflicting = session.scalar(
+            select(AppUser).where(AppUser.email == config["email"], AppUser.id != ADMIN_USER_ID)
+        )
         if conflicting:
-            conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (conflicting["id"],))
-            conn.execute("DELETE FROM app_users WHERE id = ?", (conflicting["id"],))
-        conn.execute(
-            "UPDATE app_users SET email = ?, password_hash = ?, is_read_only = ? WHERE id = ?",
-            (config["email"], password_hash, read_only, ADMIN_USER_ID),
-        )
+            session.execute(delete(UserSession).where(UserSession.user_id == conflicting.id))
+            session.delete(conflicting)
+            session.flush()
+        admin.email = config["email"]
+        admin.password_hash = password_hash
+        admin.is_read_only = read_only
+        session.commit()
         return
-    existing = conn.execute("SELECT id FROM app_users WHERE email = ?", (config["email"],)).fetchone()
+
+    existing = session.scalar(select(AppUser).where(AppUser.email == config["email"]))
     if existing:
-        conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (existing["id"],))
-        conn.execute(
-            "UPDATE app_users SET id = ?, password_hash = ?, is_read_only = ? WHERE email = ?",
-            (ADMIN_USER_ID, password_hash, read_only, config["email"]),
+        session.execute(delete(UserSession).where(UserSession.user_id == existing.id))
+        session.delete(existing)
+        session.flush()
+    session.add(
+        AppUser(
+            id=ADMIN_USER_ID,
+            email=config["email"],
+            password_hash=password_hash,
+            is_read_only=read_only,
+            created_at=utc_now(),
         )
-        return
-    conn.execute(
-        "INSERT INTO app_users (id, email, password_hash, is_read_only, created_at) VALUES (?, ?, ?, ?, ?)",
-        (ADMIN_USER_ID, config["email"], password_hash, read_only, now),
     )
+    session.commit()
 
 
 def demo_config() -> dict:
@@ -432,103 +395,107 @@ def demo_config() -> dict:
     return {"enabled": enabled, "email": email, "password": password}
 
 
-def ensure_demo_user(conn) -> dict | None:
+def ensure_demo_user(session: Session) -> dict | None:
+    """데모(읽기 전용) 계정을 시드하고 공개용 dict로 돌려준다."""
     config = demo_config()
     if not config["enabled"] or not config["email"]:
         return None
-    now = utc_now()
     password_hash = hash_password(config["password"])
-    row = conn.execute("SELECT * FROM app_users WHERE email = ?", (config["email"],)).fetchone()
-    if row:
-        conn.execute(
-            "UPDATE app_users SET password_hash = ?, is_read_only = ? WHERE id = ?",
-            (password_hash, True, row["id"]),
+    user = session.scalar(select(AppUser).where(AppUser.email == config["email"]))
+    if user:
+        user.password_hash = password_hash
+        user.is_read_only = True
+    else:
+        user = AppUser(
+            id=DEMO_USER_ID,
+            email=config["email"],
+            password_hash=password_hash,
+            is_read_only=True,
+            created_at=utc_now(),
         )
-        return row_to_dict(conn.execute("SELECT * FROM app_users WHERE id = ?", (row["id"],)).fetchone())
-    conn.execute(
-        "INSERT INTO app_users (id, email, password_hash, is_read_only, created_at) VALUES (?, ?, ?, ?, ?)",
-        (DEMO_USER_ID, config["email"], password_hash, True, now),
-    )
-    return row_to_dict(conn.execute("SELECT * FROM app_users WHERE id = ?", (DEMO_USER_ID,)).fetchone())
+        session.add(user)
+    session.commit()
+    return row_to_dict(user)
 
 
-def run_seed(conn, name: str) -> None:
+def run_seed(session: Session, name: str) -> None:
     """seeds/<name>.sql(SQLite/Postgres 공통 upsert 단일 문장)을 실행한다."""
-    conn.execute((SEED_DIR / f"{name}.sql").read_text(encoding="utf-8"))
+    session.execute(text((SEED_DIR / f"{name}.sql").read_text(encoding="utf-8")))
 
 
-def ensure_reference_accounts(conn) -> None:
+def ensure_reference_accounts(session: Session) -> None:
     """표준계정을 seeds/standard_accounts.sql(단일 출처)에서 upsert한다.
 
     표준양식 라인·체크리스트·별칭 시드가 account_key 외래키를 참조하므로 먼저 실행되어야 한다.
     upsert라 재배포만으로 계정 카탈로그 확장이 라이브 DB에 반영된다.
     """
-    run_seed(conn, "standard_accounts")
+    run_seed(session, "standard_accounts")
+    session.commit()
 
 
-def ensure_checklist_items(conn) -> None:
+def ensure_checklist_items(session: Session) -> None:
     """판단 체크리스트 항목을 seeds/checklist_items.sql(단일 출처)에서 시드한다.
 
     다른 테이블이 참조하지 않으므로 전체 삭제 후 재삽입으로 코드와 일치시킨다.
     """
-    conn.execute("DELETE FROM checklist_items")
-    run_seed(conn, "checklist_items")
+    session.execute(delete(ChecklistItem))
+    run_seed(session, "checklist_items")
+    session.commit()
 
 
-def ensure_statement_templates(conn) -> None:
+def ensure_statement_templates(session: Session) -> None:
     """표준 재무제표 양식 라인 기준 테이블을 SQL 시드 파일(단일 출처)에서 upsert한다."""
-    run_seed(conn, "financial_statement_templates")
+    run_seed(session, "financial_statement_templates")
+    session.commit()
 
 
-def ensure_account_aliases(conn) -> None:
+def ensure_account_aliases(session: Session) -> None:
     """계정명 별칭 사전(kgaap_accounts)을 seeds/kgaap_accounts.sql(단일 출처)에서 시드한다.
 
     match_priority(별칭 길이)로 '긴 별칭 먼저' 매칭 순서를 DB에 표현한다. 표준계정 FK를
     참조하므로 ensure_reference_accounts 뒤에 호출해야 한다. 옛 형식 id를 남기지 않도록
     전체 삭제 후 재삽입한다(참조하는 테이블 없음).
     """
-    if database_config()["backend"] == "postgres":
-        conn.execute("ALTER TABLE kgaap_accounts ADD COLUMN IF NOT EXISTS match_priority integer NOT NULL DEFAULT 0")
-    else:
-        columns = [row["name"] for row in conn.execute("PRAGMA table_info(kgaap_accounts)").fetchall()]
-        if "match_priority" not in columns:
-            conn.execute("ALTER TABLE kgaap_accounts ADD COLUMN match_priority INTEGER NOT NULL DEFAULT 0")
-    conn.execute("DELETE FROM kgaap_accounts")
-    run_seed(conn, "kgaap_accounts")
+    session.execute(delete(KgaapAccount))
+    run_seed(session, "kgaap_accounts")
+    session.commit()
 
 
-def load_account_alias_map(conn) -> dict:
+def load_account_alias_map(session: Session) -> dict:
     """kgaap_accounts에서 별칭 → 계정키 맵을 매칭 우선순위(긴 별칭 먼저) 순으로 로드한다."""
-    rows = conn.execute(
-        "SELECT kgaap_name, account_key FROM kgaap_accounts WHERE active = true ORDER BY match_priority DESC, kgaap_name"
-    ).fetchall()
-    return {row_to_dict(row)["kgaap_name"]: row_to_dict(row)["account_key"] for row in rows}
+    rows = session.execute(
+        select(KgaapAccount.kgaap_name, KgaapAccount.account_key)
+        .where(KgaapAccount.active.is_(True))
+        .order_by(KgaapAccount.match_priority.desc(), KgaapAccount.kgaap_name)
+    ).all()
+    return {name: account_key for name, account_key in rows}
 
 
-def load_reference_data(conn) -> ReferenceData:
+def load_reference_data(session: Session) -> ReferenceData:
     """DB 기준정보 테이블을 읽어 domain에 주입할 ReferenceData로 묶는다 (코드에 하드코딩 없음)."""
     accounts = {
-        row_to_dict(r)["account_key"]: {
-            "code": row_to_dict(r)["standard_code"],
-            "label": row_to_dict(r)["internal_label"],
-            "ifrs": row_to_dict(r)["ifrs_account"],
-            "type": row_to_dict(r)["mapping_type"],
-            "rule": row_to_dict(r)["rule_summary"],
+        account.account_key: {
+            "code": account.standard_code,
+            "label": account.internal_label,
+            "ifrs": account.ifrs_account,
+            "type": account.mapping_type,
+            "rule": account.rule_summary,
         }
-        for r in conn.execute("SELECT * FROM standard_accounts")
+        for account in session.scalars(select(StandardAccount))
     }
     checklists: dict[str, list] = {}
-    for r in conn.execute("SELECT * FROM checklist_items ORDER BY account_key, display_order"):
-        d = row_to_dict(r)
-        checklists.setdefault(d["account_key"], []).append(
-            {"key": d["item_key"], "label": d["label"], "type": d["input_type"], "required": bool(d["required"])}
+    for item in session.scalars(
+        select(ChecklistItem).order_by(ChecklistItem.account_key, ChecklistItem.display_order)
+    ):
+        checklists.setdefault(item.account_key, []).append(
+            {"key": item.item_key, "label": item.label, "type": item.input_type, "required": bool(item.required)}
         )
     return ReferenceData(
         accounts=accounts,
-        aliases=load_account_alias_map(conn),
+        aliases=load_account_alias_map(session),
         checklists=checklists,
-        templates=load_statement_template_map(conn),
-        paragraphs=load_standards_paragraph_map(conn),
+        templates=load_statement_template_map(session),
+        paragraphs=load_standards_paragraph_map(session),
     )
 
 
@@ -544,85 +511,92 @@ def sort_statements_by_code(statements: list[dict]) -> list[dict]:
     )
 
 
-def seed_reference_data(conn: sqlite3.Connection) -> None:
+def seed_reference_data(session: Session) -> None:
     """조회용 보조 기준정보 테이블(ifrs_accounts / mapping_rules / standards_references)을 채운다.
 
     핵심 기준정보(표준계정·체크리스트·별칭·양식라인·문단)는 seeds/*.sql이 단일 출처이며 별도
     ensure_* 함수가 시드한다. 여기서는 그 결과(DB의 standard_accounts / checklist_items)를 읽어
     기준정보 화면의 요약 카운트용 보조 테이블만 파생 생성한다(코드에 하드코딩된 데이터 없음).
-    SQLite 전용 문법(INSERT OR REPLACE)이므로 SQLite 경로에서만 호출된다.
+    session.merge가 upsert 역할을 하므로 SQLite/Postgres 양쪽에서 동일하게 동작한다.
     """
-    accounts = [row_to_dict(r) for r in conn.execute("SELECT * FROM standard_accounts")]
     checklist_by_account: dict[str, list] = {}
-    for r in conn.execute("SELECT * FROM checklist_items ORDER BY account_key, display_order"):
-        d = row_to_dict(r)
-        checklist_by_account.setdefault(d["account_key"], []).append(
-            {"key": d["item_key"], "label": d["label"], "type": d["input_type"], "required": bool(d["required"])}
+    for item in session.scalars(
+        select(ChecklistItem).order_by(ChecklistItem.account_key, ChecklistItem.display_order)
+    ):
+        checklist_by_account.setdefault(item.account_key, []).append(
+            {"key": item.item_key, "label": item.label, "type": item.input_type, "required": bool(item.required)}
         )
 
-    for account in accounts:
-        key = account["account_key"]
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO ifrs_accounts (
-                id, account_key, ifrs_name, standard_ref, recognition_summary,
-                measurement_summary, disclosure_summary, active
+    for account in session.scalars(select(StandardAccount)).all():
+        key = account.account_key
+        session.merge(
+            IfrsAccount(
+                id=key,
+                account_key=key,
+                ifrs_name=account.ifrs_account,
+                standard_ref=account.rule_summary,
+                recognition_summary=account.rule_summary,
+                measurement_summary=account.rule_summary,
+                disclosure_summary="검토 결과와 주요 판단 근거를 주석 초안에 반영합니다.",
+                active=True,
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-            """,
-            (
-                key, key, account["ifrs_account"], account["rule_summary"],
-                account["rule_summary"], account["rule_summary"],
-                "검토 결과와 주요 판단 근거를 주석 초안에 반영합니다.",
-            ),
         )
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO mapping_rules (
-                id, account_key, source_standard, target_standard, mapping_type,
-                rule_summary, checklist_json, active, updated_at
+        session.merge(
+            MappingRule(
+                id=f"{key}_kgaap_ifrs",
+                account_key=key,
+                source_standard="K-GAAP",
+                target_standard="IFRS",
+                mapping_type=account.mapping_type,
+                rule_summary=account.rule_summary,
+                checklist_json=json.dumps(checklist_by_account.get(key, []), ensure_ascii=False),
+                active=True,
+                updated_at=utc_now(),
             )
-            VALUES (?, ?, 'K-GAAP', 'IFRS', ?, ?, ?, 1, ?)
-            """,
-            (
-                f"{key}_kgaap_ifrs", key, account["mapping_type"], account["rule_summary"],
-                json.dumps(checklist_by_account.get(key, []), ensure_ascii=False), utc_now(),
-            ),
         )
 
-    references = sorted({p["reference_code"] for p in
-                         (row_to_dict(r) for r in conn.execute("SELECT reference_code FROM standards_paragraphs"))})
-    for ref in references:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO standards_references (id, standard_set, reference_code, title, summary)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (ref.lower().replace(" ", "_").replace(".", ""), "K-IFRS", ref, ref,
-             "기준서 원문 연결 전까지 요약 기준정보로 사용합니다."),
+    for reference_code in sorted(set(session.scalars(select(StandardsParagraph.reference_code)))):
+        session.merge(
+            StandardsReference(
+                id=reference_code.lower().replace(" ", "_").replace(".", ""),
+                standard_set="K-IFRS",
+                reference_code=reference_code,
+                title=reference_code,
+                summary="기준서 원문 연결 전까지 요약 기준정보로 사용합니다.",
+            )
         )
+    session.commit()
 
 
-def row_to_dict(row) -> dict:
-    return {key: normalize_db_value(row[key]) for key in row.keys()}
+def row_to_dict(obj) -> dict:
+    """ORM 인스턴스나 Row를 평범한 dict로 바꾼다 (JSON 응답용)."""
+    if obj is None:
+        return {}
+    if hasattr(obj, "_mapping"):  # SQLAlchemy Row
+        return {key: normalize_db_value(value) for key, value in obj._mapping.items()}
+    mapper = inspect(type(obj))
+    return {column.key: normalize_db_value(getattr(obj, column.key)) for column in mapper.column_attrs}
 
 
 def database_ready() -> bool:
     try:
-        with connect() as conn:
-            conn.execute("SELECT 1")
+        with get_session() as session:
+            session.execute(text("SELECT 1"))
         return True
     except Exception:
         return False
 
 
-def log_event(conn: sqlite3.Connection, project_id: str, event_type: str, detail: dict, actor: str = "system") -> None:
-    conn.execute(
-        """
-        INSERT INTO audit_logs (id, project_id, event_type, actor, detail_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (str(uuid.uuid4()), project_id, event_type, actor, json.dumps(detail, ensure_ascii=False), utc_now()),
+def log_event(session: Session, project_id: str, event_type: str, detail: dict, actor: str = "system") -> None:
+    session.add(
+        AuditLog(
+            id=str(uuid.uuid4()),
+            project_id=project_id,
+            event_type=event_type,
+            actor=actor,
+            detail_json=json.dumps(detail, ensure_ascii=False),
+            created_at=utc_now(),
+        )
     )
 
 
@@ -1021,7 +995,7 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def ensure_paragraph_embeddings(conn) -> None:
+def ensure_paragraph_embeddings(session: Session) -> None:
     """기준서 문단을 OpenAI 임베딩으로 변환해 embedding 컬럼(이식형 JSON)에 저장한다 (RAG 검색용).
 
     pgvector 확장 대신 이식 가능한 텍스트 컬럼에 벡터를 저장하고 검색은 앱에서 코사인으로 수행한다.
@@ -1032,27 +1006,34 @@ def ensure_paragraph_embeddings(conn) -> None:
     OPENAI_API_KEY가 없거나 호출이 실패하면 임베딩을 비워 두고 키워드 검색으로 폴백하며,
     서버 시작을 막지 않도록 실패를 조용히 무시한다.
     """
-    rows = [
-        row_to_dict(row)
-        for row in conn.execute(
-            "SELECT id, reference_code, title, content FROM standards_paragraphs "
-            "WHERE embedding IS NULL ORDER BY id"
-        ).fetchall()
-    ]
+    rows = session.execute(
+        select(
+            StandardsParagraph.id,
+            StandardsParagraph.reference_code,
+            StandardsParagraph.title,
+            StandardsParagraph.content,
+        )
+        .where(StandardsParagraph.embedding.is_(None))
+        .order_by(StandardsParagraph.id)
+    ).all()
     if not rows:
         return  # 재임베딩할 문단이 없음 → OpenAI 호출 0회
-    texts = [f"{row['reference_code']} {row['title']} {row['content']}" for row in rows]
+    texts = [f"{reference_code} {title} {content}" for _id, reference_code, title, content in rows]
     vectors = openai_embed(texts)
     if not vectors:
         return
-    for row, vector in zip(rows, vectors):
-        conn.execute(
-            "UPDATE standards_paragraphs SET embedding = ? WHERE id = ?",
-            (json.dumps(vector), row["id"]),
+    for (paragraph_id, *_), vector in zip(rows, vectors):
+        session.execute(
+            update(StandardsParagraph)
+            .where(StandardsParagraph.id == paragraph_id)
+            .values(embedding=json.dumps(vector))
         )
+    session.commit()
 
 
-def semantic_search_paragraphs(conn, query: str, account_key: str | None = None, standard_set: str | None = None, k: int = 5) -> list[dict]:
+def semantic_search_paragraphs(
+    session: Session, query: str, account_key: str | None = None, standard_set: str | None = None, k: int = 5
+) -> list[dict]:
     """질의를 임베딩해 코사인 유사도로 기준서 문단을 검색한다 (RAG 검색 단계).
 
     임베딩이 없으면(키 미설정·미생성) 키워드 LIKE 검색으로 폴백한다.
@@ -1065,12 +1046,12 @@ def semantic_search_paragraphs(conn, query: str, account_key: str | None = None,
             token = (token or "").strip()
             if not token:
                 continue
-            for row in find_standards_paragraphs(conn, account_key=account_key, query=token, standard_set=standard_set):
+            for row in find_standards_paragraphs(session, account_key=account_key, query=token, standard_set=standard_set):
                 seen.setdefault(row["id"], dict(row, retrieval="keyword"))
             if len(seen) >= k:
                 break
         if not seen and not query:
-            for row in find_standards_paragraphs(conn, account_key=account_key, standard_set=standard_set):
+            for row in find_standards_paragraphs(session, account_key=account_key, standard_set=standard_set):
                 seen.setdefault(row["id"], dict(row, retrieval="keyword"))
         return list(seen.values())[:k]
 
@@ -1079,21 +1060,15 @@ def semantic_search_paragraphs(conn, query: str, account_key: str | None = None,
         return keyword_fallback()
     query_vector = query_vectors[0]
 
-    sql = (
-        "SELECT id, standard_set, reference_code, paragraph_label, account_key, title, content, keywords, embedding "
-        "FROM standards_paragraphs WHERE 1=1"
-    )
-    params: list = []
+    stmt = select(*PARAGRAPH_PUBLIC_COLUMNS, StandardsParagraph.embedding)
     if account_key:
-        sql += " AND account_key = ?"
-        params.append(account_key)
+        stmt = stmt.where(StandardsParagraph.account_key == account_key)
     if standard_set:
-        sql += " AND standard_set = ?"
-        params.append(standard_set)
+        stmt = stmt.where(StandardsParagraph.standard_set == standard_set)
 
     scored: list[tuple[float, dict]] = []
-    for row in conn.execute(sql, tuple(params)).fetchall():
-        para = row_to_dict(row)
+    for row in session.execute(stmt).all():
+        para = dict(row._mapping)
         embedding = para.pop("embedding", None)
         if not embedding:
             continue
@@ -1659,17 +1634,21 @@ def extract_rows_from_upload(upload: dict) -> tuple[list[dict], list[str], str]:
     return sample_rows, issues, "ocr_placeholder"
 
 
-def load_statement_template_map(conn) -> dict:
-    rows = conn.execute(
-        """
-        SELECT account_key, statement_type, section, line_item, display_order, basis
-        FROM financial_statement_templates
-        WHERE standard_set = ? AND active = true
-        ORDER BY display_order
-        """,
-        ("IFRS",),
-    ).fetchall()
-    return {row["account_key"]: row_to_dict(row) for row in rows}
+def load_statement_template_map(session: Session) -> dict:
+    """계정키 → IFRS 표준양식 라인. generate_conversion이 표시 재무제표·라인명을 여기서 얻는다."""
+    rows = session.execute(
+        select(
+            FinancialStatementTemplate.account_key,
+            FinancialStatementTemplate.statement_type,
+            FinancialStatementTemplate.section,
+            FinancialStatementTemplate.line_item,
+            FinancialStatementTemplate.display_order,
+            FinancialStatementTemplate.basis,
+        )
+        .where(FinancialStatementTemplate.standard_set == "IFRS", FinancialStatementTemplate.active.is_(True))
+        .order_by(FinancialStatementTemplate.display_order)
+    ).all()
+    return {row.account_key: dict(row._mapping) for row in rows}
 
 
 
@@ -1694,65 +1673,72 @@ async def flat_error_handler(_request: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content=body)
 
 
+
+
 # --- 인증 의존성 (Depends) ---
 
-def get_current_user(request: Request) -> dict | None:
+def get_current_user(request: Request, session: Session) -> AppUser | None:
     """세션 쿠키 토큰으로 로그인 사용자를 조회한다. 없으면 None."""
     token = request.cookies.get(SESSION_COOKIE, "")
     if not token:
         return None
-    with connect() as conn:
-        row = conn.execute(
-            """
-            SELECT u.id, u.email, u.is_read_only, u.created_at
-            FROM user_sessions s
-            JOIN app_users u ON u.id = s.user_id
-            WHERE s.token_hash = ? AND s.expires_at > ?
-            """,
-            (session_token_hash(token), utc_now()),
-        ).fetchone()
-    return row_to_dict(row) if row else None
+    return session.scalar(
+        select(AppUser)
+        .join(UserSession, UserSession.user_id == AppUser.id)
+        .where(UserSession.token_hash == session_token_hash(token), UserSession.expires_at > utc_now())
+    )
 
 
-def require_user(request: Request) -> dict:
+def current_user(request: Request, session: Session = Depends(get_db)) -> AppUser | None:
+    return get_current_user(request, session)
+
+
+def require_user(user: AppUser | None = Depends(current_user)) -> AppUser:
     """로그인 필수 라우트의 의존성. 미로그인이면 401."""
-    user = get_current_user(request)
     if not user:
         raise HTTPException(401, {"error": "로그인이 필요합니다.", "login_required": True})
     return user
 
 
-def require_write_user(user: dict = Depends(require_user)) -> dict:
-    """쓰기 라우트의 의존성. 읽기 전용 데모 계정이면 403."""
-    if user.get("is_read_only"):
-        raise HTTPException(403, {"error": "읽기 전용 데모 계정에서는 데이터를 생성, 수정, 삭제할 수 없습니다.", "read_only": True})
-    return user
-
-
-def create_session(conn, user_id: str) -> str:
+def create_login_session(session: Session, user_id: str) -> str:
+    """세션 토큰을 만들어 해시만 저장하고 원본 토큰(쿠키에 넣을 값)을 돌려준다."""
     token = secrets.token_urlsafe(32)
     expires_at = datetime.fromtimestamp(
         datetime.now(timezone.utc).timestamp() + SESSION_MAX_AGE_SECONDS, tz=timezone.utc
     ).isoformat()
-    conn.execute(
-        "INSERT INTO user_sessions (id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
-        (str(uuid.uuid4()), user_id, session_token_hash(token), utc_now(), expires_at),
+    session.add(
+        UserSession(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            token_hash=session_token_hash(token),
+            created_at=utc_now(),
+            expires_at=expires_at,
+        )
     )
+    session.commit()
     return token
+
+
+def require_write_user(user: AppUser = Depends(require_user)) -> AppUser:
+    """쓰기 라우트의 의존성. 읽기 전용 데모 계정이면 403."""
+    if user.is_read_only:
+        raise HTTPException(403, {"error": "읽기 전용 데모 계정에서는 데이터를 생성, 수정, 삭제할 수 없습니다.", "read_only": True})
+    return user
 
 
 def set_session_cookie(response: Response, token: str) -> None:
     response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_MAX_AGE_SECONDS, path="/", httponly=True, samesite="lax")
 
 
-def get_project_or_404(conn, project_id: str, owner_user_id: str | None = None) -> dict:
-    if owner_user_id is None:
-        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-    else:
-        row = conn.execute("SELECT * FROM projects WHERE id = ? AND owner_user_id = ?", (project_id, owner_user_id)).fetchone()
-    if not row:
+def get_project_or_404(session: Session, project_id: str, owner_user_id: str | None = None) -> Project:
+    """프로젝트를 조회한다. 없으면(또는 소유자가 다르면) 404."""
+    stmt = select(Project).where(Project.id == project_id)
+    if owner_user_id is not None:
+        stmt = stmt.where(Project.owner_user_id == owner_user_id)
+    project = session.scalar(stmt)
+    if not project:
         raise HTTPException(404, {"error": "Project not found"})
-    return row_to_dict(row)
+    return project
 
 
 # --- 요청 본문 모델 (pydantic) ---
@@ -1806,17 +1792,17 @@ def healthz():
 
 
 @app.get("/api/ocr-config")
-def get_ocr_config(user: dict = Depends(require_user)):
+def get_ocr_config(user: AppUser = Depends(require_user)):
     return ocr_config()
 
 
 @app.get("/api/ai-config")
-def get_ai_config(user: dict = Depends(require_user)):
+def get_ai_config(user: AppUser = Depends(require_user)):
     return ai_config()
 
 
 @app.get("/api/dart-config")
-def get_dart_config(user: dict = Depends(require_user)):
+def get_dart_config(user: AppUser = Depends(require_user)):
     return dart_config()
 
 
@@ -1828,103 +1814,123 @@ def get_access_config():
 # --- 인증 ---
 
 @app.get("/api/auth/session")
-def auth_session(request: Request):
-    user = get_current_user(request)
+def auth_session(user: AppUser | None = Depends(current_user)):
     return {
         "authenticated": bool(user),
-        "user": user_public_dict(user) if user else None,
+        "user": user_public_dict(row_to_dict(user)) if user else None,
         "admin_configured": admin_config()["configured"],
     }
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest, response: Response):
+def login(payload: LoginRequest, response: Response, session: Session = Depends(get_db)):
     email = normalize_email(payload.email)
     if not email or not payload.password:
         raise HTTPException(400, {"error": "이메일과 비밀번호를 입력하세요."})
-    with connect() as conn:
-        ensure_admin_user(conn)
-        row = conn.execute("SELECT * FROM app_users WHERE email = ?", (email,)).fetchone()
-        user = row_to_dict(row) if row else None
-        if not user and not admin_config()["configured"]:
-            raise HTTPException(503, {"error": "관리자 계정이 설정되지 않았습니다. ADMIN_EMAIL과 ADMIN_PASSWORD를 서버 환경변수에 설정하세요."})
-        if not user or not verify_password(payload.password, user["password_hash"]):
-            raise HTTPException(401, {"error": "이메일 또는 비밀번호가 올바르지 않습니다."})
-        token = create_session(conn, user["id"])
+    ensure_admin_user(session)
+    user = session.scalar(select(AppUser).where(AppUser.email == email))
+    if not user and not admin_config()["configured"]:
+        raise HTTPException(503, {"error": "관리자 계정이 설정되지 않았습니다. ADMIN_EMAIL과 ADMIN_PASSWORD를 서버 환경변수에 설정하세요."})
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(401, {"error": "이메일 또는 비밀번호가 올바르지 않습니다."})
+    token = create_login_session(session, user.id)
     set_session_cookie(response, token)
-    return {"authenticated": True, "user": user_public_dict(user)}
+    return {"authenticated": True, "user": user_public_dict(row_to_dict(user))}
 
 
 @app.post("/api/auth/demo")
-def demo_login(response: Response):
-    with connect() as conn:
-        ensure_admin_user(conn)
-        user = ensure_demo_user(conn)
-        if not user:
-            raise HTTPException(403, {"error": "데모 로그인이 비활성화되어 있습니다."})
-        token = create_session(conn, user["id"])
+def demo_login(response: Response, session: Session = Depends(get_db)):
+    ensure_admin_user(session)
+    user = ensure_demo_user(session)
+    if not user:
+        raise HTTPException(403, {"error": "데모 로그인이 비활성화되어 있습니다."})
+    token = create_login_session(session, user["id"])
     set_session_cookie(response, token)
     return {"authenticated": True, "user": user_public_dict(user), "demo": True}
 
 
 @app.post("/api/auth/logout")
-def logout(request: Request, response: Response):
+def logout(request: Request, response: Response, session: Session = Depends(get_db)):
     token = request.cookies.get(SESSION_COOKIE, "")
     if token:
-        with connect() as conn:
-            conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (session_token_hash(token),))
+        session.execute(delete(UserSession).where(UserSession.token_hash == session_token_hash(token)))
+        session.commit()
     response.delete_cookie(SESSION_COOKIE, path="/")
     return {"authenticated": False, "user": None}
 
 
 # --- 기준정보·기준서 검색 ---
 
+REFERENCE_TABLE_LABELS = [
+    (StandardAccount, "내부 표준계정코드 DB"),
+    (KgaapAccount, "K-GAAP 계정명 DB"),
+    (IfrsAccount, "IFRS 계정/기준 DB"),
+    (MappingRule, "변환 룰 DB"),
+    (ChecklistItem, "판단 체크리스트 DB"),
+    (StandardsReference, "기준서 참조 DB"),
+    (StandardsParagraph, "K-GAAP/K-IFRS 기준서 문단 검색 DB"),
+    (FinancialStatementTemplate, "재무제표 양식 DB"),
+]
+
+
 @app.get("/api/reference-data")
-def reference_data(user: dict = Depends(require_user)):
-    tables = [
-        ("standard_accounts", "내부 표준계정코드 DB"),
-        ("kgaap_accounts", "K-GAAP 계정명 DB"),
-        ("ifrs_accounts", "IFRS 계정/기준 DB"),
-        ("mapping_rules", "변환 룰 DB"),
-        ("checklist_items", "판단 체크리스트 DB"),
-        ("standards_references", "기준서 참조 DB"),
-        ("standards_paragraphs", "K-GAAP/K-IFRS 기준서 문단 검색 DB"),
-        ("financial_statement_templates", "재무제표 양식 DB"),
+def reference_data(user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
+    summary = [
+        {
+            "table": model.__tablename__,
+            "label": label,
+            "count": session.scalar(select(func.count()).select_from(model)),
+        }
+        for model, label in REFERENCE_TABLE_LABELS
     ]
-    with connect() as conn:
-        summary = [
-            {"table": table, "label": label, "count": conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]}
-            for table, label in tables
-        ]
-        accounts = [
-            row_to_dict(row)
-            for row in conn.execute(
-                "SELECT account_key, standard_code, internal_label, ifrs_account, mapping_type "
-                "FROM standard_accounts ORDER BY standard_code"
+    accounts = [
+        dict(row._mapping)
+        for row in session.execute(
+            select(
+                StandardAccount.account_key,
+                StandardAccount.standard_code,
+                StandardAccount.internal_label,
+                StandardAccount.ifrs_account,
+                StandardAccount.mapping_type,
+            ).order_by(StandardAccount.standard_code)
+        ).all()
+    ]
+    templates = [
+        dict(row._mapping)
+        for row in session.execute(
+            select(
+                FinancialStatementTemplate.statement_type,
+                FinancialStatementTemplate.section,
+                FinancialStatementTemplate.line_item,
+                FinancialStatementTemplate.account_key,
+                FinancialStatementTemplate.display_order,
             )
-        ]
-        templates = [
-            row_to_dict(row)
-            for row in conn.execute(
-                "SELECT statement_type, section, line_item, account_key, display_order "
-                "FROM financial_statement_templates WHERE standard_set = ? AND active = true "
-                "ORDER BY statement_type, display_order",
-                ("IFRS",),
-            )
-        ]
+            .where(FinancialStatementTemplate.standard_set == "IFRS", FinancialStatementTemplate.active.is_(True))
+            .order_by(FinancialStatementTemplate.statement_type, FinancialStatementTemplate.display_order)
+        ).all()
+    ]
     return {"summary": summary, "accounts": accounts, "templates": templates}
 
 
 @app.get("/api/standards/search")
-def standards_search(q: str = "", account_key: str = "", standard_set: str = "", user: dict = Depends(require_user)):
+def standards_search(
+    q: str = "",
+    account_key: str = "",
+    standard_set: str = "",
+    user: AppUser = Depends(require_user),
+    session: Session = Depends(get_db),
+):
     query, account_key, standard_set = q.strip(), account_key.strip(), standard_set.strip()
     if standard_set and standard_set not in {"K-GAAP", "K-IFRS"}:
         raise HTTPException(400, {"error": "standard_set은 K-GAAP 또는 K-IFRS여야 합니다."})
-    with connect() as conn:
-        if query:
-            paragraphs = semantic_search_paragraphs(conn, query, account_key=account_key or None, standard_set=standard_set or None, k=8)
-        else:
-            paragraphs = find_standards_paragraphs(conn, account_key=account_key or None, query=None, standard_set=standard_set or None)
+    if query:
+        paragraphs = semantic_search_paragraphs(
+            session, query, account_key=account_key or None, standard_set=standard_set or None, k=8
+        )
+    else:
+        paragraphs = find_standards_paragraphs(
+            session, account_key=account_key or None, query=None, standard_set=standard_set or None
+        )
     return {
         "count": len(paragraphs),
         "retrieval": paragraphs[0].get("retrieval", "none") if paragraphs else "none",
@@ -1937,96 +1943,89 @@ def standards_search(q: str = "", account_key: str = "", standard_set: str = "",
 # --- 프로젝트 ---
 
 @app.get("/api/projects")
-def list_projects(user: dict = Depends(require_user)):
-    with connect() as conn:
-        return [
-            row_to_dict(row)
-            for row in conn.execute(
-                "SELECT * FROM projects WHERE owner_user_id = ? ORDER BY created_at DESC",
-                (user["id"],),
-            )
-        ]
+def list_projects(user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
+    projects = session.scalars(
+        select(Project).where(Project.owner_user_id == user.id).order_by(Project.created_at.desc())
+    )
+    return [row_to_dict(project) for project in projects]
 
 
 @app.post("/api/projects", status_code=201)
-def create_project(payload: ProjectCreateRequest, user: dict = Depends(require_write_user)):
+def create_project(
+    payload: ProjectCreateRequest,
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+):
     now = utc_now()
-    project = {
-        "id": str(uuid.uuid4()),
-        "owner_user_id": user["id"],
-        "is_test": False,
-        "company_name": payload.company_name or "Untitled company",
-        "source_standard": payload.source_standard or "K-GAAP",
-        "target_standard": payload.target_standard or "IFRS",
-        "period": payload.period or "2026",
-        "status": "created",
-        "created_at": now,
-        "updated_at": now,
-    }
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO projects (
-                id, owner_user_id, is_test, company_name, source_standard,
-                target_standard, period, status, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                project["id"], project["owner_user_id"], project["is_test"], project["company_name"],
-                project["source_standard"], project["target_standard"], project["period"],
-                project["status"], project["created_at"], project["updated_at"],
-            ),
-        )
-        log_event(conn, project["id"], "project.created", project)
-    return project
+    project = Project(
+        id=str(uuid.uuid4()),
+        owner_user_id=user.id,
+        is_test=False,
+        company_name=payload.company_name or "Untitled company",
+        source_standard=payload.source_standard or "K-GAAP",
+        target_standard=payload.target_standard or "IFRS",
+        period=payload.period or "2026",
+        status="created",
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(project)
+    session.flush()  # audit_logs의 project_id 외래키가 유효하도록 먼저 반영
+    payload_dict = row_to_dict(project)
+    log_event(session, project.id, "project.created", payload_dict)
+    session.commit()
+    return payload_dict
 
 
 @app.get("/api/projects/{project_id}")
-def get_project(project_id: str, user: dict = Depends(require_user)):
-    with connect() as conn:
-        project = get_project_or_404(conn, project_id, owner_user_id=user["id"])
-        statements = sort_statements_by_code([
-            dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
-            for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
-        ])
-        uploads = [
-            upload_public_dict(row)
-            for row in conn.execute("SELECT * FROM uploads WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
-        ]
-        extractions = [
-            dict(row_to_dict(row), rows=parse_json_field(row["rows_json"], []), issues=parse_json_field(row["issues_json"], []))
-            for row in conn.execute("SELECT * FROM extractions WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
-        ]
-        conversion = conn.execute(
-            "SELECT * FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", (project_id,)
-        ).fetchone()
-        review = conn.execute(
-            "SELECT * FROM reviews WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", (project_id,)
-        ).fetchone()
+def get_project(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
+    project = get_project_or_404(session, project_id, owner_user_id=user.id)
+    statements = sort_statements_by_code([
+        dict(row_to_dict(statement), checklist=parse_json_field(statement.checklist_json, []))
+        for statement in session.scalars(select(Statement).where(Statement.project_id == project_id))
+    ])
+    uploads = [
+        upload_public_dict(upload)
+        for upload in session.scalars(
+            select(Upload).where(Upload.project_id == project_id).order_by(Upload.created_at.desc())
+        )
+    ]
+    extractions = [
+        dict(
+            row_to_dict(extraction),
+            rows=parse_json_field(extraction.rows_json, []),
+            issues=parse_json_field(extraction.issues_json, []),
+        )
+        for extraction in session.scalars(
+            select(Extraction).where(Extraction.project_id == project_id).order_by(Extraction.created_at.desc())
+        )
+    ]
+    conversion = session.scalar(
+        select(Conversion).where(Conversion.project_id == project_id).order_by(Conversion.created_at.desc()).limit(1)
+    )
+    review = session.scalar(
+        select(Review).where(Review.project_id == project_id).order_by(Review.created_at.desc()).limit(1)
+    )
     return {
-        "project": project,
+        "project": row_to_dict(project),
         "statements": statements,
         "uploads": uploads,
         "extractions": extractions,
-        "conversion": parse_json_field(conversion["output_json"], None) if conversion else None,
+        "conversion": parse_json_field(conversion.output_json, None) if conversion else None,
         "review": row_to_dict(review) if review else None,
     }
 
 
 @app.delete("/api/projects/{project_id}")
-def delete_project(project_id: str, user: dict = Depends(require_write_user)):
-    with connect() as conn:
-        get_project_or_404(conn, project_id, owner_user_id=user["id"])
-        uploads = [
-            row_to_dict(row)
-            for row in conn.execute("SELECT stored_name FROM uploads WHERE project_id = ?", (project_id,))
-        ]
-        for table in ("extractions", "uploads", "statements", "conversions", "reviews", "audit_logs"):
-            conn.execute(f"DELETE FROM {table} WHERE project_id = ?", (project_id,))
-        conn.execute("DELETE FROM projects WHERE id = ? AND owner_user_id = ?", (project_id, user["id"]))
-    for upload in uploads:
-        stored_name = str(upload.get("stored_name") or "")
+def delete_project(project_id: str, user: AppUser = Depends(require_write_user), session: Session = Depends(get_db)):
+    get_project_or_404(session, project_id, owner_user_id=user.id)
+    stored_names = list(session.scalars(select(Upload.stored_name).where(Upload.project_id == project_id)))
+    # 외래키 순서: 자식 테이블부터 지우고 마지막에 프로젝트를 지운다.
+    for model in (Extraction, Upload, Statement, Conversion, Review, AuditLog):
+        session.execute(delete(model).where(model.project_id == project_id))
+    session.execute(delete(Project).where(Project.id == project_id, Project.owner_user_id == user.id))
+    session.commit()
+    for stored_name in stored_names:
         if stored_name:
             try:
                 (UPLOAD_DIR / stored_name).unlink(missing_ok=True)
@@ -2038,18 +2037,21 @@ def delete_project(project_id: str, user: dict = Depends(require_write_user)):
 # --- 업로드·추출 ---
 
 @app.get("/api/projects/{project_id}/uploads")
-def list_uploads(project_id: str, user: dict = Depends(require_user)):
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM uploads WHERE project_id = ? ORDER BY created_at DESC", (project_id,)
-        ).fetchall()
-    return [upload_public_dict(row) for row in rows]
+def list_uploads(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
+    uploads = session.scalars(
+        select(Upload).where(Upload.project_id == project_id).order_by(Upload.created_at.desc())
+    )
+    return [upload_public_dict(upload) for upload in uploads]
 
 
 @app.post("/api/projects/{project_id}/uploads", status_code=201)
-def upload_file(project_id: str, file: UploadFile = File(...), user: dict = Depends(require_write_user)):
-    with connect() as conn:
-        get_project_or_404(conn, project_id)
+def upload_file(
+    project_id: str,
+    file: UploadFile = File(...),
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+):
+    get_project_or_404(session, project_id)
 
     original_name = file.filename or "upload.bin"
     content = file.file.read()
@@ -2057,68 +2059,62 @@ def upload_file(project_id: str, file: UploadFile = File(...), user: dict = Depe
     stored_name = f"{project_id}_{uuid.uuid4()}_{safe_name or 'upload.bin'}"
     (UPLOAD_DIR / stored_name).write_bytes(content)
 
-    upload = {
-        "id": str(uuid.uuid4()),
-        "project_id": project_id,
-        "original_name": original_name,
-        "stored_name": stored_name,
-        "content_type": file.content_type or "application/octet-stream",
-        "size_bytes": len(content),
-        "file_bytes": content,
-        "extraction_status": "pending_ocr",
-        "created_at": utc_now(),
-    }
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO uploads (
-                id, project_id, original_name, stored_name, content_type, size_bytes, file_bytes, extraction_status, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                upload["id"], upload["project_id"], upload["original_name"], upload["stored_name"],
-                upload["content_type"], upload["size_bytes"], upload["file_bytes"],
-                upload["extraction_status"], upload["created_at"],
-            ),
-        )
-        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("source_uploaded", utc_now(), project_id))
-        log_event(
-            conn,
-            project_id,
-            "source.uploaded",
-            {
-                "upload_id": upload["id"],
-                "original_name": original_name,
-                "content_type": upload["content_type"],
-                "size_bytes": len(content),
-                "next_step": "Gemini OCR extraction",
-            },
-        )
-    return upload_public_dict(upload)
+    upload = Upload(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        original_name=original_name,
+        stored_name=stored_name,
+        content_type=file.content_type or "application/octet-stream",
+        size_bytes=len(content),
+        file_bytes=content,
+        extraction_status="pending_ocr",
+        created_at=utc_now(),
+    )
+    session.add(upload)
+    session.execute(update(Project).where(Project.id == project_id).values(status="source_uploaded", updated_at=utc_now()))
+    log_event(
+        session,
+        project_id,
+        "source.uploaded",
+        {
+            "upload_id": upload.id,
+            "original_name": original_name,
+            "content_type": upload.content_type,
+            "size_bytes": len(content),
+            "next_step": "Gemini OCR extraction",
+        },
+    )
+    public = upload_public_dict(upload)
+    session.commit()
+    return public
 
 
 @app.delete("/api/projects/{project_id}/uploads/{upload_id}")
-def delete_upload(project_id: str, upload_id: str, user: dict = Depends(require_write_user)):
-    with connect() as conn:
-        upload = conn.execute(
-            "SELECT * FROM uploads WHERE id = ? AND project_id = ?", (upload_id, project_id)
-        ).fetchone()
-        if not upload:
-            raise HTTPException(404, {"error": "Upload not found"})
-        upload_dict = row_to_dict(upload)
-        conn.execute("DELETE FROM extractions WHERE upload_id = ? AND project_id = ?", (upload_id, project_id))
-        conn.execute("DELETE FROM uploads WHERE id = ? AND project_id = ?", (upload_id, project_id))
-        remaining = conn.execute("SELECT COUNT(*) AS count FROM uploads WHERE project_id = ?", (project_id,)).fetchone()["count"]
-        next_status = "created" if int(remaining or 0) == 0 else "source_uploaded"
-        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", (next_status, utc_now(), project_id))
-        log_event(
-            conn,
-            project_id,
-            "source.deleted",
-            {"upload_id": upload_id, "original_name": upload_dict.get("original_name"), "remaining_uploads": remaining},
-        )
-    stored_name = str(upload_dict.get("stored_name") or "")
+def delete_upload(
+    project_id: str,
+    upload_id: str,
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+):
+    upload = session.scalar(select(Upload).where(Upload.id == upload_id, Upload.project_id == project_id))
+    if not upload:
+        raise HTTPException(404, {"error": "Upload not found"})
+    stored_name = upload.stored_name
+    original_name = upload.original_name
+
+    session.execute(delete(Extraction).where(Extraction.upload_id == upload_id, Extraction.project_id == project_id))
+    session.delete(upload)
+    session.flush()
+    remaining = session.scalar(select(func.count()).select_from(Upload).where(Upload.project_id == project_id))
+    next_status = "created" if int(remaining or 0) == 0 else "source_uploaded"
+    session.execute(update(Project).where(Project.id == project_id).values(status=next_status, updated_at=utc_now()))
+    log_event(
+        session,
+        project_id,
+        "source.deleted",
+        {"upload_id": upload_id, "original_name": original_name, "remaining_uploads": remaining},
+    )
+    session.commit()
     if stored_name:
         try:
             (UPLOAD_DIR / stored_name).unlink(missing_ok=True)
@@ -2128,82 +2124,84 @@ def delete_upload(project_id: str, upload_id: str, user: dict = Depends(require_
 
 
 @app.get("/api/projects/{project_id}/extractions")
-def list_extractions(project_id: str, user: dict = Depends(require_user)):
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM extractions WHERE project_id = ? ORDER BY created_at DESC", (project_id,)
-        ).fetchall()
+def list_extractions(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
+    extractions = session.scalars(
+        select(Extraction).where(Extraction.project_id == project_id).order_by(Extraction.created_at.desc())
+    )
     return [
-        dict(row_to_dict(row), rows=parse_json_field(row["rows_json"], []), issues=parse_json_field(row["issues_json"], []))
-        for row in rows
+        dict(
+            row_to_dict(extraction),
+            rows=parse_json_field(extraction.rows_json, []),
+            issues=parse_json_field(extraction.issues_json, []),
+        )
+        for extraction in extractions
     ]
 
 
 @app.post("/api/projects/{project_id}/uploads/{upload_id}/extract", status_code=201)
-def extract_upload(project_id: str, upload_id: str, user: dict = Depends(require_write_user)):
-    with connect() as conn:
-        upload = conn.execute(
-            "SELECT * FROM uploads WHERE id = ? AND project_id = ?", (upload_id, project_id)
-        ).fetchone()
-        if not upload:
-            raise HTTPException(404, {"error": "Upload not found"})
+def extract_upload(
+    project_id: str,
+    upload_id: str,
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+):
+    upload = session.scalar(select(Upload).where(Upload.id == upload_id, Upload.project_id == project_id))
+    if not upload:
+        raise HTTPException(404, {"error": "Upload not found"})
 
-        config = ocr_config()
-        rows, issues, provider = extract_rows_from_upload(row_to_dict(upload))
-        rows, ai_classification = attach_ai_classification(rows)
-        if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
-            issues = [*issues, ai_classification["note"]]
-        status = "needs_review" if rows else "failed"
-        extraction = {
-            "id": str(uuid.uuid4()),
-            "project_id": project_id,
+    config = ocr_config()
+    rows, issues, provider = extract_rows_from_upload(row_to_dict(upload))
+    rows, ai_classification = attach_ai_classification(rows)
+    if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
+        issues = [*issues, ai_classification["note"]]
+    status = "needs_review" if rows else "failed"
+    extraction = Extraction(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        upload_id=upload_id,
+        provider=provider,
+        status=status,
+        rows_json=json.dumps(rows, ensure_ascii=False),
+        issues_json=json.dumps(issues, ensure_ascii=False),
+        created_at=utc_now(),
+    )
+    session.add(extraction)
+    upload.extraction_status = status
+    session.execute(update(Project).where(Project.id == project_id).values(status="extracted", updated_at=utc_now()))
+    log_event(
+        session,
+        project_id,
+        "source.extracted",
+        {
             "upload_id": upload_id,
+            "extraction_id": extraction.id,
             "provider": provider,
-            "status": status,
-            "rows": rows,
+            "ocr_config": config,
+            "row_count": len(rows),
             "issues": issues,
-            "created_at": utc_now(),
-        }
-        conn.execute(
-            """
-            INSERT INTO extractions (id, project_id, upload_id, provider, status, rows_json, issues_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                extraction["id"], project_id, upload_id, provider, status,
-                json.dumps(rows, ensure_ascii=False), json.dumps(issues, ensure_ascii=False), extraction["created_at"],
-            ),
-        )
-        conn.execute("UPDATE uploads SET extraction_status = ? WHERE id = ?", (status, upload_id))
-        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("extracted", utc_now(), project_id))
-        log_event(
-            conn,
-            project_id,
-            "source.extracted",
-            {
-                "upload_id": upload_id,
-                "extraction_id": extraction["id"],
-                "provider": provider,
-                "ocr_config": config,
-                "row_count": len(rows),
-                "issues": issues,
-                "ai_classification": {
-                    "status": ai_classification.get("status"),
-                    "model": ai_classification.get("model"),
-                    "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
-                    "human_review_required": True,
-                },
+            "ai_classification": {
+                "status": ai_classification.get("status"),
+                "model": ai_classification.get("model"),
+                "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
+                "human_review_required": True,
             },
-        )
-    return extraction
+        },
+    )
+    result = dict(row_to_dict(extraction), rows=rows, issues=issues)
+    session.commit()
+    return result
 
 
 # --- DART 연동 ---
 
 @app.post("/api/projects/{project_id}/dart/import")
-def dart_import(project_id: str, payload: dict = Body(default={}), user: dict = Depends(require_write_user)):
-    with connect() as conn:
-        get_project_or_404(conn, project_id)
+def dart_import(
+    project_id: str,
+    payload: dict = Body(default={}),
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+):
+    get_project_or_404(session, project_id)
 
     rows, issues, metadata = fetch_dart_statement_rows(payload, REFERENCE.aliases)
     rows, ai_classification = attach_ai_classification(rows)
@@ -2214,85 +2212,71 @@ def dart_import(project_id: str, payload: dict = Body(default={}), user: dict = 
     raw_bytes = json.dumps(raw_payload, ensure_ascii=False).encode("utf-8")
     status = "needs_review" if rows else "failed"
     now = utc_now()
-    upload = {
-        "id": str(uuid.uuid4()),
-        "project_id": project_id,
-        "original_name": f"DART_API_{metadata.get('corp_code', 'unknown')}_{metadata.get('bsns_year', payload.get('bsns_year', 'unknown'))}.json",
-        "stored_name": "",
-        "content_type": "application/json",
-        "size_bytes": len(raw_bytes),
-        "file_bytes": raw_bytes,
-        "extraction_status": status,
-        "created_at": now,
-    }
-    extraction = {
-        "id": str(uuid.uuid4()),
-        "project_id": project_id,
-        "upload_id": upload["id"],
-        "provider": "dart_api",
-        "status": status,
+
+    upload = Upload(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        original_name=f"DART_API_{metadata.get('corp_code', 'unknown')}_{metadata.get('bsns_year', payload.get('bsns_year', 'unknown'))}.json",
+        stored_name="",
+        content_type="application/json",
+        size_bytes=len(raw_bytes),
+        file_bytes=raw_bytes,
+        extraction_status=status,
+        created_at=now,
+    )
+    session.add(upload)
+    session.flush()
+    extraction = Extraction(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        upload_id=upload.id,
+        provider="dart_api",
+        status=status,
+        rows_json=json.dumps(rows, ensure_ascii=False),
+        issues_json=json.dumps([*issues, json.dumps(metadata, ensure_ascii=False)], ensure_ascii=False),
+        created_at=now,
+    )
+    session.add(extraction)
+    next_status = "extracted" if rows else "source_import_failed"
+    session.execute(update(Project).where(Project.id == project_id).values(status=next_status, updated_at=utc_now()))
+    log_event(
+        session,
+        project_id,
+        "dart.imported",
+        {
+            "upload_id": upload.id,
+            "extraction_id": extraction.id,
+            "row_count": len(rows),
+            "raw_row_count": len(raw_rows),
+            "issues": issues,
+            "metadata": metadata,
+            "ai_classification": {
+                "status": ai_classification.get("status"),
+                "model": ai_classification.get("model"),
+                "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
+                "human_review_required": True,
+            },
+        },
+    )
+    body = {
+        **row_to_dict(extraction),
         "rows": rows,
         "issues": issues,
         "metadata": metadata,
-        "created_at": now,
+        "upload": upload_public_dict(upload),
     }
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO uploads (
-                id, project_id, original_name, stored_name, content_type, size_bytes, file_bytes, extraction_status, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                upload["id"], upload["project_id"], upload["original_name"], upload["stored_name"],
-                upload["content_type"], upload["size_bytes"], upload["file_bytes"],
-                upload["extraction_status"], upload["created_at"],
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO extractions (id, project_id, upload_id, provider, status, rows_json, issues_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                extraction["id"], project_id, upload["id"], "dart_api", status,
-                json.dumps(rows, ensure_ascii=False),
-                json.dumps([*issues, json.dumps(metadata, ensure_ascii=False)], ensure_ascii=False),
-                now,
-            ),
-        )
-        next_status = "extracted" if rows else "source_import_failed"
-        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", (next_status, utc_now(), project_id))
-        log_event(
-            conn,
-            project_id,
-            "dart.imported",
-            {
-                "upload_id": upload["id"],
-                "extraction_id": extraction["id"],
-                "row_count": len(rows),
-                "raw_row_count": len(raw_rows),
-                "issues": issues,
-                "metadata": metadata,
-                "ai_classification": {
-                    "status": ai_classification.get("status"),
-                    "model": ai_classification.get("model"),
-                    "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
-                    "human_review_required": True,
-                },
-            },
-        )
-    return JSONResponse(
-        status_code=201 if rows else 400,
-        content={**extraction, "upload": upload_public_dict(upload)},
-    )
+    session.commit()
+    return JSONResponse(status_code=201 if rows else 400, content=body)
 
 
 @app.post("/api/projects/{project_id}/dart/reports")
-def dart_reports(project_id: str, payload: dict = Body(default={}), user: dict = Depends(require_write_user)):
-    with connect() as conn:
-        get_project_or_404(conn, project_id)
+def dart_reports(
+    project_id: str,
+    payload: dict = Body(default={}),
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+):
+    get_project_or_404(session, project_id)
     reports, issues, metadata = fetch_dart_available_reports(payload)
     return {"reports": reports, "issues": issues, "metadata": metadata}
 
@@ -2304,70 +2288,78 @@ def accept_extraction(
     project_id: str,
     extraction_id: str,
     payload: AcceptExtractionRequest | None = None,
-    user: dict = Depends(require_write_user),
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
 ):
     ai_decisions = payload.ai_decisions if payload else None
-    with connect() as conn:
-        project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        extraction = conn.execute(
-            "SELECT * FROM extractions WHERE id = ? AND project_id = ?", (extraction_id, project_id)
-        ).fetchone()
-        if not project or not extraction:
-            raise HTTPException(404, {"error": "Extraction not found"})
+    project = session.get(Project, project_id)
+    extraction = session.scalar(
+        select(Extraction).where(Extraction.id == extraction_id, Extraction.project_id == project_id)
+    )
+    if not project or not extraction:
+        raise HTTPException(404, {"error": "Extraction not found"})
 
-        rows = parse_json_field(extraction["rows_json"], [])
-        rows, decision_summary = apply_ai_decisions(rows, ai_decisions)
-        records = [build_statement_record(project["period"], row, REFERENCE) for row in rows]
-        for record in records:
-            conn.execute(
-                """
-                INSERT INTO statements (
-                    id, project_id, account_name, normalized_account, standard_code, amount, period,
-                    mapping_type, rule_summary, checklist_json, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record["id"], project_id, record["account_name"], record["normalized_account"],
-                    record["standard_code"], record["amount"], record["period"], record["mapping_type"],
-                    record["rule_summary"], json.dumps(record["checklist"], ensure_ascii=False), utc_now(),
-                ),
+    rows = parse_json_field(extraction.rows_json, [])
+    rows, decision_summary = apply_ai_decisions(rows, ai_decisions)
+    records = [build_statement_record(project.period, row, REFERENCE) for row in rows]
+    for record in records:
+        session.add(
+            Statement(
+                id=record["id"],
+                project_id=project_id,
+                account_name=record["account_name"],
+                normalized_account=record["normalized_account"],
+                standard_code=record["standard_code"],
+                amount=record["amount"],
+                period=record["period"],
+                mapping_type=record["mapping_type"],
+                rule_summary=record["rule_summary"],
+                checklist_json=json.dumps(record["checklist"], ensure_ascii=False),
+                created_at=utc_now(),
             )
-        conn.execute("UPDATE extractions SET status = ? WHERE id = ?", ("accepted", extraction_id))
-        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("mapped", utc_now(), project_id))
-        ai_confirmed = [
-            {
-                "account_name": record["account_name"],
-                "suggested_account": record["normalized_account"],
-                "confidence": (record.get("ai_suggestion") or {}).get("confidence"),
-                "rationale": (record.get("ai_suggestion") or {}).get("rationale"),
-            }
-            for record in records
-            if record.get("mapping_source") == "ai_suggested_human_accepted"
-        ]
-        log_event(
-            conn,
-            project_id,
-            "extraction.accepted",
-            {
-                "extraction_id": extraction_id,
-                "statement_count": len(records),
-                "ai_classified_count": len(ai_confirmed),
-                "ai_classified_accounts": ai_confirmed,
-                "ai_decision_summary": decision_summary,
-                "ai_classification_note": (
-                    "AI 1차 분류 제안을 담당자가 계정별로 승인/거절하며 확정했습니다."
-                    if decision_summary["per_account_review"] and (ai_confirmed or decision_summary["rejected"])
-                    else "AI 1차 분류 제안을 담당자가 반영하며 확정했습니다." if ai_confirmed else None
-                ),
-            },
-            actor=user.get("email") or "system",
         )
+    extraction.status = "accepted"
+    project.status = "mapped"
+    project.updated_at = utc_now()
+    ai_confirmed = [
+        {
+            "account_name": record["account_name"],
+            "suggested_account": record["normalized_account"],
+            "confidence": (record.get("ai_suggestion") or {}).get("confidence"),
+            "rationale": (record.get("ai_suggestion") or {}).get("rationale"),
+        }
+        for record in records
+        if record.get("mapping_source") == "ai_suggested_human_accepted"
+    ]
+    log_event(
+        session,
+        project_id,
+        "extraction.accepted",
+        {
+            "extraction_id": extraction_id,
+            "statement_count": len(records),
+            "ai_classified_count": len(ai_confirmed),
+            "ai_classified_accounts": ai_confirmed,
+            "ai_decision_summary": decision_summary,
+            "ai_classification_note": (
+                "AI 1차 분류 제안을 담당자가 계정별로 승인/거절하며 확정했습니다."
+                if decision_summary["per_account_review"] and (ai_confirmed or decision_summary["rejected"])
+                else "AI 1차 분류 제안을 담당자가 반영하며 확정했습니다." if ai_confirmed else None
+            ),
+        },
+        actor=user.email or "system",
+    )
+    session.commit()
     return {"statements": records, "extraction_id": extraction_id, "ai_decision_summary": decision_summary}
 
 
 @app.post("/api/projects/{project_id}/statements", status_code=201)
-def add_statements(project_id: str, payload: StatementsAddRequest, user: dict = Depends(require_write_user)):
+def add_statements(
+    project_id: str,
+    payload: StatementsAddRequest,
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+):
     raw_rows = parse_statement_rows(payload.model_dump())
     # 수동 입력도 파일/DART 경로와 동일하게 추출(extraction)로 만들어, 미분류 계정에
     # AI 1차 분류 제안을 붙이고 담당자가 추출 미리보기에서 계정별로 승인하도록 통일한다.
@@ -2377,46 +2369,50 @@ def add_statements(project_id: str, payload: StatementsAddRequest, user: dict = 
         issues.append(ai_classification["note"])
     status = "needs_review" if raw_rows else "failed"
     now = utc_now()
-    with connect() as conn:
-        get_project_or_404(conn, project_id)
-        upload_id = str(uuid.uuid4())
-        extraction_id = str(uuid.uuid4())
-        conn.execute(
-            """
-            INSERT INTO uploads (
-                id, project_id, original_name, stored_name, content_type, size_bytes, extraction_status, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (upload_id, project_id, "수동입력.csv", "", "text/csv", 0, status, now),
-        )
-        conn.execute(
-            """
-            INSERT INTO extractions (id, project_id, upload_id, provider, status, rows_json, issues_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                extraction_id, project_id, upload_id, "manual_input", status,
-                json.dumps(raw_rows, ensure_ascii=False), json.dumps(issues, ensure_ascii=False), now,
-            ),
-        )
-        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("extracted", now, project_id))
-        log_event(
-            conn,
-            project_id,
-            "source.manual_entered",
-            {
-                "extraction_id": extraction_id,
-                "row_count": len(raw_rows),
-                "source": payload.source,
-                "ai_classification": {
-                    "status": ai_classification.get("status"),
-                    "model": ai_classification.get("model"),
-                    "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
-                    "human_review_required": True,
-                },
+
+    get_project_or_404(session, project_id)
+    upload = Upload(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        original_name="수동입력.csv",
+        stored_name="",
+        content_type="text/csv",
+        size_bytes=0,
+        extraction_status=status,
+        created_at=now,
+    )
+    session.add(upload)
+    session.flush()
+    extraction = Extraction(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        upload_id=upload.id,
+        provider="manual_input",
+        status=status,
+        rows_json=json.dumps(raw_rows, ensure_ascii=False),
+        issues_json=json.dumps(issues, ensure_ascii=False),
+        created_at=now,
+    )
+    session.add(extraction)
+    session.execute(update(Project).where(Project.id == project_id).values(status="extracted", updated_at=now))
+    log_event(
+        session,
+        project_id,
+        "source.manual_entered",
+        {
+            "extraction_id": extraction.id,
+            "row_count": len(raw_rows),
+            "source": payload.source,
+            "ai_classification": {
+                "status": ai_classification.get("status"),
+                "model": ai_classification.get("model"),
+                "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
+                "human_review_required": True,
             },
-        )
+        },
+    )
+    extraction_id = extraction.id
+    session.commit()
     return {
         "extraction_id": extraction_id,
         "rows": raw_rows,
@@ -2426,185 +2422,178 @@ def add_statements(project_id: str, payload: StatementsAddRequest, user: dict = 
 
 
 @app.post("/api/projects/{project_id}/validate")
-def validate_project(project_id: str, user: dict = Depends(require_write_user)):
-    with connect() as conn:
-        project = get_project_or_404(conn, project_id)
-        statements = conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,)).fetchall()
-        result = validate_statement_records(project, statements)
-        log_event(conn, project_id, "validation.completed", result)
+def validate_project(project_id: str, user: AppUser = Depends(require_write_user), session: Session = Depends(get_db)):
+    project = get_project_or_404(session, project_id)
+    statements = [row_to_dict(s) for s in session.scalars(select(Statement).where(Statement.project_id == project_id))]
+    result = validate_statement_records(row_to_dict(project), statements)
+    log_event(session, project_id, "validation.completed", result)
+    session.commit()
     return result
 
 
 # --- 변환·검토 ---
 
 @app.post("/api/projects/{project_id}/convert")
-def convert_project(project_id: str, payload: ConvertRequest, user: dict = Depends(require_write_user)):
+def convert_project(
+    project_id: str,
+    payload: ConvertRequest,
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+):
     responses = payload.responses or {}
-    with connect() as conn:
-        project = get_project_or_404(conn, project_id)
-        statement_rows = sort_statements_by_code([
-            dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
-            for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
-        ])
-        output = generate_conversion(project, statement_rows, responses, REFERENCE)
-        # RAG: 판단 필요 항목마다 계정명·근거를 질의로 관련 기준서 문단을 시맨틱 검색해
-        # AI 판단 보조의 근거(context)로 주입한다. 검색 결과는 조정 금액이 아니라 근거 설명에만 쓰인다.
-        retrieved_context = []
-        for jitem in output["judgment_items"]:
-            query = f"{jitem.get('account', '')} {jitem.get('basis', '')}".strip()
-            paras = semantic_search_paragraphs(conn, query, k=3) if query else []
-            retrieved_context.append(
-                {
-                    "account": jitem.get("account"),
-                    "paragraphs": [
-                        {
-                            "standard_set": p.get("standard_set"),
-                            "reference_code": p.get("reference_code"),
-                            "title": p.get("title"),
-                            "content": p.get("content"),
-                            "retrieval": p.get("retrieval"),
-                            "similarity": p.get("similarity"),
-                        }
-                        for p in paras
-                    ],
-                }
-            )
-        output["ai_assistance"] = call_ai_judgment(project, output["entries"], output["judgment_items"], retrieved_context)
-        output["retrieved_context"] = retrieved_context
-        conn.execute(
-            "INSERT INTO conversions (id, project_id, output_json, created_at) VALUES (?, ?, ?, ?)",
-            (str(uuid.uuid4()), project_id, json.dumps(output, ensure_ascii=False), utc_now()),
-        )
-        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("draft_generated", utc_now(), project_id))
-        log_event(
-            conn,
-            project_id,
-            "conversion.generated",
+    project_row = get_project_or_404(session, project_id)
+    project = row_to_dict(project_row)
+    statement_rows = sort_statements_by_code([
+        dict(row_to_dict(statement), checklist=parse_json_field(statement.checklist_json, []))
+        for statement in session.scalars(select(Statement).where(Statement.project_id == project_id))
+    ])
+    output = generate_conversion(project, statement_rows, responses, REFERENCE)
+    # RAG: 판단 필요 항목마다 계정명·근거를 질의로 관련 기준서 문단을 시맨틱 검색해
+    # AI 판단 보조의 근거(context)로 주입한다. 검색 결과는 조정 금액이 아니라 근거 설명에만 쓰인다.
+    retrieved_context = []
+    for jitem in output["judgment_items"]:
+        query = f"{jitem.get('account', '')} {jitem.get('basis', '')}".strip()
+        paras = semantic_search_paragraphs(session, query, k=3) if query else []
+        retrieved_context.append(
             {
-                "responses": responses,
-                "entry_count": len(output["entries"]),
-                "template": output["statement_template"],
-                "ai_status": output["ai_assistance"].get("status"),
-            },
+                "account": jitem.get("account"),
+                "paragraphs": [
+                    {
+                        "standard_set": p.get("standard_set"),
+                        "reference_code": p.get("reference_code"),
+                        "title": p.get("title"),
+                        "content": p.get("content"),
+                        "retrieval": p.get("retrieval"),
+                        "similarity": p.get("similarity"),
+                    }
+                    for p in paras
+                ],
+            }
         )
+    output["ai_assistance"] = call_ai_judgment(project, output["entries"], output["judgment_items"], retrieved_context)
+    output["retrieved_context"] = retrieved_context
+
+    session.add(
+        Conversion(
+            id=str(uuid.uuid4()),
+            project_id=project_id,
+            output_json=json.dumps(output, ensure_ascii=False),
+            created_at=utc_now(),
+        )
+    )
+    session.execute(update(Project).where(Project.id == project_id).values(status="draft_generated", updated_at=utc_now()))
+    log_event(
+        session,
+        project_id,
+        "conversion.generated",
+        {
+            "responses": responses,
+            "entry_count": len(output["entries"]),
+            "template": output["statement_template"],
+            "ai_status": output["ai_assistance"].get("status"),
+        },
+    )
+    session.commit()
     return output
 
 
 @app.get("/api/projects/{project_id}/review-summary")
-def review_summary(project_id: str, user: dict = Depends(require_user)):
-    with connect() as conn:
-        project = get_project_or_404(conn, project_id)
-        statements = sort_statements_by_code([
-            row_to_dict(row)
-            for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
-        ])
-        conversion_row = conn.execute(
-            "SELECT output_json FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
-            (project_id,),
-        ).fetchone()
-        validation = validate_statement_records(project, statements) if statements else None
-    conversion = parse_json_field(conversion_row["output_json"], {}) if conversion_row else None
+def review_summary(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
+    project = get_project_or_404(session, project_id)
+    statements = sort_statements_by_code([
+        row_to_dict(statement)
+        for statement in session.scalars(select(Statement).where(Statement.project_id == project_id))
+    ])
+    conversion_row = session.scalar(
+        select(Conversion).where(Conversion.project_id == project_id).order_by(Conversion.created_at.desc()).limit(1)
+    )
+    validation = validate_statement_records(row_to_dict(project), statements) if statements else None
+    conversion = parse_json_field(conversion_row.output_json, {}) if conversion_row else None
     return build_review_summary(statements, conversion, validation)
 
 
 @app.post("/api/projects/{project_id}/review", status_code=201)
-def record_review(project_id: str, payload: ReviewRequest, user: dict = Depends(require_write_user)):
+def record_review(
+    project_id: str,
+    payload: ReviewRequest,
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+):
     if payload.decision not in {"approved", "changes_requested"}:
         raise HTTPException(400, {"error": "Decision must be approved or changes_requested."})
 
     reviewer_name = payload.reviewer_name.strip() or "Unassigned reviewer"
     memo = payload.memo.strip()
-    review = {
-        "id": str(uuid.uuid4()),
-        "project_id": project_id,
-        "reviewer_name": reviewer_name,
-        "decision": payload.decision,
-        "memo": memo,
-        "created_at": utc_now(),
-    }
-    with connect() as conn:
-        get_project_or_404(conn, project_id)
-        conversion = conn.execute(
-            "SELECT id FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
-            (project_id,),
-        ).fetchone()
-        if not conversion:
-            raise HTTPException(400, {"error": "Generate a conversion draft before review."})
-        if payload.decision == "approved":
-            # 2차 승인 게이트: 오류 수준(미분류 잔존)은 승인을 차단, 경고는 검토자 판단에 맡긴다.
-            unclassified = conn.execute(
-                "SELECT COUNT(*) AS count FROM statements WHERE project_id = ? AND standard_code = ?",
-                (project_id, "X9999"),
-            ).fetchone()["count"]
-            if unclassified:
-                raise HTTPException(
-                    409,
-                    {
-                        "error": f"미분류 계정 {unclassified}건이 남아 있어 승인할 수 없습니다. 담당자 분류 또는 AI 제안 승인(1차 승인) 후 다시 시도하세요.",
-                        "unclassified_count": unclassified,
-                    },
-                )
-        conn.execute(
-            "INSERT INTO reviews (id, project_id, reviewer_name, decision, memo, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                review["id"], review["project_id"], review["reviewer_name"],
-                review["decision"], review["memo"], review["created_at"],
-            ),
+    get_project_or_404(session, project_id)
+    conversion = session.scalar(
+        select(Conversion).where(Conversion.project_id == project_id).order_by(Conversion.created_at.desc()).limit(1)
+    )
+    if not conversion:
+        raise HTTPException(400, {"error": "Generate a conversion draft before review."})
+    if payload.decision == "approved":
+        # 2차 승인 게이트: 오류 수준(미분류 잔존)은 승인을 차단, 경고는 검토자 판단에 맡긴다.
+        unclassified = session.scalar(
+            select(func.count())
+            .select_from(Statement)
+            .where(Statement.project_id == project_id, Statement.standard_code == "X9999")
         )
-        conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", (payload.decision, utc_now(), project_id))
-        log_event(
-            conn,
-            project_id,
-            "review.recorded",
-            {"review_id": review["id"], "decision": payload.decision, "memo": memo, "conversion_id": conversion["id"]},
-            actor=reviewer_name,
-        )
-    return review
+        if unclassified:
+            raise HTTPException(
+                409,
+                {
+                    "error": f"미분류 계정 {unclassified}건이 남아 있어 승인할 수 없습니다. 담당자 분류 또는 AI 제안 승인(1차 승인) 후 다시 시도하세요.",
+                    "unclassified_count": unclassified,
+                },
+            )
+    review = Review(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        reviewer_name=reviewer_name,
+        decision=payload.decision,
+        memo=memo,
+        created_at=utc_now(),
+    )
+    session.add(review)
+    session.execute(update(Project).where(Project.id == project_id).values(status=payload.decision, updated_at=utc_now()))
+    log_event(
+        session,
+        project_id,
+        "review.recorded",
+        {"review_id": review.id, "decision": payload.decision, "memo": memo, "conversion_id": conversion.id},
+        actor=reviewer_name,
+    )
+    body = row_to_dict(review)
+    session.commit()
+    return body
 
 
 @app.get("/api/projects/{project_id}/audit")
-def list_audit(project_id: str, user: dict = Depends(require_user)):
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at DESC", (project_id,)
-        ).fetchall()
-    return [dict(row_to_dict(row), detail=parse_json_field(row["detail_json"], {})) for row in rows]
+def list_audit(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
+    logs = session.scalars(
+        select(AuditLog).where(AuditLog.project_id == project_id).order_by(AuditLog.created_at.desc())
+    )
+    return [dict(row_to_dict(log), detail=parse_json_field(log.detail_json, {})) for log in logs]
 
 
 # --- 내보내기 ---
 
 @app.get("/api/projects/{project_id}/exports/{export_name}")
-def export_project(project_id: str, export_name: str, user: dict = Depends(require_user)):
-    with connect() as conn:
-        project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        conversion = conn.execute(
-            "SELECT output_json FROM conversions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
-            (project_id,),
-        ).fetchone()
-        statements = sort_statements_by_code([
-            dict(row_to_dict(row), checklist=parse_json_field(row["checklist_json"], []))
-            for row in conn.execute("SELECT * FROM statements WHERE project_id = ?", (project_id,))
-        ])
-        latest_extraction = conn.execute(
-            """
-            SELECT e.rows_json, u.file_bytes
-            FROM extractions e
-            LEFT JOIN uploads u ON u.id = e.upload_id
-            WHERE e.project_id = ?
-            ORDER BY e.created_at DESC
-            LIMIT 1
-            """,
-            (project_id,),
-        ).fetchone()
-        audit_rows = [
-            dict(row_to_dict(row), detail=parse_json_field(row["detail_json"], {}))
-            for row in conn.execute("SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at", (project_id,))
-        ]
+def export_project(
+    project_id: str,
+    export_name: str,
+    user: AppUser = Depends(require_user),
+    session: Session = Depends(get_db),
+):
+    project = session.get(Project, project_id)
     if not project:
         raise HTTPException(404, {"error": "Project not found"})
+    conversion = session.scalar(
+        select(Conversion).where(Conversion.project_id == project_id).order_by(Conversion.created_at.desc()).limit(1)
+    )
     if not conversion:
         raise HTTPException(400, {"error": "Generate a conversion draft before export."})
-    output = parse_json_field(conversion["output_json"], {})
+
+    output = parse_json_field(conversion.output_json, {})
     if export_name == "adjustments.csv":
         return Response(
             content=conversion_adjustments_csv(output).encode("utf-8-sig"),
@@ -2618,9 +2607,26 @@ def export_project(project_id: str, export_name: str, user: dict = Depends(requi
             headers={"Content-Disposition": 'attachment; filename="gtf_basis_report.txt"'},
         )
     if export_name == "review-workbook.xlsx":
-        extraction_rows = dart_raw_rows_from_upload(row_to_dict(latest_extraction) if latest_extraction else None)
-        if not extraction_rows and latest_extraction:
-            extraction_rows = parse_json_field(latest_extraction["rows_json"], [])
+        statements = sort_statements_by_code([
+            dict(row_to_dict(statement), checklist=parse_json_field(statement.checklist_json, []))
+            for statement in session.scalars(select(Statement).where(Statement.project_id == project_id))
+        ])
+        latest = session.execute(
+            select(Extraction.rows_json, Upload.file_bytes)
+            .join(Upload, Upload.id == Extraction.upload_id, isouter=True)
+            .where(Extraction.project_id == project_id)
+            .order_by(Extraction.created_at.desc())
+            .limit(1)
+        ).first()
+        audit_rows = [
+            dict(row_to_dict(log), detail=parse_json_field(log.detail_json, {}))
+            for log in session.scalars(
+                select(AuditLog).where(AuditLog.project_id == project_id).order_by(AuditLog.created_at)
+            )
+        ]
+        extraction_rows = dart_raw_rows_from_upload(dict(latest._mapping) if latest else None)
+        if not extraction_rows and latest:
+            extraction_rows = parse_json_field(latest.rows_json, [])
         workbook = review_workbook_bytes(row_to_dict(project), extraction_rows, statements, output, audit_rows)
         return Response(
             content=workbook,

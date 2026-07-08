@@ -1,6 +1,7 @@
 import http.cookiejar
 import json
 import os
+import socket
 import subprocess
 import time
 import unittest
@@ -63,6 +64,12 @@ class EndToEndSmokeTest(unittest.TestCase):
         if not dart_key:
             raise unittest.SkipTest("DART_API_KEY is required for live E2E smoke test.")
 
+        # 포트가 이미 점유돼 있으면 우리가 띄운 서버는 bind에 실패하고, 폴링이 낡은 서버에
+        # 붙어 옛 코드를 테스트하게 된다. 서버를 띄우기 전에 포트가 비어 있는지 확인한다.
+        with socket.socket() as probe:
+            if probe.connect_ex(("127.0.0.1", PORT)) == 0:
+                raise RuntimeError(f"Port {PORT} is already in use; stop the stale server before running E2E.")
+
         env = {
             **os.environ,
             "ADMIN_EMAIL": "admin@example.com",
@@ -79,6 +86,7 @@ class EndToEndSmokeTest(unittest.TestCase):
             text=True,
         )
         cls.client = ApiClient(BASE_URL)
+
         deadline = time.time() + 60
         while time.time() < deadline:
             if cls.server.poll() is not None:

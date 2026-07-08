@@ -16,7 +16,6 @@ OpenAI 임베딩 호출을 결정론적 스텁으로 대체해 키 없이도 코
 """
 
 import os
-import sqlite3
 import sys
 import unittest
 
@@ -26,7 +25,13 @@ for _candidate in (_HERE, os.path.dirname(_HERE)):
         sys.path.insert(0, _candidate)
         break
 
+from sqlalchemy import func, select, update  # noqa: E402
+
 import server  # noqa: E402
+from gtf_app.models import StandardsParagraph  # noqa: E402
+
+sys.path.insert(0, _HERE)
+from reference_fixture import paragraph_session  # noqa: E402
 
 
 # 결정론적 가짜 임베딩: 도메인 토큰의 등장 횟수를 벡터로 만들어 의미 유사도가 성립하게 한다.
@@ -42,10 +47,7 @@ def fake_embed(texts):
 
 class RagStandardsTest(unittest.TestCase):
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
-        self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(server.SQLITE_SCHEMA_PATH.read_text(encoding="utf-8"))
-        server.ensure_standards_paragraphs(self.conn)
+        self.conn = paragraph_session()
         self._real_embed = server.openai_embed
 
     def tearDown(self):
@@ -63,11 +65,11 @@ class RagStandardsTest(unittest.TestCase):
 
     def test_embeddings_are_stored(self):
         self._seed_embeddings()
-        row = self.conn.execute(
-            "SELECT embedding FROM standards_paragraphs WHERE embedding IS NOT NULL LIMIT 1"
-        ).fetchone()
-        self.assertIsNotNone(row)
-        self.assertTrue(row["embedding"].startswith("["))
+        embedding = self.conn.scalar(
+            select(StandardsParagraph.embedding).where(StandardsParagraph.embedding.is_not(None)).limit(1)
+        )
+        self.assertIsNotNone(embedding)
+        self.assertTrue(embedding.startswith("["))
 
     def test_semantic_search_ranks_relevant_paragraph_first(self):
         self._seed_embeddings()
@@ -102,9 +104,7 @@ class ParagraphSeedIdempotencyTest(unittest.TestCase):
     """SQL 시드는 upsert(멱등)이며, content_hash가 바뀐 문단만 재임베딩한다."""
 
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
-        self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(server.SQLITE_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.conn = paragraph_session()
         self._real_embed = server.openai_embed
         self.calls = []
 
@@ -120,14 +120,18 @@ class ParagraphSeedIdempotencyTest(unittest.TestCase):
         server.openai_embed = self._real_embed
         self.conn.close()
 
-    def count(self, where=""):
-        sql = "SELECT COUNT(*) AS c FROM standards_paragraphs" + (f" WHERE {where}" if where else "")
-        return self.conn.execute(sql).fetchone()["c"]
+    def count(self, only_missing_embedding=None):
+        stmt = select(func.count()).select_from(StandardsParagraph)
+        if only_missing_embedding is True:
+            stmt = stmt.where(StandardsParagraph.embedding.is_(None))
+        elif only_missing_embedding is False:
+            stmt = stmt.where(StandardsParagraph.embedding.is_not(None))
+        return self.conn.scalar(stmt)
 
     def test_first_seed_embeds_everything_once(self):
         self.assertEqual(len(self.calls), 1)
         self.assertGreater(self.count(), 0)
-        self.assertEqual(self.count("embedding IS NOT NULL"), self.count())  # 전 문단 임베딩됨
+        self.assertEqual(self.count(only_missing_embedding=False), self.count())  # 전 문단 임베딩됨
 
     def test_restart_is_idempotent_and_does_not_reembed(self):
         before_rows, before_calls = self.count(), len(self.calls)
@@ -139,25 +143,33 @@ class ParagraphSeedIdempotencyTest(unittest.TestCase):
     def test_only_changed_paragraph_is_reembedded(self):
         # 시드 SQL의 문단 내용이 개정되면 content_hash가 달라진다.
         # DB 쪽 해시를 옛 값으로 되돌려 '개정 배포' 상황을 재현한다.
-        target_id = self.conn.execute("SELECT id FROM standards_paragraphs ORDER BY id LIMIT 1").fetchone()["id"]
-        self.conn.execute("UPDATE standards_paragraphs SET content_hash = '개정전해시' WHERE id = ?", (target_id,))
+        target_id = self.conn.scalar(select(StandardsParagraph.id).order_by(StandardsParagraph.id).limit(1))
+        self.conn.execute(
+            update(StandardsParagraph).where(StandardsParagraph.id == target_id).values(content_hash="개정전해시")
+        )
+        self.conn.commit()
         before_calls = len(self.calls)
         server.ensure_standards_paragraphs(self.conn)
-        self.assertEqual(self.count("embedding IS NULL"), 1)  # 바뀐 하나만 비워짐
+        self.assertEqual(self.count(only_missing_embedding=True), 1)  # 바뀐 하나만 비워짐
         server.ensure_paragraph_embeddings(self.conn)
         self.assertEqual(len(self.calls) - before_calls, 1)
         self.assertEqual(len(self.calls[-1]), 1)  # 그 문단 하나만 임베딩 요청
-        self.assertEqual(self.count("embedding IS NULL"), 0)
+        self.assertEqual(self.count(only_missing_embedding=True), 0)
 
     def test_content_hash_matches_content(self):
         # 시드가 넣은 content_hash는 실제 임베딩 대상 텍스트의 sha256과 일치해야 한다
         import hashlib
 
         row = self.conn.execute(
-            "SELECT reference_code, title, content, content_hash FROM standards_paragraphs ORDER BY id LIMIT 1"
-        ).fetchone()
-        text = f"{row['reference_code']} {row['title']} {row['content']}"
-        self.assertEqual(row["content_hash"], hashlib.sha256(text.encode("utf-8")).hexdigest())
+            select(
+                StandardsParagraph.reference_code,
+                StandardsParagraph.title,
+                StandardsParagraph.content,
+                StandardsParagraph.content_hash,
+            ).order_by(StandardsParagraph.id).limit(1)
+        ).first()
+        text = f"{row.reference_code} {row.title} {row.content}"
+        self.assertEqual(row.content_hash, hashlib.sha256(text.encode("utf-8")).hexdigest())
 
 
 if __name__ == "__main__":

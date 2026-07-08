@@ -139,8 +139,10 @@ uvicorn server:app --host 0.0.0.0 --port $PORT
 - `Procfile`: Heroku 스타일 실행 명령
 - `render.yaml`: Render 웹 서비스 설정
 - `runtime.txt`: Python 런타임 버전
-- `requirements.txt`: FastAPI/uvicorn, OpenAI SDK, openpyxl, Postgres 및 PDF 파서 의존성
+- `requirements.txt`: FastAPI/uvicorn, SQLAlchemy, OpenAI SDK, openpyxl, Postgres 및 PDF 파서 의존성
 - `.env.example`: 로컬 환경변수 예시
+
+DB 스키마는 `gtf_app/models.py`의 SQLAlchemy ORM 모델이 단일 출처이며, 서버 시작 시 `create_all`이 SQLite/Postgres 양쪽에 테이블을 만듭니다. 별도 스키마 SQL을 손으로 적용할 필요가 없습니다.
 
 헬스 체크:
 

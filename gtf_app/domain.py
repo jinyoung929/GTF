@@ -210,7 +210,7 @@ def build_statement_record(project_period: str, row: dict, reference: "Reference
     }
 
 
-def validate_statement_records(project: dict, statements: list[sqlite3.Row]) -> dict:
+def validate_statement_records(project: dict, statements: list[dict]) -> dict:
     total = sum(float(row["amount"]) for row in statements)
     judgment_count = sum(1 for row in statements if row["mapping_type"] == "judgment")
     simple_count = sum(1 for row in statements if row["mapping_type"] == "simple")

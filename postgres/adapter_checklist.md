@@ -5,11 +5,11 @@ This file tracks the remaining work needed to switch the app from SQLite to Neon
 ## Current State
 
 - SQLite is still the active runtime backend.
-- `postgres/schema.sql` is ready for Neon.
+- The schema is created from the SQLAlchemy ORM models (`gtf_app/models.py`) at startup.
 - `supabase/seed_reference_data.sql` can seed the reference DB.
 - `/healthz` reports `database_config`.
 - `DATABASE_BACKEND=postgres` now routes through the initial psycopg connection adapter.
-- The app expects `postgres/schema.sql` and `supabase/seed_reference_data.sql` to be run before startup.
+- The app creates its own schema and seeds reference data on startup; no manual SQL step is required.
 
 ## Implementation Tasks
 
@@ -34,7 +34,7 @@ DATABASE_URL=postgresql://...
 
 ## Cutover Rule
 
-Do not set `DATABASE_BACKEND=postgres` in Render until `postgres/schema.sql` and seed data have been applied and `/healthz` returns:
+After setting `DATABASE_BACKEND=postgres` in Render, confirm `/healthz` returns:
 
 ```json
 {

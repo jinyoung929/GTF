@@ -18,14 +18,13 @@ DATABASE_URL=postgresql://...
 
 ## Schema
 
-The generic Postgres schema is in `postgres/schema.sql`.
+The schema's single source of truth is the SQLAlchemy ORM models in `gtf_app/models.py`.
+On startup the app runs `Base.metadata.create_all(engine)`, which creates any missing
+tables on both SQLite and Postgres. No schema file needs to be applied by hand.
 
-For Neon, run these files in the SQL editor:
-
-1. `postgres/schema.sql`
-2. `supabase/seed_reference_data.sql`
-
-The seed file is shared with the Supabase path because it uses ordinary Postgres `insert ... on conflict` statements.
+Reference data (standard accounts, aliases, checklists, standards paragraphs, statement
+templates) is seeded from `seeds/*.sql` at startup with `insert ... on conflict do update`,
+so the seeds are idempotent and run on both backends.
 
 ## File Storage
 
@@ -42,7 +41,7 @@ Recommended production split:
 
 ## App Runtime
 
-The app includes an initial psycopg adapter. Set:
+The app uses one SQLAlchemy engine for both backends (`gtf_app/db.py`). Set:
 
 ```bash
 DATABASE_BACKEND=postgres
@@ -55,4 +54,5 @@ Keep SQLite as the local fallback:
 DATABASE_BACKEND=sqlite
 ```
 
-Before enabling `DATABASE_BACKEND=postgres`, run `postgres/schema.sql` and `supabase/seed_reference_data.sql` in the Postgres provider.
+Nothing has to be applied by hand before switching: the first startup creates the schema
+and seeds the reference tables, then fails fast if the seeds and the calculators disagree.

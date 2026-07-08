@@ -24,7 +24,10 @@ for _candidate in (_HERE, os.path.dirname(_HERE)):
         sys.path.insert(0, _candidate)
         break
 
+from sqlalchemy import delete, func, select  # noqa: E402
+
 import server  # noqa: E402
+from gtf_app.models import ChecklistItem, KgaapAccount, StandardAccount  # noqa: E402
 from gtf_app.domain import (  # noqa: E402
     CALC_ACCOUNT_KEYS,
     CALC_CHECKLIST_KEYS,
@@ -34,7 +37,7 @@ from gtf_app.domain import (  # noqa: E402
 )
 
 sys.path.insert(0, _HERE)
-from reference_fixture import load_reference, seeded_connection  # noqa: E402
+from reference_fixture import load_reference, seeded_session  # noqa: E402
 
 REF = load_reference()
 
@@ -70,35 +73,38 @@ class DbNormalizationTest(unittest.TestCase):
 
 class AliasDbSingleSourceTest(unittest.TestCase):
     def setUp(self):
-        self.conn = seeded_connection()
+        self.session = seeded_session()
 
     def tearDown(self):
-        self.conn.close()
+        self.session.close()
+
+    def alias_count(self):
+        return self.session.scalar(select(func.count()).select_from(KgaapAccount))
 
     def test_aliases_seeded_and_loaded(self):
-        count = self.conn.execute("SELECT COUNT(*) AS c FROM kgaap_accounts").fetchone()["c"]
-        self.assertGreater(count, 0)
-        self.assertEqual(count, len(REF.aliases))
+        self.assertGreater(self.alias_count(), 0)
+        self.assertEqual(self.alias_count(), len(REF.aliases))
 
     def test_match_priority_is_alias_length(self):
-        rows = self.conn.execute("SELECT kgaap_name, match_priority FROM kgaap_accounts").fetchall()
-        for row in rows:
-            self.assertEqual(row["match_priority"], len(row["kgaap_name"]))
+        rows = self.session.execute(select(KgaapAccount.kgaap_name, KgaapAccount.match_priority)).all()
+        for name, priority in rows:
+            self.assertEqual(priority, len(name))
 
     def test_alias_targets_exist_in_standard_accounts(self):
         # 별칭이 가리키는 계정키가 표준계정 테이블에 실재해야 한다 (시드 간 정합성)
-        orphans = self.conn.execute(
-            "SELECT kgaap_name FROM kgaap_accounts k "
-            "WHERE NOT EXISTS (SELECT 1 FROM standard_accounts s WHERE s.account_key = k.account_key)"
-        ).fetchall()
-        self.assertEqual([row["kgaap_name"] for row in orphans], [])
+        known_keys = set(self.session.scalars(select(StandardAccount.account_key)))
+        orphans = [
+            name
+            for name, key in self.session.execute(select(KgaapAccount.kgaap_name, KgaapAccount.account_key)).all()
+            if key not in known_keys
+        ]
+        self.assertEqual(orphans, [])
 
     def test_seed_is_idempotent(self):
-        before = self.conn.execute("SELECT COUNT(*) AS c FROM kgaap_accounts").fetchone()["c"]
-        server.ensure_account_aliases(self.conn)
-        server.ensure_account_aliases(self.conn)
-        after = self.conn.execute("SELECT COUNT(*) AS c FROM kgaap_accounts").fetchone()["c"]
-        self.assertEqual(after, before)
+        before = self.alias_count()
+        server.ensure_account_aliases(self.session)
+        server.ensure_account_aliases(self.session)
+        self.assertEqual(self.alias_count(), before)
 
     def test_build_statement_record_uses_injected_reference(self):
         record = server.build_statement_record("2024", {"account_name": "금융상품", "amount": 100}, REF)
@@ -117,27 +123,30 @@ class ReferenceContractTest(unittest.TestCase):
             self.assertTrue(any(key in e for e in errors), f"{key} 누락이 보고되지 않음")
 
     def test_missing_checklist_key_fails_startup(self):
-        conn = seeded_connection()
+        session = seeded_session()
         try:
-            conn.execute("DELETE FROM checklist_items WHERE account_key='lease' AND item_key='discount_rate'")
+            session.execute(
+                delete(ChecklistItem).where(
+                    ChecklistItem.account_key == "lease", ChecklistItem.item_key == "discount_rate"
+                )
+            )
             with self.assertRaises(RuntimeError) as ctx:
-                server.refresh_reference_cache(conn)
+                server.refresh_reference_cache(session)
             self.assertIn("discount_rate", str(ctx.exception))
         finally:
-            conn.close()
+            session.close()
             load_reference()  # 전역 REFERENCE 캐시를 정상 상태로 복원
 
     def test_missing_account_key_fails_startup(self):
-        conn = seeded_connection()
+        session = seeded_session()
         try:
-            conn.execute("DELETE FROM kgaap_accounts WHERE account_key='provision'")
-            conn.execute("DELETE FROM checklist_items WHERE account_key='provision'")
-            conn.execute("DELETE FROM standard_accounts WHERE account_key='provision'")
+            for model in (KgaapAccount, ChecklistItem, StandardAccount):
+                session.execute(delete(model).where(model.account_key == "provision"))
             with self.assertRaises(RuntimeError) as ctx:
-                server.refresh_reference_cache(conn)
+                server.refresh_reference_cache(session)
             self.assertIn("provision", str(ctx.exception))
         finally:
-            conn.close()
+            session.close()
             load_reference()
 
     def test_calc_checklist_keys_cover_all_judgment_calculators(self):

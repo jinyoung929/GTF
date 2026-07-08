@@ -17,7 +17,6 @@ AI 1차 분류 및 기준서 문단 검색 DB 테스트
 import io
 import json
 import os
-import sqlite3
 import sys
 import unittest
 from unittest import mock
@@ -39,7 +38,7 @@ from gtf_app.domain import (  # noqa: E402
 from gtf_app.excel_export import review_workbook_bytes  # noqa: E402
 
 sys.path.insert(0, _HERE)
-from reference_fixture import load_reference  # noqa: E402
+from reference_fixture import load_reference, paragraph_session  # noqa: E402
 
 # 기준정보는 운영과 동일하게 SQL 시드 → DB 조회로 로드해 주입한다
 REF = load_reference()
@@ -54,29 +53,22 @@ PROJECT = {
 }
 
 
-def seeded_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    server.ensure_standards_paragraphs(conn)
-    return conn
-
-
 class StandardsParagraphsSeedTest(unittest.TestCase):
     def test_both_standard_sets_are_seeded_separately(self):
-        conn = seeded_connection()
+        conn = paragraph_session()
         rows = server.find_standards_paragraphs(conn)
         self.assertTrue(rows)
         sets = {row["standard_set"] for row in rows}
         self.assertEqual(sets, {"K-GAAP", "K-IFRS"})
 
     def test_seed_is_idempotent(self):
-        conn = seeded_connection()
+        conn = paragraph_session()
         before = len(server.find_standards_paragraphs(conn))
         server.ensure_standards_paragraphs(conn)
         self.assertEqual(len(server.find_standards_paragraphs(conn)), before)
 
     def test_judgment_account_has_paragraphs_from_both_sets(self):
-        conn = seeded_connection()
+        conn = paragraph_session()
         for account_key in ("lease", "development", "revenue", "financial_instrument", "provision", "receivables"):
             sets = {row["standard_set"] for row in server.find_standards_paragraphs(conn, account_key=account_key)}
             self.assertEqual(sets, {"K-GAAP", "K-IFRS"}, account_key)
@@ -84,19 +76,19 @@ class StandardsParagraphsSeedTest(unittest.TestCase):
 
 class StandardsParagraphsSearchTest(unittest.TestCase):
     def test_keyword_search_hits_content_and_keywords(self):
-        conn = seeded_connection()
+        conn = paragraph_session()
         hits = server.find_standards_paragraphs(conn, query="기대신용손실")
         self.assertTrue(hits)
         self.assertTrue(all("receivables" == row["account_key"] for row in hits))
 
     def test_standard_set_filter(self):
-        conn = seeded_connection()
+        conn = paragraph_session()
         hits = server.find_standards_paragraphs(conn, account_key="lease", standard_set="K-GAAP")
         self.assertEqual({row["standard_set"] for row in hits}, {"K-GAAP"})
         self.assertIn("운용리스", hits[0]["content"])
 
     def test_no_match_returns_empty(self):
-        conn = seeded_connection()
+        conn = paragraph_session()
         self.assertEqual(server.find_standards_paragraphs(conn, query="존재하지않는키워드"), [])
 
 
@@ -216,12 +208,15 @@ class ExpandedStandardCatalogTest(unittest.TestCase):
 
     def test_seed_reference_data_handles_expanded_accounts(self):
         # 보조 조회 테이블(ifrs_accounts 등)은 핵심 시드 테이블에서 파생 생성된다
-        from reference_fixture import seeded_connection as fixture_connection
+        from sqlalchemy import func, select
 
-        conn = fixture_connection()
-        server.seed_reference_data(conn)
-        accounts = conn.execute("SELECT COUNT(*) AS c FROM standard_accounts").fetchone()["c"]
-        derived = conn.execute("SELECT COUNT(*) AS c FROM ifrs_accounts").fetchone()["c"]
+        from gtf_app.models import IfrsAccount, StandardAccount
+        from reference_fixture import seeded_session
+
+        session = seeded_session()
+        server.seed_reference_data(session)
+        accounts = session.scalar(select(func.count()).select_from(StandardAccount))
+        derived = session.scalar(select(func.count()).select_from(IfrsAccount))
         self.assertEqual(derived, accounts)
         self.assertEqual(accounts, len(REF.accounts))
 
@@ -230,35 +225,39 @@ class StatementTemplateSeedTest(unittest.TestCase):
     """표준양식 라인 SQL 시드(단일 출처)가 전 계정을 커버하고 코드 도출 순서와 일치하는지 검증."""
 
     def setUp(self):
-        import sqlite3
+        from reference_fixture import seeded_session
 
-        self.conn = sqlite3.connect(":memory:")
-        self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(server.SQLITE_SCHEMA_PATH.read_text(encoding="utf-8"))
-        server.ensure_reference_accounts(self.conn)
-        server.ensure_statement_templates(self.conn)
+        self.conn = seeded_session()
 
     def tearDown(self):
         self.conn.close()
 
     def rows(self):
+        from sqlalchemy import select
+
+        from gtf_app.models import FinancialStatementTemplate
+
         return self.conn.execute(
-            "SELECT account_key, display_order, line_item FROM financial_statement_templates"
-        ).fetchall()
+            select(
+                FinancialStatementTemplate.account_key,
+                FinancialStatementTemplate.display_order,
+                FinancialStatementTemplate.line_item,
+            )
+        ).all()
 
     def test_every_standard_account_has_a_template_line(self):
-        mapped = {row["account_key"] for row in self.rows()}
+        mapped = {row.account_key for row in self.rows()}
         self.assertEqual(mapped, set(REF.accounts.keys()))
 
     def test_display_order_matches_account_code_derivation(self):
         from gtf_app.domain import account_presentation_order
 
         for row in self.rows():
-            code = REF.accounts[row["account_key"]]["code"]
+            code = REF.accounts[row.account_key]["code"]
             self.assertEqual(
-                row["display_order"],
+                row.display_order,
                 account_presentation_order(code),
-                f"{row['account_key']}의 SQL display_order가 계정코드 도출값과 다릅니다",
+                f"{row.account_key}의 SQL display_order가 계정코드 도출값과 다릅니다",
             )
 
     def test_seed_is_idempotent(self):
