@@ -2,7 +2,6 @@ import io
 import json
 import os
 import sys
-import zipfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -11,6 +10,7 @@ from openpyxl import load_workbook
 
 import gtf_app.dart as dart_module
 import server
+from gtf_app.dart import dart_raw_statement_rows, dart_statement_rows
 from reference_fixture import load_reference
 
 REF = load_reference()
@@ -46,7 +46,7 @@ class DartImportAndWorkbookTests(unittest.TestCase):
             ],
         }
 
-        rows, issues = server.dart_statement_rows(payload, REF.aliases)
+        rows, issues = dart_statement_rows(payload, REF.aliases)
 
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["account_name"], "리스부채")
@@ -69,7 +69,7 @@ class DartImportAndWorkbookTests(unittest.TestCase):
             ],
         }
 
-        rows, _issues = server.dart_statement_rows(payload, REF.aliases)
+        rows, _issues = dart_statement_rows(payload, REF.aliases)
 
         self.assertEqual([row["account_name"] for row in rows], ["현금및현금성자산", "매출채권"])
 
@@ -83,8 +83,8 @@ class DartImportAndWorkbookTests(unittest.TestCase):
             ],
         }
 
-        raw_rows = server.dart_raw_statement_rows(payload, REF.aliases)
-        filtered_rows, _issues = server.dart_statement_rows(payload, REF.aliases)
+        raw_rows = dart_raw_statement_rows(payload, REF.aliases)
+        filtered_rows, _issues = dart_statement_rows(payload, REF.aliases)
 
         self.assertEqual([row["account_name"] for row in raw_rows], ["자산총계", "현금및현금성자산"])
         self.assertEqual([row["account_name"] for row in filtered_rows], ["현금및현금성자산"])
@@ -102,7 +102,7 @@ class DartImportAndWorkbookTests(unittest.TestCase):
         self.assertEqual(rows, saved_payload["raw_rows"])
 
     def test_dart_statement_rows_reports_api_error(self):
-        rows, issues = server.dart_statement_rows({"status": "013", "message": "조회된 데이터가 없습니다."}, REF.aliases)
+        rows, issues = dart_statement_rows({"status": "013", "message": "조회된 데이터가 없습니다."}, REF.aliases)
 
         self.assertEqual(rows, [])
         self.assertIn("DART API 오류 013", issues[0])

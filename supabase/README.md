@@ -1,28 +1,24 @@
 # Supabase Setup
 
-Use Supabase for real service deployment. SQLite remains useful only for local MVP development.
+Supabase is one option for the deployed Postgres database. Neon is the documented default
+(see `postgres/README.md`); both are plain Postgres, so the app treats them identically.
+SQLite remains the local development default.
 
 ## 1. Create Project
 
 Create a Supabase project and copy:
 
-- Project URL: `SUPABASE_URL`
-- Service role key: `SUPABASE_SERVICE_ROLE_KEY`
 - Database connection string: `SUPABASE_DB_URL`
+- Project URL: `SUPABASE_URL` (only needed for Storage)
+- Service role key: `SUPABASE_SERVICE_ROLE_KEY` (only needed for Storage)
 
 Keep the service role key server-side only. Never expose it in browser JavaScript.
 
-## 2. Create Tables
+## 2. Tables
 
-Open Supabase SQL Editor and run:
-
-1. `supabase/schema.sql`
-2. `supabase/seed_reference_data.sql`
-
-This creates:
-
-- workflow tables: projects, uploads, extractions, statements, conversions, reviews, audit_logs
-- reference tables: standard_accounts, kgaap_accounts, ifrs_accounts, mapping_rules, checklist_items, standards_references
+No SQL has to be run by hand. The schema's single source of truth is the SQLAlchemy ORM
+models in `gtf_app/models.py`; on startup the app runs `Base.metadata.create_all(engine)`
+and then seeds the reference tables from `seeds/*.sql` with idempotent upserts.
 
 ## 3. Storage
 
@@ -32,28 +28,21 @@ Create a private Storage bucket:
 gtf-uploads
 ```
 
-Uploaded PDFs, Excel files, CSVs, and images should move from local `data/uploads` to this bucket in the production adapter.
+Uploaded PDFs, Excel files, CSVs, and images currently live in the `uploads.file_bytes`
+column and in local `data/uploads`. Moving them to this bucket is a future step.
 
 ## 4. Server Environment
 
-Set these in Render/Railway/Fly:
+There is no `DATABASE_BACKEND=supabase` mode — Supabase is reached over the standard
+Postgres backend. Set these in Render/Railway/Fly:
 
 ```bash
-DATABASE_BACKEND=supabase
-SUPABASE_URL=...
-SUPABASE_SERVICE_ROLE_KEY=...
-SUPABASE_DB_URL=...
-SUPABASE_STORAGE_BUCKET=gtf-uploads
+DATABASE_BACKEND=postgres
+DATABASE_URL=<the Supabase connection string>
 GEMINI_API_KEY=...
 OCR_PROVIDER=gemini
 GEMINI_OCR_MODEL=gemini-3.5-flash
 ```
 
-## 5. Next Implementation Step
-
-The current Python server still runs on SQLite. The next code step is to add a storage adapter:
-
-- `SQLiteRepository`: current local implementation
-- `SupabaseRepository`: Postgres + Storage implementation
-
-After that, `DATABASE_BACKEND=supabase` can switch the deployed app to Supabase without changing the UI.
+The first startup creates the schema, seeds reference data, and fails fast if the seeds
+and the conversion calculators disagree.

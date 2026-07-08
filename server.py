@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import csv
 import base64
 import contextlib
-import hashlib
-import io
 import importlib.util
 import json
 import math
@@ -63,11 +60,8 @@ from gtf_app.auth import (
 )
 from gtf_app.dart import (
     dart_raw_rows_from_upload,
-    dart_raw_statement_rows,
-    dart_statement_rows,
     fetch_dart_available_reports,
     fetch_dart_statement_rows,
-    normalize_dart_amount,
 )
 from gtf_app.domain import (
     ReferenceData,
@@ -92,7 +86,6 @@ DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "gtf.sqlite3"
 SEED_DIR = ROOT / "seeds"
-STATEMENT_TEMPLATES_SEED_PATH = SEED_DIR / "financial_statement_templates.sql"
 FIGMA_DIST_DIR = ROOT / "figma_make" / "dist"
 ENV_PATHS = (ROOT / ".env", ROOT / ".env.local")
 GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024

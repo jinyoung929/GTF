@@ -187,10 +187,6 @@ def dart_account_filter_reason(item: dict, aliases: dict) -> str:
     return ""
 
 
-def should_keep_dart_account(item: dict, aliases: dict) -> bool:
-    return not dart_account_filter_reason(item, aliases)
-
-
 def summarize_filter_reasons(reasons: dict[str, int]) -> str:
     if not reasons:
         return ""
