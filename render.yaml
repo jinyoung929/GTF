@@ -23,19 +23,9 @@ services:
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
-      - key: APP_ACCESS_CODE
-        sync: false
       - key: DATABASE_BACKEND
         value: postgres
       - key: DATABASE_URL
         sync: false
       - key: NEON_DATABASE_URL
         sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: SUPABASE_DB_URL
-        sync: false
-      - key: SUPABASE_STORAGE_BUCKET
-        value: gtf-uploads

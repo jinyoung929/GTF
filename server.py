@@ -874,14 +874,6 @@ def ai_config() -> dict:
     }
 
 
-def access_config() -> dict:
-    return {
-        "enabled": False,
-        "header": "X-GTF-Access-Code",
-        "mode": "open",
-    }
-
-
 def dart_config() -> dict:
     return {
         "provider": "opendart",
@@ -1797,11 +1789,6 @@ def get_ai_config(user: AppUser = Depends(require_user)):
 @app.get("/api/dart-config")
 def get_dart_config(user: AppUser = Depends(require_user)):
     return dart_config()
-
-
-@app.get("/api/access-config")
-def get_access_config():
-    return access_config()
 
 
 # --- 인증 ---

@@ -6,13 +6,9 @@ SQLite remains the local development default.
 
 ## 1. Create Project
 
-Create a Supabase project and copy:
-
-- Database connection string: `SUPABASE_DB_URL`
-- Project URL: `SUPABASE_URL` (only needed for Storage)
-- Service role key: `SUPABASE_SERVICE_ROLE_KEY` (only needed for Storage)
-
-Keep the service role key server-side only. Never expose it in browser JavaScript.
+Create a Supabase project and copy its Postgres connection string. The app reads it from
+`DATABASE_URL` — there are no Supabase-specific environment variables, because the app
+talks to Supabase as plain Postgres.
 
 ## 2. Tables
 
@@ -20,16 +16,11 @@ No SQL has to be run by hand. The schema's single source of truth is the SQLAlch
 models in `gtf_app/models.py`; on startup the app runs `Base.metadata.create_all(engine)`
 and then seeds the reference tables from `seeds/*.sql` with idempotent upserts.
 
-## 3. Storage
+## 3. Storage (not implemented)
 
-Create a private Storage bucket:
-
-```text
-gtf-uploads
-```
-
-Uploaded PDFs, Excel files, CSVs, and images currently live in the `uploads.file_bytes`
-column and in local `data/uploads`. Moving them to this bucket is a future step.
+Uploaded PDFs, Excel files, CSVs, and images are stored in the `uploads.file_bytes` column
+and in local `data/uploads`. Moving them to a Supabase Storage bucket is a future step; the
+app does not read any Supabase Storage credentials today.
 
 ## 4. Server Environment
 
