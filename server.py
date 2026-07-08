@@ -5,6 +5,7 @@ import base64
 import io
 import importlib.util
 import json
+import math
 import mimetypes
 import os
 import re
@@ -72,6 +73,8 @@ ENV_PATHS = (ROOT / ".env", ROOT / ".env.local")
 GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024
 OPENAI_API_ENDPOINT = "https://api.openai.com/v1/responses"
 OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
+OPENAI_EMBEDDING_ENDPOINT = "https://api.openai.com/v1/embeddings"
+EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small").strip() or "text-embedding-3-small"
 SESSION_COOKIE = "gtf_session"
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
 ADMIN_USER_ID = "admin"
@@ -232,6 +235,7 @@ def init_db() -> None:
             ensure_auth_tables(conn)
             conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_read_only boolean NOT NULL DEFAULT false")
             ensure_standards_paragraphs(conn)
+            ensure_paragraph_embeddings(conn)
             ensure_reference_accounts(conn)
             ensure_statement_templates(conn)
             ensure_admin_user(conn)
@@ -251,6 +255,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE projects ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
         seed_reference_data(conn)
         ensure_standards_paragraphs(conn)
+        ensure_paragraph_embeddings(conn)
         ensure_reference_accounts(conn)
         ensure_statement_templates(conn)
         ensure_admin_user(conn)
@@ -978,7 +983,138 @@ def openai_response_text(response: dict) -> str:
     return "\n".join(texts).strip()
 
 
-def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[dict]) -> dict:
+def openai_embed(texts: list[str]) -> list[list[float]] | None:
+    """텍스트 목록을 OpenAI 임베딩 벡터로 변환한다.
+
+    OPENAI_API_KEY가 없거나 호출이 실패하면 None을 반환하고, 검색은 키워드 방식으로 폴백한다.
+    문단 수가 적어 한 번의 배치 호출로 처리한다.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    texts = [str(t) for t in (texts or []) if str(t).strip()]
+    if not api_key or not texts:
+        return None
+    payload = {"model": EMBEDDING_MODEL, "input": texts}
+    request = url_request.Request(
+        OPENAI_EMBEDDING_ENDPOINT,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with url_request.urlopen(request, timeout=45) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        vectors = [item["embedding"] for item in body.get("data", [])]
+        return vectors if len(vectors) == len(texts) else None
+    except (url_error.HTTPError, url_error.URLError, OSError, KeyError, ValueError):
+        return None
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def ensure_paragraph_embeddings(conn) -> None:
+    """기준서 문단을 OpenAI 임베딩으로 변환해 embedding 컬럼(이식형 JSON)에 저장한다 (RAG 검색용).
+
+    pgvector 확장 대신 이식 가능한 텍스트 컬럼에 벡터를 저장하고 검색은 앱에서 코사인으로 수행한다.
+    문단이 수십 개 규모라 ANN 인덱스가 불필요하고, SQLite/Postgres 양쪽에서 동일하게 동작한다.
+    OPENAI_API_KEY가 없거나 호출이 실패하면 임베딩을 비워 두고 키워드 검색으로 폴백하며,
+    서버 시작을 막지 않도록 실패를 조용히 무시한다.
+    """
+    if database_config()["backend"] == "postgres":
+        conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN IF NOT EXISTS embedding text")
+    else:
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(standards_paragraphs)").fetchall()]
+        if "embedding" not in columns:
+            conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN embedding TEXT")
+
+    rows = [
+        row_to_dict(row)
+        for row in conn.execute(
+            "SELECT id, reference_code, title, content FROM standards_paragraphs ORDER BY id"
+        ).fetchall()
+    ]
+    if not rows:
+        return
+    texts = [f"{row['reference_code']} {row['title']} {row['content']}" for row in rows]
+    vectors = openai_embed(texts)
+    if not vectors:
+        return
+    for row, vector in zip(rows, vectors):
+        conn.execute(
+            "UPDATE standards_paragraphs SET embedding = ? WHERE id = ?",
+            (json.dumps(vector), row["id"]),
+        )
+
+
+def semantic_search_paragraphs(conn, query: str, account_key: str | None = None, standard_set: str | None = None, k: int = 5) -> list[dict]:
+    """질의를 임베딩해 코사인 유사도로 기준서 문단을 검색한다 (RAG 검색 단계).
+
+    임베딩이 없으면(키 미설정·미생성) 키워드 LIKE 검색으로 폴백한다.
+    반환 문단에는 retrieval 방식(semantic/keyword)과 유사도가 표시된다.
+    """
+    def keyword_fallback() -> list[dict]:
+        # 임베딩이 없을 때의 폴백: 전체 문구가 안 맞으면 토큰 단위로도 매칭한다.
+        seen: dict[str, dict] = {}
+        for token in [query, *query.split()]:
+            token = (token or "").strip()
+            if not token:
+                continue
+            for row in find_standards_paragraphs(conn, account_key=account_key, query=token, standard_set=standard_set):
+                seen.setdefault(row["id"], dict(row, retrieval="keyword"))
+            if len(seen) >= k:
+                break
+        if not seen and not query:
+            for row in find_standards_paragraphs(conn, account_key=account_key, standard_set=standard_set):
+                seen.setdefault(row["id"], dict(row, retrieval="keyword"))
+        return list(seen.values())[:k]
+
+    query_vectors = openai_embed([query]) if query else None
+    if not query_vectors:
+        return keyword_fallback()
+    query_vector = query_vectors[0]
+
+    sql = (
+        "SELECT id, standard_set, reference_code, paragraph_label, account_key, title, content, keywords, embedding "
+        "FROM standards_paragraphs WHERE 1=1"
+    )
+    params: list = []
+    if account_key:
+        sql += " AND account_key = ?"
+        params.append(account_key)
+    if standard_set:
+        sql += " AND standard_set = ?"
+        params.append(standard_set)
+
+    scored: list[tuple[float, dict]] = []
+    for row in conn.execute(sql, tuple(params)).fetchall():
+        para = row_to_dict(row)
+        embedding = para.pop("embedding", None)
+        if not embedding:
+            continue
+        try:
+            vector = json.loads(embedding)
+        except (ValueError, TypeError):
+            continue
+        scored.append((_cosine_similarity(query_vector, vector), para))
+
+    if not scored:
+        return keyword_fallback()
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    results = []
+    for score, para in scored[:k]:
+        para["similarity"] = round(score, 4)
+        para["retrieval"] = "semantic"
+        results.append(para)
+    return results
+
+
+def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[dict], retrieved_context: list[dict] | None = None) -> dict:
     config = ai_config()
     if not judgment_items:
         return {
@@ -1023,6 +1159,7 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
         },
         "judgment_entries": compact_entries,
         "checklist_inputs": judgment_items,
+        "retrieved_standards": retrieved_context or [],
         "response_contract": {
             "items": [
                 {
@@ -1044,6 +1181,9 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
             "너는 K-GAAP 재무제표를 IFRS 초안으로 변환하는 회계 검토 보조자다. "
             "최종 회계처리를 확정하지 말고, 사용자가 입력한 체크리스트와 변환 초안을 바탕으로 "
             "판단 필요 항목, 추가 질문, 기준 근거 요약만 한국어로 제시한다. "
+            "basis_summary는 반드시 retrieved_standards로 제공된 기준서 문단에 근거해 작성하고 "
+            "해당 문단의 reference_code를 인용하며, 제공된 문단에 없는 내용은 추측하지 않는다. "
+            "금액은 절대 새로 계산하지 않는다. "
             "반드시 사람이 최종 검토하고 승인해야 한다는 전제를 유지한다. JSON만 반환한다."
         ),
         "input": [
@@ -1170,12 +1310,18 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
         }
 
     items = parsed.get("items") if isinstance(parsed.get("items"), list) else []
+    retrieval_mode = "none"
+    if retrieved_context:
+        modes = {p.get("retrieval") for ctx in retrieved_context for p in ctx.get("paragraphs", [])}
+        retrieval_mode = "semantic" if "semantic" in modes else ("keyword" if "keyword" in modes else "none")
     return {
         "provider": "openai",
         "model": config["model"],
         "status": "connected",
         "items": items,
         "overall_note": str(parsed.get("overall_note") or "사람 검토와 승인이 필요합니다."),
+        "retrieved_context": retrieved_context or [],
+        "retrieval_mode": retrieval_mode,
         "human_review_required": True,
     }
 
@@ -1977,15 +2123,26 @@ class AppHandler(BaseHTTPRequestHandler):
             self.respond_json({"error": "standard_set은 K-GAAP 또는 K-IFRS여야 합니다."}, HTTPStatus.BAD_REQUEST)
             return
         with connect() as conn:
-            paragraphs = find_standards_paragraphs(
-                conn,
-                account_key=account_key or None,
-                query=query or None,
-                standard_set=standard_set or None,
-            )
+            if query:
+                paragraphs = semantic_search_paragraphs(
+                    conn,
+                    query,
+                    account_key=account_key or None,
+                    standard_set=standard_set or None,
+                    k=8,
+                )
+            else:
+                paragraphs = find_standards_paragraphs(
+                    conn,
+                    account_key=account_key or None,
+                    query=None,
+                    standard_set=standard_set or None,
+                )
+        retrieval_mode = paragraphs[0].get("retrieval", "none") if paragraphs else "none"
         self.respond_json(
             {
                 "count": len(paragraphs),
+                "retrieval": retrieval_mode,
                 "standard_sets": ["K-GAAP", "K-IFRS"],
                 "paragraphs": paragraphs,
                 "note": "기준서 문단 요약 기준정보입니다. 최종 판단 시 기준서 원문을 확인하세요.",
@@ -2583,7 +2740,30 @@ class AppHandler(BaseHTTPRequestHandler):
             standards_map = load_standards_paragraph_map(conn)
             project = row_to_dict(project_row)
             output = generate_conversion(project, statement_rows, responses, templates, standards_map)
-            output["ai_assistance"] = call_ai_judgment(project, output["entries"], output["judgment_items"])
+            # RAG: 판단 필요 항목마다 계정명·근거를 질의로 관련 기준서 문단을 시맨틱 검색해
+            # AI 판단 보조의 근거(context)로 주입한다. 검색 결과는 조정 금액이 아니라 근거 설명에만 쓰인다.
+            retrieved_context = []
+            for jitem in output["judgment_items"]:
+                query = f"{jitem.get('account', '')} {jitem.get('basis', '')}".strip()
+                paras = semantic_search_paragraphs(conn, query, k=3) if query else []
+                retrieved_context.append(
+                    {
+                        "account": jitem.get("account"),
+                        "paragraphs": [
+                            {
+                                "standard_set": p.get("standard_set"),
+                                "reference_code": p.get("reference_code"),
+                                "title": p.get("title"),
+                                "content": p.get("content"),
+                                "retrieval": p.get("retrieval"),
+                                "similarity": p.get("similarity"),
+                            }
+                            for p in paras
+                        ],
+                    }
+                )
+            output["ai_assistance"] = call_ai_judgment(project, output["entries"], output["judgment_items"], retrieved_context)
+            output["retrieved_context"] = retrieved_context
             conn.execute(
                 "INSERT INTO conversions (id, project_id, output_json, created_at) VALUES (?, ?, ?, ?)",
                 (str(uuid.uuid4()), project_id, json.dumps(output, ensure_ascii=False), utc_now()),
