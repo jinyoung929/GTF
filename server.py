@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import base64
+import hashlib
 import io
 import importlib.util
 import json
@@ -261,8 +262,22 @@ def init_db() -> None:
         ensure_admin_user(conn)
 
 
+def paragraph_embedding_text(para: dict) -> str:
+    """임베딩 대상 텍스트. 이 값이 바뀌어야 재임베딩이 필요하다."""
+    return f"{para['reference_code']} {para['title']} {para['content']}"
+
+
+def paragraph_content_hash(para: dict) -> str:
+    return hashlib.sha256(paragraph_embedding_text(para).encode("utf-8")).hexdigest()
+
+
 def ensure_standards_paragraphs(conn) -> None:
-    """K-GAAP/K-IFRS 기준서 문단 검색 테이블을 생성하고 시드한다 (SQLite/Postgres 공용)."""
+    """K-GAAP/K-IFRS 기준서 문단 검색 테이블을 생성하고 시드한다 (SQLite/Postgres 공용).
+
+    삭제 후 재삽입이 아니라 upsert(ON CONFLICT DO UPDATE)로 시드해 멱등성을 지키면서
+    임베딩을 보존한다. 문단 내용이 바뀐 행만 embedding을 비워 재임베딩 대상으로 표시하고,
+    코드에서 제거된 문단은 DB에서도 삭제해 코드와 DB 상태를 일치시킨다.
+    """
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS standards_paragraphs (
@@ -273,18 +288,45 @@ def ensure_standards_paragraphs(conn) -> None:
             account_key TEXT NOT NULL,
             title TEXT NOT NULL,
             content TEXT NOT NULL,
-            keywords TEXT NOT NULL
+            keywords TEXT NOT NULL,
+            embedding TEXT,
+            content_hash TEXT
         )
         """
     )
-    conn.execute("DELETE FROM standards_paragraphs")
+    # 기존 배포 테이블에는 두 컬럼이 없으므로 백엔드별 안전 마이그레이션을 먼저 수행한다.
+    if database_config()["backend"] == "postgres":
+        conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN IF NOT EXISTS embedding text")
+        conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN IF NOT EXISTS content_hash text")
+    else:
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(standards_paragraphs)").fetchall()]
+        if "embedding" not in columns:
+            conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN embedding TEXT")
+        if "content_hash" not in columns:
+            conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN content_hash TEXT")
+
+    existing = {
+        row_to_dict(row)["id"]: row_to_dict(row)["content_hash"]
+        for row in conn.execute("SELECT id, content_hash FROM standards_paragraphs").fetchall()
+    }
+
     for para in STANDARDS_PARAGRAPHS:
+        content_hash = paragraph_content_hash(para)
         conn.execute(
             """
             INSERT INTO standards_paragraphs (
-                id, standard_set, reference_code, paragraph_label, account_key, title, content, keywords
+                id, standard_set, reference_code, paragraph_label, account_key, title, content, keywords, content_hash
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                standard_set = excluded.standard_set,
+                reference_code = excluded.reference_code,
+                paragraph_label = excluded.paragraph_label,
+                account_key = excluded.account_key,
+                title = excluded.title,
+                content = excluded.content,
+                keywords = excluded.keywords,
+                content_hash = excluded.content_hash
             """,
             (
                 para["id"],
@@ -295,8 +337,16 @@ def ensure_standards_paragraphs(conn) -> None:
                 para["title"],
                 para["content"],
                 para["keywords"],
+                content_hash,
             ),
         )
+        if existing.get(para["id"]) != content_hash:
+            # 새 문단이거나 내용이 바뀐 문단만 재임베딩 대상으로 표시 (내용 그대로면 임베딩 보존)
+            conn.execute("UPDATE standards_paragraphs SET embedding = NULL WHERE id = ?", (para["id"],))
+
+    stale_ids = set(existing) - {para["id"] for para in STANDARDS_PARAGRAPHS}
+    for stale_id in stale_ids:
+        conn.execute("DELETE FROM standards_paragraphs WHERE id = ?", (stale_id,))
 
 
 def find_standards_paragraphs(conn, account_key: str | None = None, query: str | None = None, standard_set: str | None = None) -> list[dict]:
@@ -1023,25 +1073,22 @@ def ensure_paragraph_embeddings(conn) -> None:
 
     pgvector 확장 대신 이식 가능한 텍스트 컬럼에 벡터를 저장하고 검색은 앱에서 코사인으로 수행한다.
     문단이 수십 개 규모라 ANN 인덱스가 불필요하고, SQLite/Postgres 양쪽에서 동일하게 동작한다.
+
+    embedding이 비어 있는 행(신규 또는 내용이 바뀐 문단)만 임베딩한다. 내용이 그대로면
+    OpenAI 호출을 아예 하지 않으므로 서버 재시작 비용이 0이다.
     OPENAI_API_KEY가 없거나 호출이 실패하면 임베딩을 비워 두고 키워드 검색으로 폴백하며,
     서버 시작을 막지 않도록 실패를 조용히 무시한다.
     """
-    if database_config()["backend"] == "postgres":
-        conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN IF NOT EXISTS embedding text")
-    else:
-        columns = [row["name"] for row in conn.execute("PRAGMA table_info(standards_paragraphs)").fetchall()]
-        if "embedding" not in columns:
-            conn.execute("ALTER TABLE standards_paragraphs ADD COLUMN embedding TEXT")
-
     rows = [
         row_to_dict(row)
         for row in conn.execute(
-            "SELECT id, reference_code, title, content FROM standards_paragraphs ORDER BY id"
+            "SELECT id, reference_code, title, content FROM standards_paragraphs "
+            "WHERE embedding IS NULL ORDER BY id"
         ).fetchall()
     ]
     if not rows:
-        return
-    texts = [f"{row['reference_code']} {row['title']} {row['content']}" for row in rows]
+        return  # 재임베딩할 문단이 없음 → OpenAI 호출 0회
+    texts = [paragraph_embedding_text(row) for row in rows]
     vectors = openai_embed(texts)
     if not vectors:
         return
