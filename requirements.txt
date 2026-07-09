@@ -13,3 +13,5 @@ pdfplumber>=0.11.0
 
 # Postgres/Neon 배포에서만 사용 (로컬 기본값은 SQLite)
 psycopg[binary]>=3.2.0
+
+sqlalchemy>=2.0.0
