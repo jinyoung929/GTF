@@ -2,6 +2,10 @@
 fastapi>=0.115.0
 uvicorn>=0.30.0
 python-multipart>=0.0.9
+pydantic>=2.0.0
+
+# ORM / DB 계층
+sqlalchemy>=2.0.0
 
 # 외부 API 호출 (OpenAI SDK, DART/Gemini는 requests)
 requests>=2.31.0
@@ -13,5 +17,3 @@ pdfplumber>=0.11.0
 
 # Postgres/Neon 배포에서만 사용 (로컬 기본값은 SQLite)
 psycopg[binary]>=3.2.0
-
-sqlalchemy>=2.0.0
