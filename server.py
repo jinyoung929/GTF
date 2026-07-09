@@ -24,7 +24,7 @@ from fastapi import Body, Depends, FastAPI, File, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from openai import OpenAI
 from pydantic import BaseModel
-from sqlalchemy import delete, func, inspect, select, text, update
+from sqlalchemy import DateTime, String, delete, func, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -237,6 +237,52 @@ def refresh_reference_cache(session: Session) -> ReferenceData:
     return ref
 
 
+def resolve_postgres_type_drift(session: Session) -> None:
+    """옛 수동 스키마가 만든 uuid/timestamptz/jsonb 컬럼을 ORM 타입(text)으로 수렴시킨다.
+
+    create_all은 기존 테이블을 절대 변경하지 않는다. 그래서 과거에 postgres/schema.sql을
+    손으로 적용한 배포 DB에서는 컬럼 타입이 ORM(text)과 어긋나, 첫 UPDATE/INSERT가
+    DatatypeMismatch(f405)로 죽고 서버가 못 뜬다. 여기서 어긋난 컬럼만 골라
+    ALTER TYPE text USING ...으로 값을 보존한 채 변환한다
+    (uuid → 같은 표기의 문자열, jsonb → JSON 문자열, timestamptz → ISO8601 문자열).
+    uuid PK/FK는 타입을 바꾸면 uuid=text 비교가 불가능해 FK 제약을 먼저 제거한다
+    (앱은 DB FK에 의존하지 않고 자체적으로 참조 무결성을 관리한다).
+    """
+    if backend() != "postgres":
+        return
+    inspector = inspect(session.bind)
+    drifted: dict[str, list[tuple[str, bool]]] = {}
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        live_types = {c["name"]: c["type"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            live = live_types.get(column.name)
+            if live is None or not isinstance(column.type, String) or isinstance(live, String):
+                continue
+            drifted.setdefault(table.name, []).append((column.name, isinstance(live, DateTime)))
+    if not drifted:
+        return
+
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        for fk in inspector.get_foreign_keys(table.name):
+            if (table.name in drifted or fk.get("referred_table") in drifted) and fk.get("name"):
+                session.execute(text(f'ALTER TABLE {table.name} DROP CONSTRAINT IF EXISTS "{fk["name"]}"'))
+
+    for table_name, columns in drifted.items():
+        for column_name, is_timestamp in columns:
+            using = (
+                f"to_char({column_name} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US') || '+00:00'"
+                if is_timestamp
+                else f"{column_name}::text"
+            )
+            session.execute(text(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} DROP DEFAULT"))
+            session.execute(text(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE text USING {using}"))
+    session.commit()
+
+
 def migrate_legacy_columns(session: Session) -> None:
     """기존 배포 DB에 없던 컬럼을 추가한다 (새 DB는 create_all이 이미 만들었다)."""
     existing = {column["name"] for column in inspect(session.bind).get_columns("standards_paragraphs")}
@@ -259,6 +305,7 @@ def init_db() -> None:
     db_engine = configure_engine()
     Base.metadata.create_all(db_engine)  # ORM 모델이 스키마의 단일 출처
     with get_session() as session:
+        resolve_postgres_type_drift(session)
         migrate_legacy_columns(session)
         # FK 순서: 표준계정(부모) → 체크리스트·별칭·양식(자식) → 문단 → 임베딩.
         # seed_reference_data(보조 조회 테이블)는 위 핵심 테이블을 읽으므로 반드시 뒤에 온다.
