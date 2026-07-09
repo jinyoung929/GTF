@@ -449,6 +449,86 @@ function SourceTable({ uploads, onExtract, busy }: { uploads: UploadRow[]; onExt
   );
 }
 
+// 정적 Tailwind CSS에는 새 유틸리티 클래스가 생성되지 않으므로(빌드에 Tailwind 엔진 미연결),
+// 승인/거절 버튼과 근거 툴팁은 인라인 스타일 + React 상태로 구현한다.
+function DecisionButton({ kind, active, onClick }: { kind: AiDecision; active: boolean; onClick: () => void }) {
+  const color = kind === "approved" ? "#059669" : "#DC2626"; // emerald-600 / red-600
+  return (
+    <button
+      aria-label={kind === "approved" ? "제안 승인" : "제안 거절"}
+      onClick={onClick}
+      style={{
+        padding: "4px 10px",
+        fontSize: 11,
+        fontWeight: 700,
+        lineHeight: 1,
+        borderRadius: 4,
+        border: `1px solid ${color}`,
+        whiteSpace: "nowrap",
+        flexShrink: 0,
+        cursor: "pointer",
+        transition: "background-color .15s, color .15s",
+        backgroundColor: active ? color : "#FFFFFF",
+        color: active ? "#FFFFFF" : color,
+      }}
+    >
+      {kind === "approved" ? "승인" : "거절"}
+    </button>
+  );
+}
+
+function RationaleTooltip({ rationale, confidence }: { rationale?: string; confidence?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 2, fontSize: 11, color: "#9AA1B0", cursor: "help", whiteSpace: "nowrap" }}
+    >
+      <Info style={{ width: 12, height: 12 }} /> 근거
+      {open && (
+        <span
+          role="tooltip"
+          style={{
+            position: "absolute",
+            bottom: "100%",
+            left: "50%",
+            transform: "translateX(-50%)",
+            marginBottom: 8,
+            zIndex: 50,
+            width: 260,
+            whiteSpace: "normal",
+            borderRadius: 4,
+            border: "1px solid #39415A",
+            backgroundColor: "#232A3F",
+            padding: "8px 12px",
+            textAlign: "left",
+            fontSize: 11,
+            lineHeight: 1.5,
+            color: "#FFFFFF",
+            boxShadow: "0 4px 12px rgba(10,22,40,.35)",
+            pointerEvents: "none",
+          }}
+        >
+          <span style={{ display: "block", fontWeight: 700, color: "#C4B5FD", marginBottom: 2 }}>AI 분류 근거</span>
+          {rationale || "근거 설명이 제공되지 않았습니다."}
+          <span style={{ display: "block", marginTop: 4, color: "#9AA1B0" }}>신뢰도: {confidence || "-"}</span>
+          <span
+            style={{
+              position: "absolute",
+              top: "100%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              border: "5px solid transparent",
+              borderTopColor: "#232A3F",
+            }}
+          />
+        </span>
+      )}
+    </span>
+  );
+}
+
 function RowsTable({ rows, decisions = {}, onDecide }: { rows: SourceRow[]; decisions?: Record<string, AiDecision>; onDecide?: (accountName: string, decision: AiDecision) => void }) {
   return (
     <div className="overflow-x-auto">
@@ -469,36 +549,11 @@ function RowsTable({ rows, decisions = {}, onDecide }: { rows: SourceRow[]; deci
                       <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-bold bg-violet-50 text-violet-700 border border-violet-200 rounded">
                         {row.ai_suggestion.label}
                       </span>
-                      <span
-                        title={`근거: ${row.ai_suggestion.rationale || "-"}\n신뢰도: ${row.ai_suggestion.confidence || "-"}`}
-                        className="inline-flex items-center gap-0.5 text-[11px] text-[#9AA1B0] cursor-help"
-                      >
-                        <Info className="w-3 h-3" /> 근거
-                      </span>
+                      <RationaleTooltip rationale={row.ai_suggestion.rationale} confidence={row.ai_suggestion.confidence} />
                       {onDecide ? (
                         <div className="flex items-center gap-1">
-                          <button
-                            aria-label="제안 수락"
-                            title="제안 수락"
-                            onClick={() => onDecide(row.account_name, "approved")}
-                            className={classNames(
-                              "w-6 h-6 flex items-center justify-center rounded-full border transition-colors",
-                              decision === "approved" ? "bg-emerald-600 border-emerald-600 text-white" : "border-[#D0D5E0] text-emerald-600 hover:bg-emerald-50",
-                            )}
-                          >
-                            <Check className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            aria-label="제안 거절"
-                            title="제안 거절"
-                            onClick={() => onDecide(row.account_name, "rejected")}
-                            className={classNames(
-                              "w-6 h-6 flex items-center justify-center rounded-full border transition-colors",
-                              decision === "rejected" ? "bg-red-600 border-red-600 text-white" : "border-[#D0D5E0] text-red-600 hover:bg-red-50",
-                            )}
-                          >
-                            <XIcon className="w-3.5 h-3.5" />
-                          </button>
+                          <DecisionButton kind="approved" active={decision === "approved"} onClick={() => onDecide(row.account_name, "approved")} />
+                          <DecisionButton kind="rejected" active={decision === "rejected"} onClick={() => onDecide(row.account_name, "rejected")} />
                         </div>
                       ) : (
                         <span className="inline-flex items-center gap-0.5 text-[11px] text-emerald-700 font-semibold"><Check className="w-3 h-3" /> 반영됨</span>
