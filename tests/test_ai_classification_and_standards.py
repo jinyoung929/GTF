@@ -137,11 +137,13 @@ class AiClassificationCallTest(unittest.TestCase):
         self.assertTrue(result["human_review_required"])
 
     def _fake_openai(self, items):
-        # openai SDK 클라이언트 흉내: client.responses.create(...)가 output_text를 가진 응답을 반환
+        # openai SDK 클라이언트 흉내: responses.create는 output_text 응답, embeddings.create는
+        # 빈 결과(→ openai_embed가 None을 돌려 키워드 폴백 경로를 타게 함)를 반환한다.
         client = mock.Mock()
         client.responses.create.return_value = mock.Mock(
             output_text=json.dumps({"items": items}, ensure_ascii=False)
         )
+        client.embeddings.create.return_value = mock.Mock(data=[])
         return client
 
     def test_connected_response_builds_validated_suggestions(self):
@@ -150,19 +152,48 @@ class AiClassificationCallTest(unittest.TestCase):
                 "account_name": "임차보증금",
                 "suggested_account_key": "financial_instrument",
                 "confidence": "medium",
-                "rationale": "보증금은 금융자산 성격의 계약상 권리입니다.",
+                "rationale": "임차보증금은 계약 종료 시 반환받을 계약상 권리다. K-IFRS 제1109호상 금융자산의 정의를 충족한다. 따라서 금융상품으로 분류하는 것이 적합하다.",
+                "basis_reference": "K-IFRS 제1109호 금융상품",
+                "alternative_account_key": "deposits",
+                "alternative_rejected_reason": "장기 예치 성격보다 계약상 반환 권리가 본질이므로 배제했다.",
             },
-            {"account_name": "이상한계정", "suggested_account_key": "없는키", "confidence": "low", "rationale": "-"},
-            {"account_name": "모르는계정", "suggested_account_key": "other", "confidence": "low", "rationale": "-"},
+            {"account_name": "이상한계정", "suggested_account_key": "없는키", "confidence": "low", "rationale": "-",
+             "basis_reference": "", "alternative_account_key": "", "alternative_rejected_reason": ""},
+            {"account_name": "모르는계정", "suggested_account_key": "other", "confidence": "low", "rationale": "-",
+             "basis_reference": "", "alternative_account_key": "", "alternative_rejected_reason": ""},
         ]
+        session = paragraph_session()
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             with mock.patch.object(server, "OpenAI", return_value=self._fake_openai(items)):
-                result = server.call_ai_classification(["임차보증금", "이상한계정", "모르는계정"])
+                result = server.call_ai_classification(["임차보증금", "이상한계정", "모르는계정"], session)
         self.assertEqual(result["status"], "connected")
         self.assertEqual(set(result["suggestions"].keys()), {"임차보증금"})
         suggestion = result["suggestions"]["임차보증금"]
         self.assertEqual(suggestion["account_key"], "financial_instrument")
+        self.assertEqual(suggestion["basis_reference"], "K-IFRS 제1109호 금융상품")
+        self.assertEqual(suggestion["alternative_label"], "보증금")  # 계정키 → 화면용 라벨 변환
+        self.assertIn("배제", suggestion["alternative_rejected_reason"])
         self.assertTrue(suggestion["human_review_required"])
+
+    def test_prompt_includes_retrieved_standards_for_grounding(self):
+        # 분류 프롬프트에 계정별 기준서 문단(RAG)이 첨부되는지 — 근거 접지의 핵심 계약
+        captured = {}
+
+        def capture_create(**kwargs):
+            captured.update(kwargs)
+            return mock.Mock(output_text='{"items": []}')
+
+        client = mock.Mock()
+        client.responses.create.side_effect = capture_create
+        client.embeddings.create.return_value = mock.Mock(data=[])
+        session = paragraph_session()
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
+            with mock.patch.object(server, "OpenAI", return_value=client):
+                server.call_ai_classification(["리스보증금"], session)
+        prompt_text = captured["input"][0]["content"][0]["text"]
+        self.assertIn("retrieved_standards", prompt_text)
+        self.assertIn("reference_code", captured["instructions"])  # 인용 강제 문구
+        self.assertNotIn("근거를 한국어 한 문장으로", captured["instructions"])  # 옛 한-문장 제약 제거 확인
 
     def test_attach_only_marks_unmapped_rows(self):
         rows = [
@@ -179,7 +210,7 @@ class AiClassificationCallTest(unittest.TestCase):
         ]
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             with mock.patch.object(server, "OpenAI", return_value=self._fake_openai(items)):
-                rows, result = server.attach_ai_classification(rows)
+                rows, result = server.attach_ai_classification(rows, paragraph_session())
         self.assertEqual(result["status"], "connected")
         self.assertIn("ai_suggestion", rows[0])
         self.assertNotIn("ai_suggestion", rows[1])

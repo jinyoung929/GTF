@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import time
 import unittest
 import urllib.error
@@ -78,7 +79,7 @@ class EndToEndSmokeTest(unittest.TestCase):
             "PORT": str(PORT),
         }
         cls.server = subprocess.Popen(
-            ["python3", "server.py"],
+            [sys.executable, "server.py"],  # 테스트와 같은 인터프리터로 부팅 (PATH의 python3에 의존하지 않음)
             cwd=ROOT,
             env=env,
             stdout=subprocess.PIPE,

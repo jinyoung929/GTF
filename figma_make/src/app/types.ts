@@ -45,6 +45,9 @@ export type SourceRow = {
     label: string;
     confidence: string;
     rationale: string;
+    basis_reference?: string;
+    alternative_label?: string;
+    alternative_rejected_reason?: string;
   };
 };
 

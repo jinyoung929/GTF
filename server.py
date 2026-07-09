@@ -1322,11 +1322,16 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
     }
 
 
-def call_ai_classification(unmapped_accounts: list[str]) -> dict:
+def call_ai_classification(unmapped_accounts: list[str], session: Session | None = None) -> dict:
     """키워드 매핑에 실패한 계정명에 대해 표준계정 후보를 제안받는 AI 1차 분류.
 
     제안은 추출 결과에 후보로만 저장되며, 담당자가 추출 결과를 반영하는 시점에
     확정된다. 분류를 자동 확정하지 않는다.
+
+    판단보조(call_ai_judgment)와 같은 원칙으로 근거를 접지(grounding)한다:
+    계정명마다 관련 기준서 문단을 검색해 프롬프트에 넣고, 근거는 제공된 문단의
+    reference_code를 인용해서만 쓰게 한다. 재료 없이 지어내는 빈약한 한 줄
+    근거와 환각 인용을 함께 막는다.
     """
     config = ai_config()
     base = {"provider": "openai", "model": config["model"], "human_review_required": True}
@@ -1347,17 +1352,36 @@ def call_ai_classification(unmapped_accounts: list[str]) -> dict:
         for key, account in REFERENCE.accounts.items()
         if key != "other"
     ]
+    # 계정명마다 관련 기준서 문단을 검색해 근거 재료로 프롬프트에 첨부한다 (RAG).
+    retrieved_standards = {}
+    if session is not None:
+        for name in unmapped_accounts:
+            paragraphs = semantic_search_paragraphs(session, name, k=3)
+            retrieved_standards[name] = [
+                {
+                    "reference_code": p.get("reference_code"),
+                    "paragraph_label": p.get("paragraph_label"),
+                    "title": p.get("title"),
+                    "content": p.get("content"),
+                }
+                for p in paragraphs
+            ]
     prompt = {
         "unmapped_accounts": unmapped_accounts,
         "candidate_standard_accounts": candidates,
+        "retrieved_standards": retrieved_standards,
         "instruction": "각 계정명을 후보 표준계정 중 가장 적합한 하나로 분류 제안하세요. 확신이 없으면 suggested_account_key를 'other'로 두세요.",
     }
     payload = {
         "model": config["model"],
-        "max_output_tokens": 800,
+        "max_output_tokens": 2000,
         "instructions": (
             "너는 K-GAAP 재무제표 계정을 내부 표준계정으로 분류하는 회계 보조자다. "
-            "규칙 기반 매핑에 실패한 계정명에 대해 후보 표준계정 중 하나를 제안하고 근거를 한국어 한 문장으로 쓴다. "
+            "규칙 기반 매핑에 실패한 계정명에 대해 후보 표준계정 중 하나를 제안한다. "
+            "rationale은 한국어 2~3문장으로, ①계정의 경제적 성격 ②적용되는 기준 ③이 표준계정이 적합한 이유의 순서로 쓴다. "
+            "basis_reference에는 retrieved_standards로 제공된 문단의 reference_code만 인용하고, "
+            "관련 문단이 없으면 빈 문자열로 둔다. 제공되지 않은 기준서는 절대 지어내지 않는다. "
+            "alternative_account_key에는 두 번째로 유력했던 후보를, alternative_rejected_reason에는 그 후보를 배제한 이유를 한 문장으로 쓴다. "
             "분류를 확정하지 말고 제안만 하며, 확신이 없으면 other를 반환한다. JSON만 반환한다."
         ),
         "input": [
@@ -1387,8 +1411,11 @@ def call_ai_classification(unmapped_accounts: list[str]) -> dict:
                                     "suggested_account_key": {"type": "string"},
                                     "confidence": {"type": "string"},
                                     "rationale": {"type": "string"},
+                                    "basis_reference": {"type": "string"},
+                                    "alternative_account_key": {"type": "string"},
+                                    "alternative_rejected_reason": {"type": "string"},
                                 },
-                                "required": ["account_name", "suggested_account_key", "confidence", "rationale"],
+                                "required": ["account_name", "suggested_account_key", "confidence", "rationale", "basis_reference", "alternative_account_key", "alternative_rejected_reason"],
                                 "additionalProperties": False,
                             },
                         }
@@ -1432,11 +1459,15 @@ def call_ai_classification(unmapped_accounts: list[str]) -> dict:
         suggested_key = str(item.get("suggested_account_key") or "").strip()
         if not name or suggested_key not in REFERENCE.accounts or suggested_key == "other":
             continue
+        alternative_key = str(item.get("alternative_account_key") or "").strip()
         suggestions[name] = {
             "account_key": suggested_key,
             "label": REFERENCE.accounts[suggested_key]["label"],
             "confidence": str(item.get("confidence") or "unknown"),
             "rationale": str(item.get("rationale") or "").strip(),
+            "basis_reference": str(item.get("basis_reference") or "").strip(),
+            "alternative_label": REFERENCE.accounts[alternative_key]["label"] if alternative_key in REFERENCE.accounts else "",
+            "alternative_rejected_reason": str(item.get("alternative_rejected_reason") or "").strip(),
             "provider": "openai",
             "model": config["model"],
             "human_review_required": True,
@@ -1449,7 +1480,7 @@ def call_ai_classification(unmapped_accounts: list[str]) -> dict:
     }
 
 
-def attach_ai_classification(rows: list[dict]) -> tuple[list[dict], dict]:
+def attach_ai_classification(rows: list[dict], session: Session | None = None) -> tuple[list[dict], dict]:
     """추출 행 중 표준코드 매핑 실패(X9999) 계정에 AI 1차 분류 제안을 붙인다."""
     unmapped = sorted(
         {
@@ -1459,7 +1490,7 @@ def attach_ai_classification(rows: list[dict]) -> tuple[list[dict], dict]:
             and normalize_account_name(str(row.get("account_name") or ""), REFERENCE.aliases) == "other"
         }
     )
-    result = call_ai_classification(unmapped)
+    result = call_ai_classification(unmapped, session)
     suggestions = result.get("suggestions") or {}
     for row in rows:
         suggestion = suggestions.get(str(row.get("account_name") or "").strip())
@@ -2178,7 +2209,7 @@ def extract_upload(
 
     config = ocr_config()
     rows, issues, provider = extract_rows_from_upload(row_to_dict(upload))
-    rows, ai_classification = attach_ai_classification(rows)
+    rows, ai_classification = attach_ai_classification(rows, session)
     if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
         issues = [*issues, ai_classification["note"]]
     status = "needs_review" if rows else "failed"
@@ -2231,7 +2262,7 @@ def dart_import(
     get_project_or_404(session, project_id)
 
     rows, issues, metadata = fetch_dart_statement_rows(payload, REFERENCE.aliases)
-    rows, ai_classification = attach_ai_classification(rows)
+    rows, ai_classification = attach_ai_classification(rows, session)
     if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
         issues = [*issues, ai_classification["note"]]
     raw_rows = metadata.pop("raw_rows", [])
@@ -2390,7 +2421,7 @@ def add_statements(
     raw_rows = parse_statement_rows(payload.model_dump())
     # 수동 입력도 파일/DART 경로와 동일하게 추출(extraction)로 만들어, 미분류 계정에
     # AI 1차 분류 제안을 붙이고 담당자가 추출 미리보기에서 계정별로 승인하도록 통일한다.
-    raw_rows, ai_classification = attach_ai_classification(raw_rows)
+    raw_rows, ai_classification = attach_ai_classification(raw_rows, session)
     issues = []
     if ai_classification.get("status") != "skipped" and ai_classification.get("note"):
         issues.append(ai_classification["note"])

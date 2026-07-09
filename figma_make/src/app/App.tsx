@@ -477,7 +477,8 @@ function DecisionButton({ kind, active, onClick }: { kind: AiDecision; active: b
   );
 }
 
-function RationaleTooltip({ rationale, confidence }: { rationale?: string; confidence?: string }) {
+function RationaleTooltip({ suggestion }: { suggestion: NonNullable<SourceRow["ai_suggestion"]> }) {
+  const { rationale, confidence, basis_reference, alternative_label, alternative_rejected_reason } = suggestion;
   const [open, setOpen] = useState(false);
   return (
     <span
@@ -512,6 +513,15 @@ function RationaleTooltip({ rationale, confidence }: { rationale?: string; confi
         >
           <span style={{ display: "block", fontWeight: 700, color: "#C4B5FD", marginBottom: 2 }}>AI 분류 근거</span>
           {rationale || "근거 설명이 제공되지 않았습니다."}
+          {basis_reference ? (
+            <span style={{ display: "block", marginTop: 4, color: "#93C5FD" }}>근거 기준서: {basis_reference}</span>
+          ) : null}
+          {alternative_label ? (
+            <span style={{ display: "block", marginTop: 4, color: "#FCD34D" }}>
+              차선 후보: {alternative_label}
+              {alternative_rejected_reason ? ` — ${alternative_rejected_reason}` : ""}
+            </span>
+          ) : null}
           <span style={{ display: "block", marginTop: 4, color: "#9AA1B0" }}>신뢰도: {confidence || "-"}</span>
           <span
             style={{
@@ -549,7 +559,7 @@ function RowsTable({ rows, decisions = {}, onDecide }: { rows: SourceRow[]; deci
                       <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-bold bg-violet-50 text-violet-700 border border-violet-200 rounded">
                         {row.ai_suggestion.label}
                       </span>
-                      <RationaleTooltip rationale={row.ai_suggestion.rationale} confidence={row.ai_suggestion.confidence} />
+                      <RationaleTooltip suggestion={row.ai_suggestion} />
                       {onDecide ? (
                         <div className="flex items-center gap-1">
                           <DecisionButton kind="approved" active={decision === "approved"} onClick={() => onDecide(row.account_name, "approved")} />
