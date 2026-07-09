@@ -175,6 +175,26 @@ class AiClassificationCallTest(unittest.TestCase):
         self.assertIn("배제", suggestion["alternative_rejected_reason"])
         self.assertTrue(suggestion["human_review_required"])
 
+    def test_judgment_prompt_contract_is_grounded_and_structured(self):
+        # 판단보조 프롬프트 계약: 기준서 문단 첨부 + 인용 강제 + 구조화된 basis_summary + 충분한 토큰
+        captured = {}
+
+        def capture_create(**kwargs):
+            captured.update(kwargs)
+            return mock.Mock(output_text='{"items": [], "overall_note": "-"}')
+
+        client = mock.Mock()
+        client.responses.create.side_effect = capture_create
+        judgment_items = [{"account": "리스부채", "basis": "K-IFRS 제1116호 검토"}]
+        retrieved = [{"account": "리스부채", "paragraphs": [{"reference_code": "K-IFRS 제1116호", "content": "..." }]}]
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
+            with mock.patch.object(server, "OpenAI", return_value=client):
+                server.call_ai_judgment(PROJECT, [], judgment_items, retrieved)
+        self.assertGreaterEqual(captured["max_output_tokens"], 3000)  # 항목 다수여도 근거가 잘리지 않게
+        self.assertIn("retrieved_standards", captured["input"][0]["content"][0]["text"])
+        self.assertIn("reference_code", captured["instructions"])
+        self.assertIn("2~3문장", captured["instructions"])  # 구조화된 분량 요구
+
     def test_prompt_includes_retrieved_standards_for_grounding(self):
         # 분류 프롬프트에 계정별 기준서 문단(RAG)이 첨부되는지 — 근거 접지의 핵심 계약
         captured = {}

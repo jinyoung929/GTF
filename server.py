@@ -1175,7 +1175,7 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
                     "classification_hint": "검토자가 확인할 분류 방향",
                     "additional_questions": ["추가로 확인할 질문"],
                     "review_note": "사람 검토자가 볼 짧은 검토 메모",
-                    "basis_summary": "적용 기준과 판단 근거 요약",
+                    "basis_summary": "①판단 쟁점 ②관련 기준서 문단의 요지(reference_code 인용) ③검토 결론 방향, 2~3문장",
                 }
             ],
             "overall_note": "전체 검토 메모",
@@ -1183,13 +1183,16 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
     }
     payload = {
         "model": config["model"],
-        "max_output_tokens": 1200,
+        # 판단항목이 10개 이상일 수 있어 항목당 근거가 잘리지 않도록 넉넉히 잡는다.
+        "max_output_tokens": 3000,
         "instructions": (
             "너는 K-GAAP 재무제표를 IFRS 초안으로 변환하는 회계 검토 보조자다. "
             "최종 회계처리를 확정하지 말고, 사용자가 입력한 체크리스트와 변환 초안을 바탕으로 "
             "판단 필요 항목, 추가 질문, 기준 근거 요약만 한국어로 제시한다. "
-            "basis_summary는 반드시 retrieved_standards로 제공된 기준서 문단에 근거해 작성하고 "
-            "해당 문단의 reference_code를 인용하며, 제공된 문단에 없는 내용은 추측하지 않는다. "
+            "basis_summary는 한국어 2~3문장으로, ①이 계정의 판단 쟁점 ②관련 기준서 문단의 요지 ③검토 결론 방향의 순서로 쓴다. "
+            "반드시 retrieved_standards로 제공된 기준서 문단에 근거해 작성하고 "
+            "해당 문단의 reference_code를 문장 안에 인용하며, 제공된 문단에 없는 내용은 추측하지 않는다. "
+            "additional_questions에는 검토자가 실제로 확인해야 할 구체적 질문을 1개 이상 담는다. "
             "금액은 절대 새로 계산하지 않는다. "
             "반드시 사람이 최종 검토하고 승인해야 한다는 전제를 유지한다. JSON만 반환한다."
         ),
