@@ -1,3 +1,22 @@
+"""GTF 서버 — K-GAAP → K-IFRS 변환 검토 서비스의 FastAPI 앱.
+
+이 파일은 HTTP·DB·외부 API 등 부수효과가 있는 코드의 단일 진입점이다.
+순수 회계 로직은 gtf_app/domain.py, DART 연동은 gtf_app/dart.py,
+ORM 모델은 gtf_app/models.py, 엔진 설정은 gtf_app/db.py에 있다.
+
+구성 (위에서 아래로):
+  §1  경로·상수
+  §2  환경·설정, 직렬화 헬퍼
+  §3  DB 엔진·세션 (configure_engine / get_db)
+  §4  부팅: 기준정보 캐시·스키마 드리프트 치유·init_db
+  §5  시드·기준정보 로더 (seeds/*.sql → ReferenceData)
+  §6  감사로그·행 직렬화
+  §7  파일 파서 (xlsx / pdf)
+  §8  외부 서비스 설정 (OCR·AI·DART)
+  §9  AI·RAG (임베딩 검색, 판단보조, 1차 분류, Gemini OCR)
+  §10 FastAPI 앱: 의존성 → 요청 모델 → 라우트 → 정적 서빙 → main
+"""
+
 from __future__ import annotations
 
 import base64
@@ -81,6 +100,9 @@ from gtf_app.domain import (
 from gtf_app.excel_export import review_workbook_bytes
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# §1 경로·상수
+# ───────────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
@@ -106,6 +128,9 @@ STYLES_CSS = "body{font-family:system-ui,sans-serif;margin:2rem}"
 APP_JS = "console.info('GTF fallback bundle')"
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# §2 환경·설정, 직렬화 헬퍼
+# ───────────────────────────────────────────────────────────────────────────
 def load_local_env() -> None:
     for env_path in ENV_PATHS:
         if not env_path.exists():
@@ -190,6 +215,9 @@ engine: Engine | None = None
 SessionLocal: sessionmaker[Session] | None = None
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# §3 DB 엔진·세션
+# ───────────────────────────────────────────────────────────────────────────
 def configure_engine() -> Engine:
     """현재 DB_PATH/환경변수로 엔진과 세션 팩토리를 (재)생성한다.
 
@@ -214,6 +242,9 @@ def get_db() -> Iterator[Session]:
         yield session
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# §4 부팅: 기준정보 캐시·스키마 치유·init_db
+# ───────────────────────────────────────────────────────────────────────────
 # 기준정보(계정·별칭·체크리스트·양식·문단)를 DB에서 한 번 로드해 두는 서버 캐시.
 # 시드 이후에만 바뀌므로(런타임 변경 없음) 매 요청 재조회 대신 이 캐시를 읽는다.
 # init_db 끝에서 refresh_reference_cache가 채우고, 계약 검증까지 통과해야 서버가 뜬다.
@@ -321,6 +352,9 @@ def init_db() -> None:
         refresh_reference_cache(session)  # 기준정보 캐시 채우기 + 계약 검증(실패 시 시작 중단)
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# §5 시드·기준정보 로더 (seeds/*.sql → ReferenceData)
+# ───────────────────────────────────────────────────────────────────────────
 PARAGRAPH_PUBLIC_COLUMNS = (
     StandardsParagraph.id,
     StandardsParagraph.standard_set,
@@ -511,6 +545,23 @@ def load_account_alias_map(session: Session) -> dict:
     return {name: account_key for name, account_key in rows}
 
 
+def load_statement_template_map(session: Session) -> dict:
+    """계정키 → IFRS 표준양식 라인. generate_conversion이 표시 재무제표·라인명을 여기서 얻는다."""
+    rows = session.execute(
+        select(
+            FinancialStatementTemplate.account_key,
+            FinancialStatementTemplate.statement_type,
+            FinancialStatementTemplate.section,
+            FinancialStatementTemplate.line_item,
+            FinancialStatementTemplate.display_order,
+            FinancialStatementTemplate.basis,
+        )
+        .where(FinancialStatementTemplate.standard_set == "IFRS", FinancialStatementTemplate.active.is_(True))
+        .order_by(FinancialStatementTemplate.display_order)
+    ).all()
+    return {row.account_key: dict(row._mapping) for row in rows}
+
+
 def load_reference_data(session: Session) -> ReferenceData:
     """DB 기준정보 테이블을 읽어 domain에 주입할 ReferenceData로 묶는다 (코드에 하드코딩 없음)."""
     accounts = {
@@ -608,6 +659,9 @@ def seed_reference_data(session: Session) -> None:
     session.commit()
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# §6 감사로그·행 직렬화
+# ───────────────────────────────────────────────────────────────────────────
 def row_to_dict(obj) -> dict:
     """ORM 인스턴스나 Row를 평범한 dict로 바꾼다 (JSON 응답용)."""
     if obj is None:
@@ -640,6 +694,9 @@ def log_event(session: Session, project_id: str, event_type: str, detail: dict, 
     )
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# §7 파일 파서 (xlsx / pdf)
+# ───────────────────────────────────────────────────────────────────────────
 def xlsx_col_index(cell_ref: str) -> int:
     letters = re.sub(r"[^A-Z]", "", cell_ref.upper())
     index = 0
@@ -892,6 +949,9 @@ def parse_pdf_statement_rows(path: Path) -> tuple[list[dict], list[str]]:
     return deduped, issues
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# §8 외부 서비스 설정 (OCR·AI·DART)
+# ───────────────────────────────────────────────────────────────────────────
 def ocr_config() -> dict:
     provider = os.environ.get("OCR_PROVIDER", "gemini").strip() or "gemini"
     model = os.environ.get("GEMINI_OCR_MODEL", "gemini-3.5-flash").strip() or "gemini-3.5-flash"
@@ -999,6 +1059,9 @@ def gemini_response_text(response: dict) -> str:
     return "\n".join(candidate_texts).strip()
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# §9 AI·RAG
+# ───────────────────────────────────────────────────────────────────────────
 def openai_embed(texts: list[str]) -> list[list[float]] | None:
     """텍스트 목록을 OpenAI 임베딩 벡터로 변환한다.
 
@@ -1700,27 +1763,10 @@ def extract_rows_from_upload(upload: dict) -> tuple[list[dict], list[str], str]:
     return sample_rows, issues, "ocr_placeholder"
 
 
-def load_statement_template_map(session: Session) -> dict:
-    """계정키 → IFRS 표준양식 라인. generate_conversion이 표시 재무제표·라인명을 여기서 얻는다."""
-    rows = session.execute(
-        select(
-            FinancialStatementTemplate.account_key,
-            FinancialStatementTemplate.statement_type,
-            FinancialStatementTemplate.section,
-            FinancialStatementTemplate.line_item,
-            FinancialStatementTemplate.display_order,
-            FinancialStatementTemplate.basis,
-        )
-        .where(FinancialStatementTemplate.standard_set == "IFRS", FinancialStatementTemplate.active.is_(True))
-        .order_by(FinancialStatementTemplate.display_order)
-    ).all()
-    return {row.account_key: dict(row._mapping) for row in rows}
 
-
-
-# ---------------------------------------------------------------------------
-# FastAPI 앱
-# ---------------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────────────────────
+# §10 FastAPI 앱: 의존성 → 요청 모델 → 라우트 → 정적 서빙 → main
+# ───────────────────────────────────────────────────────────────────────────
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
