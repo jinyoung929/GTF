@@ -87,6 +87,7 @@ from gtf_app.domain import (
     account_presentation_order,
     build_review_summary,
     build_statement_record,
+    utc_now,
     conversion_adjustments_csv,
     conversion_basis_report,
     generate_conversion,
@@ -147,10 +148,6 @@ def load_local_env() -> None:
 
 
 load_local_env()
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def database_config() -> dict:

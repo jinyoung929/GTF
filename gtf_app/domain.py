@@ -74,10 +74,6 @@ def verify_reference_contract(reference: "ReferenceData") -> list[str]:
             )
     return errors
 
-# 표준계정 정의(코드·라벨·IFRS 표시명·유형·규칙)는 seeds/standard_accounts.sql이 단일 출처이며
-# 서버 시작 시 standard_accounts 테이블로 upsert된다. 런타임 조회는 server.load_reference_data가 수행한다.
-
-
 # 표시 순서는 개별 display_order를 손으로 매기지 않고 계정코드에서 도출한다.
 # 코드 앞자리가 재무제표 구분(A 자산 → 부채 L → 자본 E → 손익 R), 뒷자리 숫자가
 # 구분 내 표시 순서를 담고 있으므로, 계정을 추가할 때 적절한 코드만 부여하면 순서가
@@ -103,20 +99,6 @@ def account_key_for_statement(item: dict, reference: "ReferenceData") -> str:
     code_to_key = {account["code"]: key for key, account in reference.accounts.items()}
     return code_to_key.get(str(item.get("standard_code") or "")) or normalize_account_name(item["account_name"], reference.aliases)
 
-
-# 표준 재무제표 양식 라인(계정 → 표시 라인 매핑)은 seeds/financial_statement_templates.sql이
-# 단일 출처이며, 서버 시작 시 financial_statement_templates 테이블로 upsert된다.
-# 런타임 조회는 server.load_statement_template_map이 DB에서 수행한다.
-
-
-# 체크리스트 정의는 seeds/checklist_items.sql이 단일 출처이며 checklist_items 테이블로 시드된다.
-# 계산기가 읽는 item_key는 CALC_CHECKLIST_KEYS 계약으로 코드에 남고 verify_reference_contract가 검증한다.
-
-# 기준서 문단(RAG 코퍼스)은 seeds/standards_paragraphs.sql이 단일 출처이며 standards_paragraphs
-# 테이블로 시드된다. 런타임 코사인 검색은 server가 수행하고 ReferenceData.paragraphs로 주입한다.
-
-# 계정명 별칭(별칭 → 계정키)은 seeds/kgaap_accounts.sql이 단일 출처이며 kgaap_accounts 테이블로
-# 시드된다. 부분 문자열 매칭이라 매칭 우선순위는 별칭 길이(match_priority)로 DB에 저장된다.
 
 def alias_match_priority(alias: str) -> int:
     """부분 문자열 매칭 우선순위. 긴 별칭이 짧은 별칭보다 먼저 검사되도록 길이를 쓴다."""
@@ -662,7 +644,8 @@ def label_backend(value: str) -> str:
 
 
 def localize_export_text(value) -> str:
-    return str(value or "-").replace("review required", "추가 검토 필요").replace("Human review required", "사람 검토 필요")
+    """내보내기 셀용 None-안전 문자열화 (빈 값은 '-')."""
+    return str(value or "-")
 
 def conversion_basis_report(conversion: dict) -> str:
     project = conversion.get("project", {})
