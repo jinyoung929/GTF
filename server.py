@@ -1109,8 +1109,8 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 def ensure_paragraph_embeddings(session: Session) -> None:
     """기준서 문단을 OpenAI 임베딩으로 변환해 embedding 컬럼(이식형 JSON)에 저장한다 (RAG 검색용).
 
-    pgvector 확장 대신 이식 가능한 텍스트 컬럼에 벡터를 저장하고 검색은 앱에서 코사인으로 수행한다.
-    문단이 수십 개 규모라 ANN 인덱스가 불필요하고, SQLite/Postgres 양쪽에서 동일하게 동작한다.
+    이 텍스트 컬럼이 벡터의 단일 출처다. Postgres에서는 ensure_vector_search가 이를 vector 타입
+    파생 컬럼(embedding_vec)으로 캐스팅해 DB 안에서 KNN 검색하고, SQLite에서는 앱의 코사인으로 검색한다.
 
     embedding이 비어 있는 행(신규 또는 내용이 바뀐 문단)만 임베딩한다. 내용이 그대로면
     OpenAI 호출을 아예 하지 않으므로 서버 재시작 비용이 0이다.
