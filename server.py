@@ -681,6 +681,24 @@ def database_ready() -> bool:
         return False
 
 
+def load_project_statements(session: Session, project_id: str) -> list[dict]:
+    """프로젝트의 계정행을 표시 순서로, 체크리스트 JSON을 파싱해 로드한다 (조회·변환·내보내기 공용)."""
+    return sort_statements_by_code([
+        dict(row_to_dict(statement), checklist=parse_json_field(statement.checklist_json, []))
+        for statement in session.scalars(select(Statement).where(Statement.project_id == project_id))
+    ])
+
+
+def ai_classification_audit(ai_classification: dict) -> dict:
+    """AI 1차 분류 결과를 감사로그용 요약으로 축약한다 (추출 3개 경로 공용)."""
+    return {
+        "status": ai_classification.get("status"),
+        "model": ai_classification.get("model"),
+        "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
+        "human_review_required": True,
+    }
+
+
 def log_event(session: Session, project_id: str, event_type: str, detail: dict, actor: str = "system") -> None:
     session.add(
         AuditLog(
@@ -2087,10 +2105,7 @@ def create_project(
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
     project = get_project_or_404(session, project_id, owner_user_id=user.id)
-    statements = sort_statements_by_code([
-        dict(row_to_dict(statement), checklist=parse_json_field(statement.checklist_json, []))
-        for statement in session.scalars(select(Statement).where(Statement.project_id == project_id))
-    ])
+    statements = load_project_statements(session, project_id)
     uploads = [
         upload_public_dict(upload)
         for upload in session.scalars(
@@ -2286,12 +2301,7 @@ def extract_upload(
             "ocr_config": config,
             "row_count": len(rows),
             "issues": issues,
-            "ai_classification": {
-                "status": ai_classification.get("status"),
-                "model": ai_classification.get("model"),
-                "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
-                "human_review_required": True,
-            },
+            "ai_classification": ai_classification_audit(ai_classification),
         },
     )
     result = dict(row_to_dict(extraction), rows=rows, issues=issues)
@@ -2357,12 +2367,7 @@ def dart_import(
             "raw_row_count": len(raw_rows),
             "issues": issues,
             "metadata": metadata,
-            "ai_classification": {
-                "status": ai_classification.get("status"),
-                "model": ai_classification.get("model"),
-                "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
-                "human_review_required": True,
-            },
+            "ai_classification": ai_classification_audit(ai_classification),
         },
     )
     body = {
@@ -2510,12 +2515,7 @@ def add_statements(
             "extraction_id": extraction.id,
             "row_count": len(raw_rows),
             "source": payload.source,
-            "ai_classification": {
-                "status": ai_classification.get("status"),
-                "model": ai_classification.get("model"),
-                "suggested_accounts": sorted((ai_classification.get("suggestions") or {}).keys()),
-                "human_review_required": True,
-            },
+            "ai_classification": ai_classification_audit(ai_classification),
         },
     )
     extraction_id = extraction.id
@@ -2550,10 +2550,7 @@ def convert_project(
     responses = payload.responses or {}
     project_row = get_project_or_404(session, project_id)
     project = row_to_dict(project_row)
-    statement_rows = sort_statements_by_code([
-        dict(row_to_dict(statement), checklist=parse_json_field(statement.checklist_json, []))
-        for statement in session.scalars(select(Statement).where(Statement.project_id == project_id))
-    ])
+    statement_rows = load_project_statements(session, project_id)
     output = generate_conversion(project, statement_rows, responses, REFERENCE)
     # RAG: 판단 필요 항목마다 계정명·근거를 질의로 관련 기준서 문단을 시맨틱 검색해
     # AI 판단 보조의 근거(context)로 주입한다. 검색 결과는 조정 금액이 아니라 근거 설명에만 쓰인다.
@@ -2714,10 +2711,7 @@ def export_project(
             headers={"Content-Disposition": 'attachment; filename="gtf_basis_report.txt"'},
         )
     if export_name == "review-workbook.xlsx":
-        statements = sort_statements_by_code([
-            dict(row_to_dict(statement), checklist=parse_json_field(statement.checklist_json, []))
-            for statement in session.scalars(select(Statement).where(Statement.project_id == project_id))
-        ])
+        statements = load_project_statements(session, project_id)
         latest = session.execute(
             select(Extraction.rows_json, Upload.file_bytes)
             .join(Upload, Upload.id == Extraction.upload_id, isouter=True)
