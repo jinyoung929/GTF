@@ -343,6 +343,7 @@ def init_db() -> None:
         ensure_statement_templates(session)
         ensure_standards_paragraphs(session)
         ensure_paragraph_embeddings(session)
+        ensure_vector_search(session)
         seed_reference_data(session)
         ensure_admin_user(session)
         session.commit()
@@ -1141,6 +1142,70 @@ def ensure_paragraph_embeddings(session: Session) -> None:
     session.commit()
 
 
+# Postgres에서 pgvector 가속이 준비됐는지 (부팅 시 ensure_vector_search가 설정).
+# 벡터의 진실 원천은 embedding TEXT(JSON) 컬럼이고, embedding_vec은 파생 인덱스라
+# 언제든 재구축 가능하다. 확장이 없는 Postgres에서는 파이썬 코사인으로 폴백한다.
+PGVECTOR_READY = False
+
+
+def ensure_vector_search(session: Session) -> None:
+    """Postgres면 pgvector 확장·파생 벡터 컬럼·HNSW 인덱스를 준비한다.
+
+    embedding(TEXT JSON)이 진실 원천이고 embedding_vec은 그것을 ::vector로 캐스팅한
+    파생 컬럼이다. 문단 임베딩이 갱신된 뒤 호출되어 파생 컬럼을 동기화한다.
+    확장 설치가 불가능한 환경이면 조용히 건너뛰고 파이썬 코사인 검색을 그대로 쓴다.
+    """
+    global PGVECTOR_READY
+    PGVECTOR_READY = False
+    if backend() != "postgres":
+        return
+    sample = session.scalar(
+        select(StandardsParagraph.embedding).where(StandardsParagraph.embedding.is_not(None)).limit(1)
+    )
+    if not sample:
+        return  # 임베딩이 아직 없으면(키 미설정 등) 다음 부팅에서 준비한다
+    dims = len(json.loads(sample))
+    try:
+        session.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        session.execute(text(f"ALTER TABLE standards_paragraphs ADD COLUMN IF NOT EXISTS embedding_vec vector({dims})"))
+        # 파생 컬럼을 원본(embedding TEXT)에서 무조건 재캐스팅한다 — 부팅당 1회, 수만 행까지도 수 초.
+        # 조건부 동기화의 staleness 버그 가능성보다 무조건 갱신의 단순함을 택했다.
+        session.execute(text(
+            "UPDATE standards_paragraphs SET embedding_vec = embedding::vector WHERE embedding IS NOT NULL"
+        ))
+        # 의도적으로 ANN 인덱스(HNSW)를 만들지 않는다: 인덱스 없는 <=> 정렬은 "정확한" 전수 KNN이며
+        # 이 규모(수백 문단)에선 ms 단위다. HNSW는 근사라 재현율을 희생하므로 수만 문단부터 추가한다.
+        session.commit()
+        PGVECTOR_READY = True
+    except Exception:
+        session.rollback()  # 확장 미지원 등 — 파이썬 코사인 폴백으로 동작
+
+
+def pgvector_search(session: Session, query_vector: list[float], account_key: str | None, standard_set: str | None, k: int) -> list[dict]:
+    """pgvector KNN: 코사인 거리 연산자(<=>)로 DB 안에서 top-k를 뽑는다."""
+    conditions = ["embedding_vec IS NOT NULL"]
+    params: dict = {"qv": json.dumps(query_vector), "k": k}
+    if account_key:
+        conditions.append("account_key = :ak")
+        params["ak"] = account_key
+    if standard_set:
+        conditions.append("standard_set = :ss")
+        params["ss"] = standard_set
+    rows = session.execute(text(
+        "SELECT id, standard_set, reference_code, paragraph_label, account_key, title, content, keywords, "
+        "1 - (embedding_vec <=> CAST(:qv AS vector)) AS similarity "
+        f"FROM standards_paragraphs WHERE {' AND '.join(conditions)} "
+        "ORDER BY embedding_vec <=> CAST(:qv AS vector) LIMIT :k"
+    ), params).all()
+    results = []
+    for row in rows:
+        para = dict(row._mapping)
+        para["similarity"] = round(float(para["similarity"]), 4)
+        para["retrieval"] = "semantic"
+        results.append(para)
+    return results
+
+
 def semantic_search_paragraphs(
     session: Session, query: str, account_key: str | None = None, standard_set: str | None = None, k: int = 5
 ) -> list[dict]:
@@ -1169,6 +1234,12 @@ def semantic_search_paragraphs(
     if not query_vectors:
         return keyword_fallback()
     query_vector = query_vectors[0]
+
+    if PGVECTOR_READY:
+        results = pgvector_search(session, query_vector, account_key, standard_set, k)
+        if results:
+            return results
+        return keyword_fallback()
 
     stmt = select(*PARAGRAPH_PUBLIC_COLUMNS, StandardsParagraph.embedding)
     if account_key:

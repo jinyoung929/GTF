@@ -49,6 +49,19 @@ Fix it by giving the app a clean database:
   This is safe when the app has never completed startup on that database (it has written no
   data yet). On the next boot `create_all` builds the correct schema and the seeds load.
 
+## Vector search (pgvector)
+
+On Postgres the app prepares pgvector automatically at startup: it enables the
+extension, adds a derived `embedding_vec vector(N)` column, and re-casts it from
+the portable `embedding` TEXT (JSON) column, which remains the single source of
+truth. Search then runs as an exact KNN (`ORDER BY embedding_vec <=> query`)
+inside the database. No ANN index is created on purpose — an exact scan is
+milliseconds at the current corpus size and HNSW would trade recall for speed;
+add the index when the corpus reaches tens of thousands of paragraphs.
+
+If the extension is unavailable, startup continues and search falls back to the
+in-app cosine scan (same behavior as SQLite). Nothing to configure by hand.
+
 ## File Storage
 
 Neon is database-only. Use one of these for uploaded PDFs, Excel files, CSVs, and images:

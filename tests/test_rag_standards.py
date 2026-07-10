@@ -85,6 +85,11 @@ class RagStandardsTest(unittest.TestCase):
         results = server.semantic_search_paragraphs(self.conn, "사용권자산 리스부채 현재가치 할인율", k=3)
         self.assertEqual(results[0]["account_key"], "lease")
 
+    def test_vector_search_is_postgres_only(self):
+        # SQLite에서는 pgvector 준비가 조용히 건너뛰어지고 파이썬 코사인 경로를 쓴다
+        server.ensure_vector_search(self.conn)
+        self.assertFalse(server.PGVECTOR_READY)
+
     def test_falls_back_to_keyword_without_embeddings(self):
         # 임베딩 미생성 + 임베딩 호출이 None → 키워드 폴백
         server.openai_embed = lambda texts: None
