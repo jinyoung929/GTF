@@ -39,6 +39,14 @@ VALUES
   ('borrowing_cost_expenditure', 'borrowing_cost', 'expenditure', '적격자산에 대한 평균 지출액', 'number', false, 2),
   ('borrowing_cost_capitalization_rate', 'borrowing_cost', 'capitalization_rate', '자본화이자율(%)', 'number', false, 3),
   ('borrowing_cost_capitalization_months', 'borrowing_cost', 'capitalization_months', '자본화 기간(개월)', 'number', false, 4),
+  ('goodwill_amortization_expense', 'goodwill', 'amortization_expense', '당기 영업권 상각비(K-GAAP)', 'number', true, 1),
+  ('goodwill_impairment_indicator', 'goodwill', 'impairment_indicator', '손상 징후가 있는가?', 'boolean', true, 2),
+  ('goodwill_recoverable_amount', 'goodwill', 'recoverable_amount', '회수가능액(손상 징후가 있는 경우)', 'number', false, 3),
+  ('preferred_shares_mandatory_redemption', 'preferred_shares', 'mandatory_redemption', '의무상환 조항 또는 보유자의 상환청구권이 있는가?', 'boolean', true, 1),
+  ('preferred_shares_cumulative_dividend', 'preferred_shares', 'cumulative_dividend', '확정 배당(누적적 우선배당) 의무가 있는가?', 'boolean', false, 2),
+  ('held_for_sale_plan_committed', 'held_for_sale', 'plan_committed', '경영진이 매각계획을 확약했는가?', 'boolean', true, 1),
+  ('held_for_sale_sale_probable_12m', 'held_for_sale', 'sale_probable_12m', '12개월 이내 매각가능성이 매우 높은가?', 'boolean', true, 2),
+  ('held_for_sale_fair_value_less_costs', 'held_for_sale', 'fair_value_less_costs', '순공정가치(매각부대원가 차감 후)', 'number', true, 3),
   ('other_management_memo', 'other', 'management_memo', '경영진 분류 메모', 'text', true, 1)
 ON CONFLICT (id) DO UPDATE SET
   account_key = excluded.account_key,

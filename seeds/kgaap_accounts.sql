@@ -53,7 +53,14 @@ VALUES
   ('alias_49', 'ppe', '건물', '유형자산', true, 2),
   ('alias_50', 'ppe', '기계장치', '유형자산', true, 4),
   ('alias_51', 'deferred_tax_asset', '이연법인세자산', '이연법인세자산', true, 7),
-  ('alias_52', 'deferred_tax_liability', '이연법인세부채', '이연법인세부채', true, 7)
+  ('alias_52', 'deferred_tax_liability', '이연법인세부채', '이연법인세부채', true, 7),
+  ('alias_53', 'goodwill', '영업권', '영업권', true, 3),
+  ('alias_54', 'preferred_shares', '상환우선주', '상환우선주', true, 5),
+  ('alias_55', 'preferred_shares', '상환전환우선주', '상환우선주', true, 7),
+  ('alias_56', 'preferred_shares', '우선주자본금', '상환우선주', true, 6),
+  ('alias_57', 'held_for_sale', '매각예정자산', '매각예정비유동자산', true, 6),
+  ('alias_58', 'held_for_sale', '매각예정비유동자산', '매각예정비유동자산', true, 9),
+  ('alias_59', 'held_for_sale', '처분예정자산', '매각예정비유동자산', true, 6)
 ON CONFLICT (id) DO UPDATE SET
   account_key = excluded.account_key,
   kgaap_name = excluded.kgaap_name,

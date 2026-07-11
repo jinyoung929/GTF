@@ -21,6 +21,7 @@ CALC_ACCOUNT_KEYS = frozenset({
     "lease", "development", "revenue", "financial_instrument", "receivables",
     "provision", "retirement_benefit", "ppe", "investment_property",
     "deferred_tax_asset", "government_grant", "borrowing_cost",
+    "goodwill", "preferred_shares", "held_for_sale",
 })
 CALC_CHECKLIST_KEYS = {
     "lease": {"lease_term_months", "monthly_payment", "discount_rate"},
@@ -33,6 +34,9 @@ CALC_CHECKLIST_KEYS = {
     "deferred_tax_asset": {"temporary_difference", "tax_rate", "realizable"},
     "government_grant": {"grant_relation", "presentation_method"},
     "borrowing_cost": {"qualifying_asset", "expenditure", "capitalization_rate", "capitalization_months"},
+    "goodwill": {"amortization_expense", "impairment_indicator", "recoverable_amount"},
+    "preferred_shares": {"mandatory_redemption"},
+    "held_for_sale": {"plan_committed", "sale_probable_12m", "fair_value_less_costs"},
 }
 
 
@@ -477,6 +481,54 @@ def generate_conversion(
                 )
             else:
                 entry["calculation"] = "적격자산이 아니므로 차입원가를 발생 기간의 비용으로 인식합니다(자본화 대상 아님)."
+        elif account_key == "goodwill":
+            amortization = float(checklist_response.get("amortization_expense") or 0)
+            recoverable = float(checklist_response.get("recoverable_amount") or 0)
+            book = float(item["amount"])
+            restored = book + amortization  # 상각 환입 후 장부금액
+            impaired = checklist_response.get("impairment_indicator") is True and 0 < recoverable < restored
+            if impaired:
+                entry["adjustment"] = round(recoverable - book, 2)
+                entry["calculation"] = (
+                    f"상각비 {amortization:,.0f} 환입 후 장부금액 {restored:,.0f} > 회수가능액 {recoverable:,.0f} → "
+                    f"손상차손 {restored - recoverable:,.0f}을 인식합니다. K-IFRS는 영업권을 상각하지 않고 매년 손상검사하며, 영업권 손상차손은 환입할 수 없습니다."
+                )
+            elif amortization > 0:
+                entry["adjustment"] = round(amortization, 2)
+                entry["calculation"] = (
+                    f"K-GAAP 영업권 상각비 {amortization:,.0f}을 환입합니다. "
+                    "K-IFRS 제1103호는 영업권 상각을 금지하며 제1036호에 따라 매년 손상검사를 수행합니다."
+                )
+            else:
+                entry["calculation"] = "당기 상각비가 없어 금액 조정은 없습니다. 매년 손상검사 수행 여부를 확인하세요."
+        elif account_key == "preferred_shares":
+            if checklist_response.get("mandatory_redemption") is True:
+                entry["target_account"] = "상환우선주부채(금융부채)"
+                entry["calculation"] = (
+                    "의무상환 조항 또는 보유자 상환청구권이 있어 계약의 실질상 금융부채로 재분류합니다. "
+                    "K-GAAP은 법적 형식에 따라 자본으로 분류하지만 K-IFRS 제1032호는 실질로 판단합니다."
+                )
+            else:
+                entry["calculation"] = "상환 의무가 없어 지분상품(자본)으로 유지합니다. 배당 조건 등 그 밖의 계약 조건을 함께 검토하세요."
+        elif account_key == "held_for_sale":
+            qualifies = (
+                checklist_response.get("plan_committed") is True
+                and checklist_response.get("sale_probable_12m") is True
+            )
+            book = float(item["amount"])
+            fair_value_less_costs = float(checklist_response.get("fair_value_less_costs") or 0)
+            if qualifies:
+                entry["target_account"] = "매각예정비유동자산"
+                if 0 < fair_value_less_costs < book:
+                    entry["adjustment"] = round(fair_value_less_costs - book, 2)
+                    entry["calculation"] = (
+                        f"저가 측정: 순공정가치 {fair_value_less_costs:,.0f} < 장부금액 {book:,.0f} → "
+                        f"손상차손 {book - fair_value_less_costs:,.0f}을 인식하고 매각예정비유동자산으로 별도 표시합니다(감가상각 중지)."
+                    )
+                else:
+                    entry["calculation"] = "매각예정 분류 요건을 충족합니다. 장부금액이 순공정가치 이하이므로 재분류만 수행합니다(감가상각 중지)."
+            else:
+                entry["calculation"] = "매각예정 분류 요건(매각계획 확약, 12개월 내 매각가능성)이 충족되지 않아 기존 분류를 유지합니다."
 
         if item["mapping_type"] == "judgment":
             judgment_items.append(

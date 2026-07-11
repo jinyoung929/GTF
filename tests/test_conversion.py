@@ -294,7 +294,7 @@ class TestNormalizeAccountName(unittest.TestCase):
     def test_known_limitation_substring_overmatch(self):
         # [한계 문서화] 부분문자열 매칭이라 '무형자산'이 무조건 development로 감.
         # 무형자산이 개발비만은 아니므로 오탐 가능 — 리팩터링 시 이 테스트가 신호가 됨.
-        self.assertEqual(norm("영업권"), "other")   # 무형자산이지만 별칭 없음
+        self.assertEqual(norm("영업권"), "goodwill")  # 판단 영역 확장으로 별칭 확보
         self.assertEqual(norm("무형자산"), "development")  # 현재 동작(주의)
 
 
@@ -363,10 +363,63 @@ class TestKifrsDifferenceAreas(unittest.TestCase):
         self.assertIn("이연수익법", e["calculation"])
 
     def test_all_new_areas_are_judgment(self):
-        for name in ["퇴직급여충당부채", "유형자산", "투자부동산", "이연법인세자산", "정부보조금", "차입원가"]:
+        for name in ["퇴직급여충당부채", "유형자산", "투자부동산", "이연법인세자산", "정부보조금", "차입원가",
+                     "영업권", "상환우선주", "매각예정자산"]:
             stmt = server.build_statement_record("2024", {"account_name": name, "amount": 100}, REF)
             self.assertEqual(stmt["mapping_type"], "judgment", f"{name}이 판단 필요가 아님")
             self.assertTrue(stmt["checklist"], f"{name}에 체크리스트가 없음")
+
+    # --- 영업권 (K-IFRS 1103·1036: 상각 금지, 매년 손상검사) ---
+
+    def test_goodwill_amortization_restored(self):
+        # K-GAAP 상각 후 장부 900, 당기 상각비 100 → 환입 +100
+        e = self._entry("영업권", 900, {"amortization_expense": 100, "impairment_indicator": False})
+        self.assertEqual(e["standard_code"], "A3200")
+        self.assertEqual(e["adjustment"], 100)
+        self.assertIn("환입", e["calculation"])
+
+    def test_goodwill_impairment_overrides_restoration(self):
+        # 환입 후 1,000 > 회수가능액 800 → 조정 = 800 − 900 = −100
+        e = self._entry("영업권", 900, {"amortization_expense": 100, "impairment_indicator": True, "recoverable_amount": 800})
+        self.assertEqual(e["adjustment"], -100)
+        self.assertIn("손상차손", e["calculation"])
+
+    def test_goodwill_no_inputs_no_adjustment(self):
+        e = self._entry("영업권", 900, {})
+        self.assertEqual(e["adjustment"], 0)
+        self.assertIn("손상검사", e["calculation"])
+
+    # --- 상환우선주 (K-IFRS 1032: 실질에 따른 부채/자본 분류) ---
+
+    def test_preferred_shares_mandatory_redemption_reclassified_to_liability(self):
+        e = self._entry("상환우선주", 500, {"mandatory_redemption": True})
+        self.assertEqual(e["standard_code"], "E1050")
+        self.assertEqual(e["adjustment"], 0)  # 금액 증감 없는 재분류
+        self.assertIn("금융부채", e["target_account"])
+
+    def test_preferred_shares_without_redemption_stays_equity(self):
+        e = self._entry("상환우선주", 500, {"mandatory_redemption": False})
+        self.assertNotEqual(e["target_account"], "상환우선주부채(금융부채)")  # 부채 재분류 안 함
+        self.assertIn("자본", e["calculation"])
+
+    # --- 매각예정비유동자산 (K-IFRS 1105: 분류 요건 + 저가 측정) ---
+
+    def test_held_for_sale_lower_of_carrying_and_fvlc(self):
+        # 장부 1,000 > 순공정가치 850 → 손상 −150
+        e = self._entry("매각예정자산", 1000, {"plan_committed": True, "sale_probable_12m": True, "fair_value_less_costs": 850})
+        self.assertEqual(e["standard_code"], "A9000")
+        self.assertEqual(e["adjustment"], -150)
+        self.assertIn("저가", e["calculation"])
+
+    def test_held_for_sale_no_writedown_when_fvlc_higher(self):
+        e = self._entry("매각예정자산", 1000, {"plan_committed": True, "sale_probable_12m": True, "fair_value_less_costs": 1200})
+        self.assertEqual(e["adjustment"], 0)
+        self.assertIn("재분류", e["calculation"])
+
+    def test_held_for_sale_criteria_not_met_keeps_classification(self):
+        e = self._entry("매각예정자산", 1000, {"plan_committed": True, "sale_probable_12m": False, "fair_value_less_costs": 850})
+        self.assertEqual(e["adjustment"], 0)
+        self.assertIn("요건", e["calculation"])
 
 
 if __name__ == "__main__":

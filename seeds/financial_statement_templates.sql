@@ -31,6 +31,9 @@ VALUES
   ('ifrs_pl_cost_of_sales', 'IFRS', '손익계산서', '비용', '매출원가', 'cost_of_sales', 502000, '매출원가를 손익계산서 비용 라인에 표시합니다.'),
   ('ifrs_pl_operating_expense', 'IFRS', '손익계산서', '비용', '판매비와관리비', 'operating_expense', 503000, '판매비와관리비를 손익계산서 비용 라인에 표시합니다.'),
   ('ifrs_pl_borrowing_cost', 'IFRS', '손익계산서', '금융원가', '금융원가(차입원가 자본화 조정)', 'borrowing_cost', 504000, 'K-IFRS 제1023호 적격자산 차입원가 자본화액을 금융원가에서 차감 조정합니다.'),
+  ('ifrs_bs_goodwill', 'IFRS', '재무상태표', '비유동자산', '영업권', 'goodwill', 103200, 'K-IFRS 제1103호에 따라 상각하지 않고 제1036호 매년 손상검사 후 표시합니다.'),
+  ('ifrs_bs_preferred_shares', 'IFRS', '재무상태표', '자본/금융부채', '상환우선주(자본 또는 금융부채)', 'preferred_shares', 401050, 'K-IFRS 제1032호 계약의 실질 판단에 따라 자본 또는 금융부채로 표시합니다.'),
+  ('ifrs_bs_held_for_sale', 'IFRS', '재무상태표', '유동자산', '매각예정비유동자산', 'held_for_sale', 109000, 'K-IFRS 제1105호에 따라 별도 표시하고 장부금액과 순공정가치 중 낮은 금액으로 측정합니다.'),
   ('ifrs_review_required', 'IFRS', '검토 필요', '미분류', '검토자 분류 필요', 'other', 909999, '내부 표준계정 매핑 신뢰도가 낮아 사람이 표시 라인을 확정합니다.')
 ON CONFLICT (id) DO UPDATE SET
   standard_set = excluded.standard_set,

@@ -146,9 +146,9 @@ class EndToEndSmokeTest(unittest.TestCase):
         )
         self.assertEqual(extraction["provider"], "dart_api")
         self.assertEqual(extraction["metadata"]["raw_row_count"], 213)
-        # 확장 계정 카탈로그(유형자산·이연법인세자산·투자부동산·퇴직급여 등) 인식으로 변환 대상 증가.
-        self.assertEqual(extraction["metadata"]["filtered_row_count"], 17)
-        self.assertEqual(len(extraction["rows"]), 17)
+        # 확장 계정 카탈로그(유형자산·이연법인세자산·투자부동산·퇴직급여·영업권 등) 인식으로 변환 대상 증가.
+        self.assertEqual(extraction["metadata"]["filtered_row_count"], 18)
+        self.assertEqual(len(extraction["rows"]), 18)
         self.assertEqual(
             next(row for row in extraction["rows"] if row["account_name"] == "단기금융상품")["account_key"],
             "financial_instrument",
@@ -159,12 +159,12 @@ class EndToEndSmokeTest(unittest.TestCase):
             f"/api/projects/{project_id}/extractions/{extraction['id']}/accept",
             {},
         )
-        self.assertEqual(len(accepted["statements"]), 17)
+        self.assertEqual(len(accepted["statements"]), 18)
         financial_product = next(row for row in accepted["statements"] if row["account_name"] == "단기금융상품")
         self.assertEqual(financial_product["standard_code"], "F1000")
 
         conversion = self.client.json("POST", f"/api/projects/{project_id}/convert", {"responses": {}})
-        self.assertEqual(len(conversion["entries"]), 17)
+        self.assertEqual(len(conversion["entries"]), 18)
         self.assertIn("단기금융상품", [entry["source_account"] for entry in conversion["entries"]])
 
         status, workbook_bytes, content_type = self.client.request(
@@ -178,7 +178,7 @@ class EndToEndSmokeTest(unittest.TestCase):
         loaded = load_workbook(workbook_path)
         sheet1, sheet2 = loaded["01_원본_DART"], loaded["02_계정매핑"]
         self.assertEqual(sheet1.max_row, 217)
-        self.assertEqual(sheet2.max_row, 18)
+        self.assertEqual(sheet2.max_row, 19)  # 헤더 1 + 매핑 계정 18행
         sheet1_values = {cell.value for row in sheet1.iter_rows() for cell in row}
         sheet2_values = {cell.value for row in sheet2.iter_rows() for cell in row}
         self.assertIn("자산총계", sheet1_values)

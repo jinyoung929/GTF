@@ -64,7 +64,7 @@ class DartImportAndWorkbookTests(unittest.TestCase):
                 {"account_nm": "자산총계", "thstrm_amount": "1000000", "sj_nm": "재무상태표"},
                 {"account_nm": "유동자산", "thstrm_amount": "900000", "sj_nm": "재무상태표"},
                 {"account_nm": "현금및현금성자산", "thstrm_amount": "500000", "sj_nm": "재무상태표"},
-                {"account_nm": "영업권", "thstrm_amount": "300000", "sj_nm": "재무상태표"},
+                {"account_nm": "회원권", "thstrm_amount": "300000", "sj_nm": "재무상태표"},
                 {"account_nm": "매출채권", "thstrm_amount": "200000", "sj_nm": "재무상태표"},
             ],
         }
