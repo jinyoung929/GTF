@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -14,6 +15,32 @@ from gtf_app.dart import dart_raw_statement_rows, dart_statement_rows
 from reference_fixture import load_reference
 
 REF = load_reference()
+
+
+class XlsxUploadRoundTripTests(unittest.TestCase):
+    """업로드 xlsx 읽기 경로(openpyxl) 왕복 검증: 쓰기와 같은 라이브러리로 읽는다."""
+
+    def test_parse_xlsx_statement_rows_round_trip(self):
+        import tempfile
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["계정명", "금액"])
+        sheet.append(["현금및현금성자산", 500000])      # 정수 셀
+        sheet.append(["매출채권", 1234.5])              # 실수 셀
+        sheet.append(["", ""])                          # 빈 행은 건너뜀
+        sheet.append(["충당부채", "1,200,000"])          # 콤마 문자열
+        path = Path(tempfile.mkdtemp()) / "upload.xlsx"
+        workbook.save(path)
+
+        rows, issues = server.parse_xlsx_statement_rows(path)
+
+        self.assertEqual(issues, [])
+        self.assertEqual(
+            [(row["account_name"], row["amount"]) for row in rows],
+            [("현금및현금성자산", 500000.0), ("매출채권", 1234.5), ("충당부채", 1200000.0)],
+        )
 
 
 class DartImportAndWorkbookTests(unittest.TestCase):

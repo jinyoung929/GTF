@@ -33,7 +33,6 @@ import zipfile
 from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path
-import xml.etree.ElementTree as ET
 from typing import Iterator
 
 import openai
@@ -42,6 +41,8 @@ import uvicorn
 from fastapi import Body, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from openai import OpenAI
+from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 from pydantic import BaseModel
 from sqlalchemy import DateTime, String, delete, func, inspect, select, text, update
 from sqlalchemy.engine import Engine
@@ -713,74 +714,17 @@ def log_event(session: Session, project_id: str, event_type: str, detail: dict, 
 # ───────────────────────────────────────────────────────────────────────────
 # §7 파일 파서 (xlsx / pdf)
 # ───────────────────────────────────────────────────────────────────────────
-def xlsx_col_index(cell_ref: str) -> int:
-    letters = re.sub(r"[^A-Z]", "", cell_ref.upper())
-    index = 0
-    for letter in letters:
-        index = index * 26 + (ord(letter) - ord("A") + 1)
-    return max(index - 1, 0)
-
-
-def xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
-    if "xl/sharedStrings.xml" not in archive.namelist():
-        return []
-    root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
-    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-    strings = []
-    for item in root.findall("x:si", ns):
-        pieces = [node.text or "" for node in item.findall(".//x:t", ns)]
-        strings.append("".join(pieces))
-    return strings
-
-
-def xlsx_first_sheet_path(archive: zipfile.ZipFile) -> str:
-    workbook = ET.fromstring(archive.read("xl/workbook.xml"))
-    rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
-    ns = {
-        "x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
-        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
-    }
-    sheet = workbook.find("x:sheets/x:sheet", ns)
-    if sheet is None:
-        raise ValueError("Excel 파일에서 워크시트를 찾지 못했습니다.")
-    rel_id = sheet.attrib.get(f"{{{ns['r']}}}id")
-    for rel in rels.findall("rel:Relationship", ns):
-        if rel.attrib.get("Id") == rel_id:
-            target = rel.attrib.get("Target", "")
-            return "xl/" + target.lstrip("/") if not target.startswith("xl/") else target
-    raise ValueError("Excel 워크시트 관계 정보를 찾지 못했습니다.")
-
-
-def xlsx_cell_value(cell: ET.Element, shared_strings: list[str], ns: dict) -> str:
-    cell_type = cell.attrib.get("t")
-    if cell_type == "inlineStr":
-        pieces = [node.text or "" for node in cell.findall(".//x:t", ns)]
-        return "".join(pieces).strip()
-    value_node = cell.find("x:v", ns)
-    value = value_node.text if value_node is not None else ""
-    if cell_type == "s" and value != "":
-        index = int(float(value))
-        return shared_strings[index].strip() if 0 <= index < len(shared_strings) else ""
-    return str(value or "").strip()
-
-
 def read_xlsx_table(path: Path) -> list[list[str]]:
-    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-    with zipfile.ZipFile(path) as archive:
-        shared_strings = xlsx_shared_strings(archive)
-        sheet_path = xlsx_first_sheet_path(archive)
-        root = ET.fromstring(archive.read(sheet_path))
-    table = []
-    for row in root.findall(".//x:sheetData/x:row", ns):
-        values = []
-        for cell in row.findall("x:c", ns):
-            index = xlsx_col_index(cell.attrib.get("r", "A1"))
-            while len(values) <= index:
-                values.append("")
-            values[index] = xlsx_cell_value(cell, shared_strings, ns)
-        table.append(values)
-    return table
+    """첫 워크시트를 문자열 표로 읽는다. 쓰기(excel_export)와 같은 openpyxl을 사용한다."""
+    workbook = load_workbook(path, read_only=True, data_only=True)  # data_only: 수식 대신 계산값
+    try:
+        sheet = workbook.worksheets[0]
+        return [
+            ["" if cell is None else str(cell).strip() for cell in row]
+            for row in sheet.iter_rows(values_only=True)
+        ]
+    finally:
+        workbook.close()
 
 
 def parse_xlsx_statement_rows(path: Path) -> tuple[list[dict], list[str]]:
@@ -1801,7 +1745,7 @@ def extract_rows_from_upload(upload: dict) -> tuple[list[dict], list[str], str]:
     if suffix == ".xlsx" or "spreadsheetml" in content_type:
         try:
             rows, issues = parse_xlsx_statement_rows(stored_path)
-        except (KeyError, ValueError, zipfile.BadZipFile, ET.ParseError) as exc:
+        except (KeyError, ValueError, zipfile.BadZipFile, InvalidFileException) as exc:
             rows, issues = [], [f"Excel 파일 구조를 해석하지 못했습니다: {exc}"]
         return rows, issues, "local_xlsx_parser"
 
