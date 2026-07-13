@@ -358,6 +358,7 @@ def generate_conversion(
         account_key = account_key_for_statement(item, reference)
         standard = reference.accounts[account_key]
         checklist_response = responses.get(item["id"], {})
+        paired_entry = None  # 리스처럼 한 판단이 분개 두 줄(차/대)을 만드는 경우
         entry = {
             "source_account": item["account_name"],
             "standard_code": item["standard_code"],
@@ -386,7 +387,27 @@ def generate_conversion(
                 else:
                     pv = payment * months
                 entry["adjustment"] = round(pv - float(item["amount"]), 2)
-                entry["calculation"] = "리스료 현재가치에서 K-GAAP 장부금액을 차감해 조정액을 산출했습니다."
+                entry["calculation"] = (
+                    "리스료 현재가치에서 K-GAAP 장부금액을 차감해 사용권자산 조정액을 산출했습니다. "
+                    "수정소급법(제1116호 경과규정)에 따라 사용권자산은 리스부채와 동액으로 인식합니다."
+                )
+                # 수정소급법: 사용권자산 = 리스부채 → 같은 현재가치로 부채 쪽 분개를 쌍으로 생성.
+                # L2150은 표시 순서 도출용 코드(부채 구역)이며 별도 계정 시드는 필요 없다.
+                paired_entry = {
+                    "source_account": f"{item['account_name']} (리스부채 인식)",
+                    "standard_code": "L2150",
+                    "target_account": "리스부채",
+                    "amount": 0,
+                    "adjustment": round(pv, 2),
+                    "mapping_type": item["mapping_type"],
+                    "basis": "수정소급법에 따라 사용권자산과 동액의 리스부채를 인식합니다 (K-IFRS 제1116호).",
+                    "calculation": f"리스부채 = 잔여 리스료의 현재가치 {pv:,.0f}. 1년 내 지급분의 유동 분류를 검토하세요.",
+                    "presentation_order": account_presentation_order("L2150"),
+                    "statement_type": "재무상태표",
+                    "statement_section": "부채",
+                    "statement_line_item": "리스부채 (유동성 구분 검토)",
+                    "presentation_basis": "리스부채는 사용권자산과 별도로 부채에 표시합니다.",
+                }
         elif account_key == "development":
             criteria = ["technical_feasibility", "intention_to_complete", "probable_future_benefits", "reliable_measurement"]
             qualifies = all(checklist_response.get(key) is True for key in criteria)
@@ -557,6 +578,8 @@ def generate_conversion(
             )
 
         entries.append(entry)
+        if paired_entry:
+            entries.append(paired_entry)
 
     # 조정분개를 계정코드 기반 표시 순서(재무상태표 → 손익계산서)로 정렬한다.
     entries.sort(key=lambda e: (e.get("presentation_order", 800000), e.get("standard_code", "")))

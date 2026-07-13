@@ -14,7 +14,7 @@ VALUES
   ('ifrs_bs_ppe', 'IFRS', '재무상태표', '비유동자산', '유형자산', 'ppe', 101500, 'K-IFRS 제1016호 유형자산 라인에 표시하고 감가상각과 손상을 검토합니다.'),
   ('ifrs_bs_deferred_tax_asset', 'IFRS', '재무상태표', '비유동자산', '이연법인세자산', 'deferred_tax_asset', 101600, 'K-IFRS 제1012호 일시적차이 총액법으로 이연법인세자산을 인식하고 회수가능성을 검토합니다.'),
   ('ifrs_bs_investment_property', 'IFRS', '재무상태표', '비유동자산', '투자부동산', 'investment_property', 101700, 'K-IFRS 제1040호 원가모형/공정가치모형 중 선택해 투자부동산 라인에 표시합니다.'),
-  ('ifrs_bs_lease_asset', 'IFRS', '재무상태표', '비유동자산/부채', '사용권자산 및 리스부채', 'lease', 102100, 'K-IFRS 제1116호에 따라 사용권자산과 리스부채 표시를 검토합니다.'),
+  ('ifrs_bs_lease_asset', 'IFRS', '재무상태표', '비유동자산', '사용권자산', 'lease', 102100, 'K-IFRS 제1116호 사용권자산을 비유동자산에 표시하고, 리스부채는 변환 시 부채 라인 분개로 쌍 생성됩니다.'),
   ('ifrs_bs_development', 'IFRS', '재무상태표 또는 손익계산서', '무형자산/비용', '무형자산 또는 연구개발비', 'development', 103100, 'K-IFRS 제1038호 개발단계 자산화 요건에 따라 표시 라인이 달라집니다.'),
   ('ifrs_bs_financial_instrument', 'IFRS', '재무상태표', '금융자산/금융부채', '금융자산 또는 금융부채', 'financial_instrument', 201000, 'K-IFRS 제1109호 분류 결과에 따라 금융자산 또는 금융부채로 표시합니다.'),
   ('ifrs_bs_trade_payables', 'IFRS', '재무상태표', '유동부채', '매입채무및기타채무', 'trade_payables', 301000, '매입채무와 기타채무를 유동부채 라인에 표시합니다.'),

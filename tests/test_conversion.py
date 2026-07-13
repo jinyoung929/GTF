@@ -138,13 +138,31 @@ class TestLeasePresentValue(unittest.TestCase):
         self.assertAlmostEqual(entry["adjustment"], round(pv_monthly, 2), delta=0.01)
 
     def test_missing_inputs_produce_no_adjustment(self):
-        # 개월수나 지급액이 없으면 조정액은 기본값 0, calculation 미기재
-        _, entry = convert_single(
+        # 개월수나 지급액이 없으면 조정액은 기본값 0, calculation 미기재, 분개 쌍도 없음
+        result, entry = convert_single(
             "리스", 5_000_000, "judgment",
             response={"lease_term_months": 0, "monthly_payment": 0},
         )
         self.assertEqual(entry["adjustment"], 0)
         self.assertNotIn("calculation", entry)
+        self.assertEqual(len(result["entries"]), 1)
+
+    def test_lease_creates_paired_liability_entry(self):
+        # 수정소급법: 사용권자산 = 리스부채. PV가 계산되면 부채 쪽 분개가 쌍으로 생긴다.
+        payment, months, book = 1_000_000, 12, 8_000_000
+        result, asset_entry = convert_single(
+            "리스부채", book, "judgment",
+            response={"lease_term_months": months, "monthly_payment": payment, "discount_rate": 0},
+        )
+        self.assertEqual(len(result["entries"]), 2)
+        liability = result["entries"][1]
+        self.assertEqual(liability["target_account"], "리스부채")
+        self.assertEqual(liability["statement_section"], "부채")
+        # 동액 검증: 자산 조정 + 장부금액 = 리스부채 인식액 = PV
+        self.assertEqual(liability["adjustment"], asset_entry["adjustment"] + book)
+        self.assertEqual(liability["adjustment"], 12_000_000)
+        # 부채 구역 정렬(L) — 자산(A) 뒤에 온다
+        self.assertGreater(liability["presentation_order"], asset_entry["presentation_order"])
 
 
 # ---------------------------------------------------------------------------
