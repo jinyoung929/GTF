@@ -945,7 +945,7 @@ function ApprovalPanel({ projectId, onAction }: { projectId: string; onAction: (
               {item.action && (
                 <button
                   onClick={() => onAction(item.action!, item.statement_id)}
-                  className="shrink-0 px-3 py-1.5 text-[11px] font-bold text-white bg-[#1740BE]"
+                  className="shrink-0 px-2 py-0.5 text-[11px] font-semibold text-[#1740BE] bg-[#EFF4FF] rounded"
                 >
                   {SUMMARY_ACTION_LABELS[item.action]}
                 </button>
@@ -974,7 +974,7 @@ function ApprovalPanel({ projectId, onAction }: { projectId: string; onAction: (
               {!item.checklist_answered && (
                 <button
                   onClick={() => onAction("fill_checklist", item.statement_id)}
-                  className="px-3 py-1.5 text-[11px] font-bold text-white bg-[#1740BE]"
+                  className="px-2 py-0.5 text-[11px] font-semibold text-[#1740BE] bg-[#EFF4FF] rounded"
                 >
                   {SUMMARY_ACTION_LABELS.fill_checklist}
                 </button>
