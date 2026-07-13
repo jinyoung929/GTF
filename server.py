@@ -1862,6 +1862,10 @@ class ConvertRequest(BaseModel):
     responses: dict[str, dict] = {}
 
 
+class ClassifyStatementRequest(BaseModel):
+    account_key: str = ""
+
+
 class ReviewRequest(BaseModel):
     decision: str = ""
     reviewer_name: str = ""
@@ -2486,6 +2490,50 @@ def add_statements(
         "issues": issues,
         "ai_classification_status": ai_classification.get("status"),
     }
+
+
+@app.patch("/api/projects/{project_id}/statements/{statement_id}/classify")
+def classify_statement(
+    project_id: str,
+    statement_id: str,
+    payload: ClassifyStatementRequest,
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+):
+    """반영된 계정 행을 담당자가 표준계정으로 재분류한다.
+
+    검토 요약의 '미분류(X9999)' 오류 항목이 유도하는 행동. 재분류 전/후가 감사 로그에 남아
+    'AI 제안 → 사람 확정'과 같은 원칙(분류 확정 권한은 사람, 과정은 기록)을 따른다.
+    """
+    get_project_or_404(session, project_id)
+    statement = session.get(Statement, statement_id)
+    if not statement or statement.project_id != project_id:
+        raise HTTPException(404, {"error": "계정 행을 찾지 못했습니다."})
+    account_key = payload.account_key.strip()
+    account = REFERENCE.accounts.get(account_key)
+    if not account or account_key == "other":
+        raise HTTPException(400, {"error": "유효한 표준계정 키가 아닙니다. 분류 가능한 계정 목록에서 선택하세요."})
+    before = {"standard_code": statement.standard_code, "normalized_account": statement.normalized_account}
+    checklist = REFERENCE.checklists.get(account_key, []) if account["type"] == "judgment" else []
+    statement.normalized_account = account["label"]
+    statement.standard_code = account["code"]
+    statement.mapping_type = account["type"]
+    statement.rule_summary = f"[담당자 재분류] {account['rule']}"
+    statement.checklist_json = json.dumps(checklist, ensure_ascii=False)
+    log_event(
+        session,
+        project_id,
+        "statement.reclassified",
+        {
+            "statement_id": statement_id,
+            "account_name": statement.account_name,
+            "before": before,
+            "after": {"standard_code": account["code"], "normalized_account": account["label"]},
+        },
+        actor=user.email,
+    )
+    session.commit()
+    return row_to_dict(statement)
 
 
 @app.post("/api/projects/{project_id}/validate")

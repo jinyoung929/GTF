@@ -118,6 +118,45 @@ class ApiAuthTests(unittest.TestCase):
         self.client.post("/api/auth/logout")
         self.assertEqual(self.client.get("/api/projects").status_code, 401)
 
+
+    def test_reclassify_statement_updates_row_and_logs(self):
+        # 검토 요약의 '분류하러 가기'가 도착하는 곳: 미분류 행을 담당자가 재분류하고 감사 로그가 남는다.
+        # demo@gtf.local은 읽기 전용으로 강제되므로 쓰기 관리자를 재시드한다.
+        os.environ["ADMIN_EMAIL"] = "admin@example.com"
+        os.environ["ADMIN_PASSWORD"] = "write-pass"
+        with server.get_session() as session:
+            server.ensure_admin_user(session)
+        self.login(email="admin@example.com", password="write-pass")
+        project = self.client.post("/api/projects", json={"company_name": "재분류", "period": "2024"}).json()
+        added = self.client.post(
+            f"/api/projects/{project['id']}/statements",
+            json={"rows": [{"account_name": "자본잉여금", "amount": 100}]},
+        ).json()
+        self.client.post(f"/api/projects/{project['id']}/extractions/{added['extraction_id']}/accept", json={})
+        bundle = self.client.get(f"/api/projects/{project['id']}").json()
+        row = bundle["statements"][0]
+        self.assertEqual(row["standard_code"], "X9999")  # 별칭 사전에 없어 미분류
+
+        patched = self.client.patch(
+            f"/api/projects/{project['id']}/statements/{row['id']}/classify",
+            json={"account_key": "capital_surplus"},
+        )
+        self.assertEqual(patched.status_code, 200)
+        self.assertEqual(patched.json()["standard_code"], "E1100")
+        self.assertEqual(patched.json()["mapping_type"], "simple")
+
+        rejected = self.client.patch(
+            f"/api/projects/{project['id']}/statements/{row['id']}/classify",
+            json={"account_key": "other"},
+        )
+        self.assertEqual(rejected.status_code, 400)
+
+        logs = self.client.get(f"/api/projects/{project['id']}/audit").json()
+        events = {log["event_type"] for log in logs}
+        self.assertIn("statement.reclassified", events)
+
+
+
     def test_schema_comes_from_orm_models_and_admin_is_seeded(self):
         # 스키마의 단일 출처는 ORM 모델(Base.metadata)이며, init_db가 create_all로 만든다.
         self.assertIn("app_users", Base.metadata.tables)

@@ -21,7 +21,7 @@ import { api, download } from "./api";
 import { classNames, fmtKRW } from "./format";
 import { LoginScreen } from "./screens/LoginScreen";
 import { ProjectDashboard } from "./screens/ProjectDashboard";
-import type { AiDecision, AuditLog, Conversion, ConversionEntry, ImportTab, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, Statement, UploadRow, UserInfo } from "./types";
+import type { AccountOption, AiDecision, AuditLog, Conversion, ConversionEntry, FocusTarget, ImportTab, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, Statement, SummaryAction, UploadRow, UserInfo } from "./types";
 import { HeaderCell, Pill, SectionLabel, StatusBadge } from "./ui";
 
 type DartReportOption = {
@@ -157,6 +157,9 @@ function ImportScreen({
   onDartImport,
   onManualAdd,
   onGoNext,
+  focusTarget,
+  accountOptions,
+  onReclassify,
 }: {
   bundle: ProjectBundle;
   dartReady: boolean;
@@ -167,6 +170,9 @@ function ImportScreen({
   onDartImport: (payload: Record<string, string>) => Promise<void>;
   onManualAdd: (rows: SourceRow[]) => Promise<void>;
   onGoNext: () => void;
+  focusTarget?: FocusTarget | null;
+  accountOptions: AccountOption[];
+  onReclassify: (statementId: string, accountKey: string) => Promise<void>;
 }) {
   const [tab, setTab] = useState<ImportTab>("file");
   const [busy, setBusy] = useState("");
@@ -186,6 +192,19 @@ function ImportScreen({
   const suggestedAccounts = previewRows.filter((row) => row.ai_suggestion).map((row) => row.account_name);
   const undecidedCount = suggestedAccounts.filter((name) => !aiDecisions[name]).length;
   const unclassifiedCount = bundle.statements.filter((row) => row.standard_code === "X9999").length;
+
+  // 검토 요약의 행동 버튼이 보낸 목적지: 수동 입력 탭 열기 또는 계정 매핑 행으로 스크롤.
+  useEffect(() => {
+    if (!focusTarget) return;
+    if (focusTarget.kind === "add_rows") setTab("manual");
+    if (focusTarget.kind === "classify" || focusTarget.kind === "review_rows") {
+      const elementId =
+        focusTarget.kind === "classify" && focusTarget.statementId
+          ? `mapping-row-${focusTarget.statementId}`
+          : "mapping-table";
+      setTimeout(() => document.getElementById(elementId)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+    }
+  }, [focusTarget?.seq]);
 
   function decideAi(accountName: string, decision: AiDecision) {
     setAiDecisions((current) => {
@@ -380,7 +399,12 @@ function ImportScreen({
         <RowsTable rows={previewRows} decisions={aiDecisions} onDecide={latestExtraction?.status === "accepted" ? undefined : decideAi} />
       </div>
 
-      <MappingTable statements={bundle.statements} />
+      <MappingTable
+        statements={bundle.statements}
+        accountOptions={accountOptions}
+        onReclassify={onReclassify}
+        highlightId={focusTarget?.kind === "classify" ? focusTarget.statementId : undefined}
+      />
 
       {!!bundle.statements.length && (
         <div className="bg-white border border-[#D0D5E0] px-4 py-3 flex items-center justify-between">
@@ -583,15 +607,44 @@ function RowsTable({ rows, decisions = {}, onDecide }: { rows: SourceRow[]; deci
   );
 }
 
-function MappingTable({ statements }: { statements: Statement[] }) {
+function MappingTable({
+  statements,
+  accountOptions,
+  onReclassify,
+  highlightId,
+}: {
+  statements: Statement[];
+  accountOptions: AccountOption[];
+  onReclassify: (statementId: string, accountKey: string) => Promise<void>;
+  highlightId?: string;
+}) {
+  const [choice, setChoice] = useState<Record<string, string>>({});
+  const [busyId, setBusyId] = useState("");
+
+  async function apply(rowId: string) {
+    const key = choice[rowId];
+    if (!key) return;
+    setBusyId(rowId);
+    try {
+      await onReclassify(rowId, key);
+    } finally {
+      setBusyId("");
+    }
+  }
+
   return (
-    <div className="bg-white border border-[#D0D5E0]">
+    <div id="mapping-table" className="bg-white border border-[#D0D5E0]">
       <div className="px-4 py-3 border-b border-[#D0D5E0] bg-[#F5F7FA]"><SectionLabel>계정 매핑</SectionLabel></div>
       <table className="w-full text-xs">
         <thead><tr className="bg-[#F5F7FA]"><HeaderCell>원 계정</HeaderCell><HeaderCell right>금액</HeaderCell><HeaderCell>표준계정</HeaderCell><HeaderCell>코드</HeaderCell><HeaderCell>유형</HeaderCell><HeaderCell>근거</HeaderCell></tr></thead>
         <tbody>
           {statements.map((row) => (
-            <tr key={row.id} className={classNames("border-t border-[#EEF0F5]", row.mapping_type === "judgment" && "bg-amber-50/30", row.standard_code === "X9999" && "bg-red-50/40")}>
+            <tr
+              key={row.id}
+              id={`mapping-row-${row.id}`}
+              style={row.id === highlightId ? { outline: "2px solid #1740BE", outlineOffset: "-2px" } : undefined}
+              className={classNames("border-t border-[#EEF0F5]", row.mapping_type === "judgment" && "bg-amber-50/30", row.standard_code === "X9999" && "bg-red-50/40")}
+            >
               <td className="px-4 py-2.5 font-semibold">{row.account_name}</td>
               <td className="px-4 py-2.5 text-right font-mono">{fmtKRW(row.amount)}</td>
               <td className="px-4 py-2.5">{row.normalized_account}</td>
@@ -602,9 +655,37 @@ function MappingTable({ statements }: { statements: Statement[] }) {
                   {row.rule_summary?.includes("AI 1차 분류") && (
                     <span title="AI가 분류를 제안하고 담당자가 확정한 계정입니다" className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-bold bg-violet-50 text-violet-700 border border-violet-200 rounded">AI 분류</span>
                   )}
+                  {row.rule_summary?.includes("담당자 재분류") && (
+                    <span title="담당자가 직접 재분류한 계정입니다 (감사 로그 기록)" className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 rounded">재분류됨</span>
+                  )}
                 </div>
               </td>
-              <td className="px-4 py-2.5 text-[#677089] max-w-[320px] truncate">{row.rule_summary}</td>
+              <td className="px-4 py-2.5 text-[#677089] max-w-[320px]">
+                <div className="truncate">{row.rule_summary}</div>
+                {row.standard_code === "X9999" && (
+                  <div className="flex items-center gap-1.5 mt-1.5">
+                    <select
+                      value={choice[row.id] || ""}
+                      onChange={(event) => setChoice((current) => ({ ...current, [row.id]: event.target.value }))}
+                      className="px-2 py-1 text-[11px] border border-[#D0D5E0] bg-[#F5F7FA]"
+                    >
+                      <option value="">표준계정 선택</option>
+                      {accountOptions.map((option) => (
+                        <option key={option.account_key} value={option.account_key}>
+                          {option.internal_label} ({option.standard_code})
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      disabled={!choice[row.id] || busyId === row.id}
+                      onClick={() => apply(row.id)}
+                      className="px-2 py-1 text-[11px] font-bold text-white bg-[#1740BE] disabled:bg-[#C8D0DC]"
+                    >
+                      {busyId === row.id ? "적용 중..." : "재분류"}
+                    </button>
+                  </div>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -620,17 +701,29 @@ function ReviewScreen({
   setTab,
   onConvert,
   onExport,
+  focusTarget,
+  onSummaryAction,
 }: {
   bundle: ProjectBundle;
   tab: ReviewTab;
   setTab: (tab: ReviewTab) => void;
   onConvert: (responses: Record<string, Record<string, unknown>>) => Promise<void>;
   onExport: (name: string) => void;
+  focusTarget?: FocusTarget | null;
+  onSummaryAction: (action: SummaryAction, statementId?: string) => void;
 }) {
   const [responses, setResponses] = useState<Record<string, Record<string, unknown>>>({});
   const [busy, setBusy] = useState(false);
   const judgmentStatements = bundle.statements.filter((statement) => statement.mapping_type === "judgment");
   const entries = bundle.conversion?.entries || [];
+
+  // '체크리스트 입력' 버튼이 보낸 목적지: 해당 계정 카드로 스크롤.
+  useEffect(() => {
+    if (focusTarget?.kind === "fill_checklist" && tab === "checklist" && focusTarget.statementId) {
+      const elementId = `checklist-card-${focusTarget.statementId}`;
+      setTimeout(() => document.getElementById(elementId)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+    }
+  }, [focusTarget?.seq, tab]);
 
   function setResponse(statementId: string, key: string, value: unknown) {
     setResponses((current) => ({ ...current, [statementId]: { ...(current[statementId] || {}), [key]: value } }));
@@ -669,7 +762,12 @@ function ReviewScreen({
           {tab === "checklist" && (
             <div className="space-y-4">
               {judgmentStatements.map((statement) => (
-                <div key={statement.id} className="border border-[#D0D5E0]">
+                <div
+                  key={statement.id}
+                  id={`checklist-card-${statement.id}`}
+                  className="border border-[#D0D5E0]"
+                  style={focusTarget?.kind === "fill_checklist" && focusTarget.statementId === statement.id ? { outline: "2px solid #1740BE", outlineOffset: "-2px" } : undefined}
+                >
                   <div className="px-4 py-2.5 bg-amber-50 border-b border-[#D0D5E0] flex justify-between">
                     <span className="text-xs font-bold text-[#0A1628]">{statement.account_name}</span>
                     <span className="text-xs text-amber-800">{statement.rule_summary}</span>
@@ -705,7 +803,7 @@ function ReviewScreen({
 
           {tab === "adjustments" && <AdjustmentTable entries={entries} />}
           {tab === "notes" && <Notes notes={bundle.conversion?.draft_notes || []} ai={bundle.conversion?.ai_assistance} judgmentItems={bundle.conversion?.judgment_items || []} />}
-          {tab === "approval" && <ApprovalPanel projectId={bundle.project.id} />}
+          {tab === "approval" && <ApprovalPanel projectId={bundle.project.id} onAction={onSummaryAction} />}
           {tab === "audit" && <AuditTable logs={[]} projectId={bundle.project.id} />}
           {tab === "export" && <ExportPanel onExport={onExport} ready={!!bundle.conversion} />}
         </div>
@@ -782,7 +880,14 @@ function Notes({ notes, ai, judgmentItems }: { notes: Conversion["draft_notes"];
   );
 }
 
-function ApprovalPanel({ projectId }: { projectId: string }) {
+const SUMMARY_ACTION_LABELS: Record<SummaryAction, string> = {
+  classify: "분류하러 가기 →",
+  fill_checklist: "체크리스트 입력 →",
+  add_rows: "손익 행 추가 →",
+  review_rows: "계정 행 확인 →",
+};
+
+function ApprovalPanel({ projectId, onAction }: { projectId: string; onAction: (action: SummaryAction, statementId?: string) => void }) {
   const [summary, setSummary] = useState<ReviewSummary | null>(null);
   const [reviewerName, setReviewerName] = useState("");
   const [memo, setMemo] = useState("");
@@ -833,10 +938,18 @@ function ApprovalPanel({ projectId }: { projectId: string }) {
               <span className={classNames("shrink-0 px-2 py-0.5 text-[11px] font-bold border", severityStyle(item.severity))}>
                 {item.severity === "error" ? "오류" : "경고"}
               </span>
-              <div className="text-xs">
+              <div className="text-xs flex-1">
                 <span className="font-bold text-[#0A1628]">{item.account}</span>
                 <span className="text-[#677089]"> — {item.message}</span>
               </div>
+              {item.action && (
+                <button
+                  onClick={() => onAction(item.action!, item.statement_id)}
+                  className="shrink-0 px-2 py-0.5 text-[11px] font-bold border border-[#1740BE] text-[#1740BE] bg-white"
+                >
+                  {SUMMARY_ACTION_LABELS[item.action]}
+                </button>
+              )}
             </div>
           ))}
           {!summary.attention.length && <div className="px-4 py-3 text-xs text-emerald-700 font-semibold">확인 필요 항목이 없습니다.</div>}
@@ -858,6 +971,14 @@ function ApprovalPanel({ projectId }: { projectId: string }) {
                 {item.checklist_answered ? "체크리스트 입력됨" : "체크리스트 미입력"}
               </span>
               <span className="text-[11px] text-[#677089]">기준서 문단 {item.standards_paragraph_count}건 연결</span>
+              {!item.checklist_answered && (
+                <button
+                  onClick={() => onAction("fill_checklist", item.statement_id)}
+                  className="px-2 py-0.5 text-[11px] font-bold border border-[#1740BE] text-[#1740BE] bg-white"
+                >
+                  {SUMMARY_ACTION_LABELS.fill_checklist}
+                </button>
+              )}
             </div>
           ))}
           {!summary.judgment.length && <div className="px-4 py-3 text-xs text-[#677089]">회계 판단 항목이 없습니다.</div>}
@@ -945,6 +1066,8 @@ export default function App() {
   const [bundle, setBundle] = useState<ProjectBundle | null>(null);
   const [screen, setScreen] = useState<Screen>("import");
   const [reviewTab, setReviewTab] = useState<ReviewTab>("checklist");
+  const [focusTarget, setFocusTarget] = useState<FocusTarget | null>(null);
+  const [accountOptions, setAccountOptions] = useState<AccountOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [dartReady, setDartReady] = useState(false);
   const [toast, setToast] = useState("");
@@ -977,6 +1100,14 @@ export default function App() {
   useEffect(() => {
     loadSession().catch(() => setLoading(false));
   }, []);
+
+  // 재분류 드롭다운 옵션: 표준계정 카탈로그를 로그인 후 한 번 로드한다 ('other' 제외).
+  useEffect(() => {
+    if (!user) return;
+    api<{ accounts: AccountOption[] }>("/api/reference-data")
+      .then((data) => setAccountOptions((data.accounts || []).filter((account) => account.account_key !== "other")))
+      .catch(() => setAccountOptions([]));
+  }, [user]);
 
   async function logout() {
     await api("/api/auth/logout", { method: "POST", body: "{}" });
@@ -1055,6 +1186,27 @@ export default function App() {
     setToast("변환 초안을 생성했습니다");
   }
 
+  // 검토 요약의 행동 버튼: 서버가 내려준 action대로 해결 지점으로 이동시킨다.
+  function summaryAction(action: SummaryAction, statementId?: string) {
+    if (action === "fill_checklist") {
+      setScreen("review");
+      setReviewTab("checklist");
+    } else {
+      setScreen("import");
+    }
+    setFocusTarget({ kind: action, statementId, seq: Date.now() });
+  }
+
+  async function reclassify(statementId: string, accountKey: string) {
+    if (!bundle) return;
+    await api(`/api/projects/${bundle.project.id}/statements/${statementId}/classify`, {
+      method: "PATCH",
+      body: JSON.stringify({ account_key: accountKey }),
+    });
+    await refreshBundle();
+    setToast("재분류를 반영했습니다 (감사 로그 기록)");
+  }
+
   const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
 
   if (loading) {
@@ -1112,6 +1264,9 @@ export default function App() {
             onDartImport={dartImport}
             onManualAdd={manualAdd}
             onGoNext={() => { setScreen("review"); setReviewTab("checklist"); }}
+            focusTarget={focusTarget}
+            accountOptions={accountOptions}
+            onReclassify={reclassify}
           />
         ) : (
           <ReviewScreen
@@ -1120,6 +1275,8 @@ export default function App() {
             setTab={setReviewTab}
             onConvert={convert}
             onExport={(name) => download(`/api/projects/${liveBundle.project.id}/exports/${name}`)}
+            focusTarget={focusTarget}
+            onSummaryAction={summaryAction}
           />
         )}
       </ProjectLayout>

@@ -623,6 +623,9 @@ def build_review_summary(statements: list[dict], conversion: dict | None, valida
                 "severity": "error",
                 "account": row.get("account_name"),
                 "message": "표준계정 미분류 상태입니다. 담당자 분류 또는 AI 제안 승인(1차 승인)이 필요합니다.",
+                # action: 화면이 이 항목에 붙일 행동 버튼. 문자열 매칭 대신 서버가 행동을 내려준다.
+                "action": "classify",
+                "statement_id": row.get("id"),
             }
         )
 
@@ -639,6 +642,8 @@ def build_review_summary(statements: list[dict], conversion: dict | None, valida
                     "severity": "warning",
                     "account": row.get("account_name"),
                     "message": "판단 체크리스트가 입력되지 않았습니다." if conversion else "변환 초안이 아직 생성되지 않아 체크리스트 응답이 없습니다.",
+                    "action": "fill_checklist",
+                    "statement_id": row.get("id"),
                 }
             )
         judgment.append(
@@ -663,6 +668,8 @@ def build_review_summary(statements: list[dict], conversion: dict | None, valida
                     "severity": check.get("status"),
                     "account": check.get("name"),
                     "message": check.get("detail"),
+                    # 손익 항목 누락은 행 추가로, 균형·중복류 문제는 계정 행 재확인으로 유도한다.
+                    "action": "add_rows" if "손익" in str(check.get("name") or "") else "review_rows",
                 }
             )
 

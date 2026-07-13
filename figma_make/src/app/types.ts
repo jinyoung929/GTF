@@ -109,12 +109,20 @@ export type AuditLog = { id: string; event_type: string; actor: string; created_
 
 export type AiDecision = "approved" | "rejected";
 
+export type SummaryAction = "classify" | "fill_checklist" | "add_rows" | "review_rows";
+
 export type ReviewAttentionItem = {
   type: "unclassified" | "checklist_missing" | "validation";
   severity: "error" | "warning";
   account: string;
   message: string;
+  action?: SummaryAction;
+  statement_id?: string;
 };
+
+export type AccountOption = { account_key: string; standard_code: string; internal_label: string };
+
+export type FocusTarget = { kind: SummaryAction; statementId?: string; seq: number };
 
 export type ReviewSummary = {
   attention: ReviewAttentionItem[];

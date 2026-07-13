@@ -137,6 +137,26 @@ class BuildReviewSummaryTest(unittest.TestCase):
         self.assertEqual(summary["judgment"], [])
         self.assertTrue(summary["can_approve"])
 
+    def test_attention_items_carry_actions(self):
+        # 검토 요약 항목은 '무슨 행동을 할지'를 서버가 action으로 내려준다 (화면의 행동 유도 버튼 계약).
+        lease, other = self.lease_statement(), self.unclassified_statement()
+        summary = build_review_summary(
+            [lease, other],
+            self.conversion_for(lease, response={}),
+            {"checks": [
+                {"name": "자산=부채+자본", "status": "warning", "detail": "차이"},
+                {"name": "손익계산서 필수 항목", "status": "warning", "detail": "없음"},
+            ]},
+        )
+        by_type = {item["type"]: item for item in summary["attention"]}
+        self.assertEqual(by_type["unclassified"]["action"], "classify")
+        self.assertEqual(by_type["unclassified"]["statement_id"], other["id"])
+        self.assertEqual(by_type["checklist_missing"]["action"], "fill_checklist")
+        self.assertEqual(by_type["checklist_missing"]["statement_id"], lease["id"])
+        actions = {item["account"]: item["action"] for item in summary["attention"] if item["type"] == "validation"}
+        self.assertEqual(actions["자산=부채+자본"], "review_rows")
+        self.assertEqual(actions["손익계산서 필수 항목"], "add_rows")
+
 
 if __name__ == "__main__":
     unittest.main()
