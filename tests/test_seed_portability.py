@@ -26,7 +26,7 @@ from gtf_app.models import Base  # noqa: E402
 
 SEED_DIR = os.path.join(_ROOT, "seeds")
 
-# 어떤 SQL 파일이 어떤 테이블을 시드하는지 (ifrs_accounts·mapping_rules는 ORM merge로 시드 → 제외)
+# 어떤 SQL 파일이 어떤 테이블을 시드하는지 (핵심 기준정보 전부 — 파생 테이블 없음)
 SEED_TABLES = {
     "standard_accounts.sql": "standard_accounts",
     "checklist_items.sql": "checklist_items",

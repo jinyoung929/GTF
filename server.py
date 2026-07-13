@@ -57,14 +57,11 @@ from gtf_app.models import (
     Conversion,
     Extraction,
     FinancialStatementTemplate,
-    IfrsAccount,
     KgaapAccount,
-    MappingRule,
     Project,
     Review,
     StandardAccount,
     StandardsParagraph,
-    StandardsReference,
     Statement,
     Upload,
     UserSession,
@@ -337,7 +334,6 @@ def init_db() -> None:
         resolve_postgres_type_drift(session)
         migrate_legacy_columns(session)
         # FK 순서: 표준계정(부모) → 체크리스트·별칭·양식(자식) → 문단 → 임베딩.
-        # seed_reference_data(보조 조회 테이블)는 위 핵심 테이블을 읽으므로 반드시 뒤에 온다.
         ensure_reference_accounts(session)
         ensure_checklist_items(session)
         ensure_account_aliases(session)
@@ -345,7 +341,7 @@ def init_db() -> None:
         ensure_standards_paragraphs(session)
         ensure_paragraph_embeddings(session)
         ensure_vector_search(session)
-        seed_reference_data(session)
+        drop_derived_reference_tables(session)
         ensure_admin_user(session)
         session.commit()
         refresh_reference_cache(session)  # 기준정보 캐시 채우기 + 계약 검증(실패 시 시작 중단)
@@ -601,60 +597,15 @@ def sort_statements_by_code(statements: list[dict]) -> list[dict]:
     )
 
 
-def seed_reference_data(session: Session) -> None:
-    """조회용 보조 기준정보 테이블(ifrs_accounts / mapping_rules / standards_references)을 채운다.
+def drop_derived_reference_tables(session: Session) -> None:
+    """예전 배포가 만든 파생 조회 테이블(ifrs_accounts/mapping_rules/standards_references)을 정리한다.
 
-    핵심 기준정보(표준계정·체크리스트·별칭·양식라인·문단)는 seeds/*.sql이 단일 출처이며 별도
-    ensure_* 함수가 시드한다. 여기서는 그 결과(DB의 standard_accounts / checklist_items)를 읽어
-    기준정보 화면의 요약 카운트용 보조 테이블만 파생 생성한다(코드에 하드코딩된 데이터 없음).
-    session.merge가 upsert 역할을 하므로 SQLite/Postgres 양쪽에서 동일하게 동작한다.
+    이 테이블들은 standard_accounts·checklist_items·standards_paragraphs를 부팅 때마다 복제한
+    그림자였고 변환 로직은 읽지 않았다. 원본에서 직접 조회하도록 정리했으므로, 라이브 DB에
+    남은 잔재만 지운다(create_all은 테이블을 삭제하지 않는다). 새 DB에서는 no-op이다.
     """
-    checklist_by_account: dict[str, list] = {}
-    for item in session.scalars(
-        select(ChecklistItem).order_by(ChecklistItem.account_key, ChecklistItem.display_order)
-    ):
-        checklist_by_account.setdefault(item.account_key, []).append(
-            {"key": item.item_key, "label": item.label, "type": item.input_type, "required": bool(item.required)}
-        )
-
-    for account in session.scalars(select(StandardAccount)).all():
-        key = account.account_key
-        session.merge(
-            IfrsAccount(
-                id=key,
-                account_key=key,
-                ifrs_name=account.ifrs_account,
-                standard_ref=account.rule_summary,
-                recognition_summary=account.rule_summary,
-                measurement_summary=account.rule_summary,
-                disclosure_summary="검토 결과와 주요 판단 근거를 주석 초안에 반영합니다.",
-                active=True,
-            )
-        )
-        session.merge(
-            MappingRule(
-                id=f"{key}_kgaap_ifrs",
-                account_key=key,
-                source_standard="K-GAAP",
-                target_standard="IFRS",
-                mapping_type=account.mapping_type,
-                rule_summary=account.rule_summary,
-                checklist_json=json.dumps(checklist_by_account.get(key, []), ensure_ascii=False),
-                active=True,
-                updated_at=utc_now(),
-            )
-        )
-
-    for reference_code in sorted(set(session.scalars(select(StandardsParagraph.reference_code)))):
-        session.merge(
-            StandardsReference(
-                id=reference_code.lower().replace(" ", "_").replace(".", ""),
-                standard_set="K-IFRS",
-                reference_code=reference_code,
-                title=reference_code,
-                summary="기준서 원문 연결 전까지 요약 기준정보로 사용합니다.",
-            )
-        )
+    for orphan in ("ifrs_accounts", "mapping_rules", "standards_references"):
+        session.execute(text(f"DROP TABLE IF EXISTS {orphan}"))
     session.commit()
 
 
@@ -2001,10 +1952,7 @@ def logout(request: Request, response: Response, session: Session = Depends(get_
 REFERENCE_TABLE_LABELS = [
     (StandardAccount, "내부 표준계정코드 DB"),
     (KgaapAccount, "K-GAAP 계정명 DB"),
-    (IfrsAccount, "IFRS 계정/기준 DB"),
-    (MappingRule, "변환 룰 DB"),
     (ChecklistItem, "판단 체크리스트 DB"),
-    (StandardsReference, "기준서 참조 DB"),
     (StandardsParagraph, "K-GAAP/K-IFRS 기준서 문단 검색 DB"),
     (FinancialStatementTemplate, "재무제표 양식 DB"),
 ]

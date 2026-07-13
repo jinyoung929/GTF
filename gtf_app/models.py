@@ -159,33 +159,6 @@ class KgaapAccount(Base):
     match_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
-class IfrsAccount(Base):
-    __tablename__ = "ifrs_accounts"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    account_key: Mapped[str] = mapped_column(String, ForeignKey("standard_accounts.account_key"), nullable=False)
-    ifrs_name: Mapped[str] = mapped_column(String, nullable=False)
-    standard_ref: Mapped[str] = mapped_column(Text, nullable=False)
-    recognition_summary: Mapped[str] = mapped_column(Text, nullable=False)
-    measurement_summary: Mapped[str] = mapped_column(Text, nullable=False)
-    disclosure_summary: Mapped[str] = mapped_column(Text, nullable=False)
-    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
-
-
-class MappingRule(Base):
-    __tablename__ = "mapping_rules"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    account_key: Mapped[str] = mapped_column(String, ForeignKey("standard_accounts.account_key"), nullable=False)
-    source_standard: Mapped[str] = mapped_column(String, nullable=False)
-    target_standard: Mapped[str] = mapped_column(String, nullable=False)
-    mapping_type: Mapped[str] = mapped_column(String, nullable=False)
-    rule_summary: Mapped[str] = mapped_column(Text, nullable=False)
-    checklist_json: Mapped[str] = mapped_column(Text, nullable=False)
-    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
-    updated_at: Mapped[str] = mapped_column(String, nullable=False)
-
-
 class ChecklistItem(Base):
     """판단 필요 계정의 체크리스트. item_key는 계산기가 읽는 계약이라 코드와 일치해야 한다."""
 
@@ -198,16 +171,6 @@ class ChecklistItem(Base):
     input_type: Mapped[str] = mapped_column(String, nullable=False)
     required: Mapped[bool] = mapped_column(Boolean, nullable=False)
     display_order: Mapped[int] = mapped_column(Integer, nullable=False)
-
-
-class StandardsReference(Base):
-    __tablename__ = "standards_references"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    standard_set: Mapped[str] = mapped_column(String, nullable=False)
-    reference_code: Mapped[str] = mapped_column(String, nullable=False)
-    title: Mapped[str] = mapped_column(String, nullable=False)
-    summary: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class FinancialStatementTemplate(Base):

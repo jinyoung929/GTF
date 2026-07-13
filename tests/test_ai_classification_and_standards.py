@@ -257,21 +257,6 @@ class ExpandedStandardCatalogTest(unittest.TestCase):
         self.assertGreater(len(candidates), 8)
         self.assertNotIn("other", candidates)
 
-    def test_seed_reference_data_handles_expanded_accounts(self):
-        # 보조 조회 테이블(ifrs_accounts 등)은 핵심 시드 테이블에서 파생 생성된다
-        from sqlalchemy import func, select
-
-        from gtf_app.models import IfrsAccount, StandardAccount
-        from reference_fixture import seeded_session
-
-        session = seeded_session()
-        server.seed_reference_data(session)
-        accounts = session.scalar(select(func.count()).select_from(StandardAccount))
-        derived = session.scalar(select(func.count()).select_from(IfrsAccount))
-        self.assertEqual(derived, accounts)
-        self.assertEqual(accounts, len(REF.accounts))
-
-
 class StatementTemplateSeedTest(unittest.TestCase):
     """표준양식 라인 SQL 시드(단일 출처)가 전 계정을 커버하고 코드 도출 순서와 일치하는지 검증."""
 
