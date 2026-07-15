@@ -34,6 +34,8 @@ VALUES
   ('ifrs_bs_goodwill', 'IFRS', '재무상태표', '비유동자산', '영업권', 'goodwill', 103200, 'K-IFRS 제1103호에 따라 상각하지 않고 제1036호 매년 손상검사 후 표시합니다.'),
   ('ifrs_bs_preferred_shares', 'IFRS', '재무상태표', '자본/금융부채', '상환우선주(자본 또는 금융부채)', 'preferred_shares', 401050, 'K-IFRS 제1032호 계약의 실질 판단에 따라 자본 또는 금융부채로 표시합니다.'),
   ('ifrs_bs_held_for_sale', 'IFRS', '재무상태표', '유동자산', '매각예정비유동자산', 'held_for_sale', 109000, 'K-IFRS 제1105호에 따라 별도 표시하고 장부금액과 순공정가치 중 낮은 금액으로 측정합니다.'),
+  ('ifrs_bs_compound_instrument', 'IFRS', '재무상태표', '부채/자본', '복합금융상품(부채·자본 분리 검토)', 'compound_instrument', 302500, 'K-IFRS 제1032호 부채요소·자본요소 분리 결과에 따라 표시가 달라집니다. 전문가 평가 필요.'),
+  ('ifrs_bs_derivative', 'IFRS', '재무상태표', '금융자산/금융부채', '파생상품(공정가치)', 'derivative', 202000, 'K-IFRS 제1109호에 따라 공정가치로 측정해 자산 또는 부채로 표시합니다. 전문가 평가 필요.'),
   ('ifrs_review_required', 'IFRS', '검토 필요', '미분류', '검토자 분류 필요', 'other', 909999, '내부 표준계정 매핑 신뢰도가 낮아 사람이 표시 라인을 확정합니다.')
 ON CONFLICT (id) DO UPDATE SET
   standard_set = excluded.standard_set,

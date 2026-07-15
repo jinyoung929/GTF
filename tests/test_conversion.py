@@ -439,6 +439,29 @@ class TestKifrsDifferenceAreas(unittest.TestCase):
         self.assertEqual(e["adjustment"], 0)
         self.assertIn("요건", e["calculation"])
 
+    # --- 전문가 검토 영역 (복합금융상품·파생상품): 도구는 식별까지만, 조정액 계산 없음 ---
+
+    def test_compound_instrument_flags_derivative_liability_risk(self):
+        e = self._entry("전환사채", 1000, {"cash_settlement_possible": True})
+        self.assertEqual(e["standard_code"], "L2500")
+        self.assertEqual(e["adjustment"], 0)  # 의도적으로 계산하지 않음
+        self.assertIn("파생상품부채", e["calculation"])
+        self.assertIn("전문가 검토", e["calculation"])
+
+    def test_compound_instrument_without_risk_still_requires_expert(self):
+        e = self._entry("신주인수권부사채", 1000, {"cash_settlement_possible": False})
+        self.assertEqual(e["adjustment"], 0)
+        self.assertNotIn("파생상품부채로 분류될 가능성", e["calculation"])
+        self.assertIn("전문가 검토", e["calculation"])
+
+    def test_derivative_hedge_designation_changes_guidance(self):
+        designated = self._entry("통화선도", 0, {"hedge_designated": True})
+        self.assertEqual(designated["standard_code"], "F2000")
+        self.assertIn("6.4.1", designated["calculation"])
+        undesignated = self._entry("이자율스왑", 0, {"hedge_designated": False})
+        self.assertIn("당기손익", undesignated["calculation"])
+        self.assertEqual(undesignated["adjustment"], 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

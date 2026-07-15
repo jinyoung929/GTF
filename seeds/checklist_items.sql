@@ -47,6 +47,11 @@ VALUES
   ('held_for_sale_plan_committed', 'held_for_sale', 'plan_committed', '경영진이 매각계획을 확약했는가?', 'boolean', true, 1),
   ('held_for_sale_sale_probable_12m', 'held_for_sale', 'sale_probable_12m', '12개월 이내 매각가능성이 매우 높은가?', 'boolean', true, 2),
   ('held_for_sale_fair_value_less_costs', 'held_for_sale', 'fair_value_less_costs', '순공정가치(매각부대원가 차감 후)', 'number', true, 3),
+  ('compound_conversion_terms', 'compound_instrument', 'conversion_terms', '전환·행사 조건 요약(전환가격, 리픽싱 조항 등)', 'text', true, 1),
+  ('compound_cash_settlement', 'compound_instrument', 'cash_settlement_possible', '현금결제 가능성 또는 상환 의무가 있는가?', 'boolean', true, 2),
+  ('compound_fx_or_adjustable', 'compound_instrument', 'fx_or_adjustable', '외화표시이거나 전환가격 조정(리픽싱) 조항이 있는가?', 'boolean', false, 3),
+  ('derivative_instrument_type', 'derivative', 'instrument_type', '파생상품 유형(선도/스왑/옵션/내재파생 등)', 'text', true, 1),
+  ('derivative_hedge_designated', 'derivative', 'hedge_designated', '위험회피관계로 공식 지정·문서화되어 있는가?', 'boolean', true, 2),
   ('other_management_memo', 'other', 'management_memo', '경영진 분류 메모', 'text', true, 1)
 ON CONFLICT (id) DO UPDATE SET
   account_key = excluded.account_key,

@@ -22,6 +22,7 @@ CALC_ACCOUNT_KEYS = frozenset({
     "provision", "retirement_benefit", "ppe", "investment_property",
     "deferred_tax_asset", "government_grant", "borrowing_cost",
     "goodwill", "preferred_shares", "held_for_sale",
+    "compound_instrument", "derivative",
 })
 CALC_CHECKLIST_KEYS = {
     "lease": {"lease_term_months", "monthly_payment", "discount_rate"},
@@ -37,6 +38,8 @@ CALC_CHECKLIST_KEYS = {
     "goodwill": {"amortization_expense", "impairment_indicator", "recoverable_amount"},
     "preferred_shares": {"mandatory_redemption"},
     "held_for_sale": {"plan_committed", "sale_probable_12m", "fair_value_less_costs"},
+    "compound_instrument": {"cash_settlement_possible"},
+    "derivative": {"hedge_designated"},
 }
 
 
@@ -550,6 +553,23 @@ def generate_conversion(
                     entry["calculation"] = "매각예정 분류 요건을 충족합니다. 장부금액이 순공정가치 이하이므로 재분류만 수행합니다(감가상각 중지)."
             else:
                 entry["calculation"] = "매각예정 분류 요건(매각계획 확약, 12개월 내 매각가능성)이 충족되지 않아 기존 분류를 유지합니다."
+        # 아래 두 영역은 의도적으로 조정액을 계산하지 않는다: 부채·자본 분리와 공정가치 평가는
+        # 전문가 판단 영역이라, 도구는 위험 신호 식별과 기준서 근거 첨부까지만 수행한다.
+        elif account_key == "compound_instrument":
+            risky = (
+                checklist_response.get("cash_settlement_possible") is True
+                or checklist_response.get("fx_or_adjustable") is True
+            )
+            entry["calculation"] = (
+                ("현금결제 가능성·상환의무 또는 리픽싱/외화 조항이 확인되어, 전환권이 자본이 아닌 파생상품부채로 분류될 가능성이 높습니다. " if risky else "")
+                + "부채요소·자본요소 분리와 공정가치 평가는 전문가 검토가 필요합니다 — 도구는 식별과 근거 제시까지만 수행합니다."
+            )
+        elif account_key == "derivative":
+            designated = checklist_response.get("hedge_designated") is True
+            entry["calculation"] = (
+                ("위험회피관계로 지정되어 있습니다. 공식 문서화와 효과성 요건(K-IFRS 제1109호 6.4.1) 충족 여부를 검토하세요. " if designated else "위험회피 지정이 없으므로 공정가치 변동이 당기손익에 반영됩니다. ")
+                + "공정가치 평가는 전문가 검토가 필요합니다 — 도구는 식별과 근거 제시까지만 수행합니다."
+            )
 
         if item["mapping_type"] == "judgment":
             judgment_items.append(

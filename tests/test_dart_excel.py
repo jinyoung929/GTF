@@ -46,7 +46,7 @@ class XlsxUploadRoundTripTests(unittest.TestCase):
 class DartImportAndWorkbookTests(unittest.TestCase):
     def test_financial_product_names_do_not_map_to_inventory(self):
         self.assertEqual(server.normalize_account_name("단기금융상품", REF.aliases), "financial_instrument")
-        self.assertEqual(server.normalize_account_name("파생상품", REF.aliases), "financial_instrument")
+        self.assertEqual(server.normalize_account_name("파생상품", REF.aliases), "derivative")  # 전문가 검토 영역
 
     def test_dart_statement_rows_parse_current_amounts(self):
         payload = {

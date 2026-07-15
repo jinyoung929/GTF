@@ -46,7 +46,7 @@ REF = load_reference()
 COLLISION_CASES = [
     ("금융상품", "financial_instrument"),
     ("상품", "inventory"),
-    ("파생상품", "financial_instrument"),
+    ("파생상품", "derivative"),  # 전문가 검토 영역 신설로 재지정
     ("퇴직급여충당부채", "retirement_benefit"),
     ("충당부채", "provision"),
     ("미수수익", "receivables"),
