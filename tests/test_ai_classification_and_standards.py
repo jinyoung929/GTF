@@ -34,6 +34,7 @@ from gtf_app.domain import (  # noqa: E402
     build_statement_record,
     conversion_basis_report,
     generate_conversion,
+    normalize_account_name,
 )
 from gtf_app.excel_export import review_workbook_bytes  # noqa: E402
 
@@ -132,7 +133,7 @@ class AiClassificationCallTest(unittest.TestCase):
 
     def test_missing_api_key_reports_not_configured(self):
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
-            result = server.call_ai_classification(["임차보증금"])
+            result = server.call_ai_classification(["권리금"])
         self.assertEqual(result["status"], "not_configured")
         self.assertTrue(result["human_review_required"])
 
@@ -149,10 +150,10 @@ class AiClassificationCallTest(unittest.TestCase):
     def test_connected_response_builds_validated_suggestions(self):
         items = [
             {
-                "account_name": "임차보증금",
+                "account_name": "권리금",
                 "suggested_account_key": "financial_instrument",
                 "confidence": "medium",
-                "rationale": "임차보증금은 계약 종료 시 반환받을 계약상 권리다. K-IFRS 제1109호상 금융자산의 정의를 충족한다. 따라서 금융상품으로 분류하는 것이 적합하다.",
+                "rationale": "권리금은 영업권 성격의 무형 대가로 볼 수 있으나 계약 조건 확인이 필요하다.",
                 "basis_reference": "K-IFRS 제1109호 금융상품",
                 "alternative_account_key": "deposits",
                 "alternative_rejected_reason": "장기 예치 성격보다 계약상 반환 권리가 본질이므로 배제했다.",
@@ -165,10 +166,10 @@ class AiClassificationCallTest(unittest.TestCase):
         session = paragraph_session()
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             with mock.patch.object(server, "OpenAI", return_value=self._fake_openai(items)):
-                result = server.call_ai_classification(["임차보증금", "이상한계정", "모르는계정"], session)
+                result = server.call_ai_classification(["권리금", "이상한계정", "모르는계정"], session)
         self.assertEqual(result["status"], "connected")
-        self.assertEqual(set(result["suggestions"].keys()), {"임차보증금"})
-        suggestion = result["suggestions"]["임차보증금"]
+        self.assertEqual(set(result["suggestions"].keys()), {"권리금"})
+        suggestion = result["suggestions"]["권리금"]
         self.assertEqual(suggestion["account_key"], "financial_instrument")
         self.assertEqual(suggestion["basis_reference"], "K-IFRS 제1109호 금융상품")
         self.assertEqual(suggestion["alternative_label"], "보증금")  # 계정키 → 화면용 라벨 변환
@@ -217,12 +218,12 @@ class AiClassificationCallTest(unittest.TestCase):
 
     def test_attach_only_marks_unmapped_rows(self):
         rows = [
-            {"account_name": "임차보증금", "amount": 500.0},
+            {"account_name": "권리금", "amount": 500.0},
             {"account_name": "현금", "amount": 100.0},
         ]
         items = [
             {
-                "account_name": "임차보증금",
+                "account_name": "권리금",
                 "suggested_account_key": "financial_instrument",
                 "confidence": "medium",
                 "rationale": "보증금은 금융자산 성격입니다.",
@@ -242,15 +243,26 @@ class ExpandedStandardCatalogTest(unittest.TestCase):
             self.assertIn(key, REF.accounts)
 
     def test_ai_can_suggest_expanded_account(self):
-        # 임차보증금은 키워드 사전에 없어 미분류(X9999)로 빠지므로 AI 제안 대상이 된다.
+        # 권리금은 키워드 사전에 없어 미분류(X9999)로 빠지므로 AI 제안 대상이 된다.
+        # (임차보증금은 별칭 확장으로 이제 deposits에 직접 매핑되어 예시를 교체함)
         row = {
-            "account_name": "임차보증금",
+            "account_name": "권리금",
             "amount": 60000000,
-            "ai_suggestion": {"account_key": "deposits", "label": "보증금", "confidence": "high", "rationale": "반환 예정 보증금은 금융자산 성격"},
+            "ai_suggestion": {"account_key": "goodwill", "label": "영업권", "confidence": "high", "rationale": "권리금은 영업권 성격의 무형 대가"},
         }
         record = build_statement_record("2024", row, REF)
-        self.assertEqual(record["standard_code"], "A1400")
+        self.assertEqual(record["standard_code"], "A3200")
         self.assertEqual(record["mapping_source"], "ai_suggested_human_accepted")
+
+    def test_expanded_alias_dictionary_covers_practice_names(self):
+        # 전환 실무 점검 목록에서 확장한 별칭 사전 회귀 가드 — 대표 이름이 의도한 키로 간다.
+        self.assertEqual(normalize_account_name("매출원가", REF.aliases), "cost_of_sales")  # 과거 '매출' 오분류 수정
+        self.assertEqual(normalize_account_name("임차보증금", REF.aliases), "deposits")
+        self.assertEqual(normalize_account_name("자본잉여금", REF.aliases), "capital_surplus")
+        self.assertEqual(normalize_account_name("우선주자본금", REF.aliases), "preferred_shares")  # 자본금(3)보다 김
+        self.assertEqual(normalize_account_name("감가상각누계액", REF.aliases), "ppe")
+        self.assertEqual(normalize_account_name("무형자산상각비", REF.aliases), "operating_expense")  # 무형자산(4)보다 김
+        self.assertEqual(normalize_account_name("사채할인발행차금", REF.aliases), "financial_instrument")
 
     def test_classification_candidates_exclude_only_other(self):
         candidates = [key for key in REF.accounts if key != "other"]
@@ -360,7 +372,7 @@ class AiSuggestionHumanAcceptanceTest(unittest.TestCase):
     }
 
     def test_suggestion_applied_only_for_unmapped_account(self):
-        record = build_statement_record("2024", {"account_name": "임차보증금", "amount": 500.0, "ai_suggestion": self.SUGGESTION}, REF)
+        record = build_statement_record("2024", {"account_name": "권리금", "amount": 500.0, "ai_suggestion": self.SUGGESTION}, REF)
         self.assertEqual(record["standard_code"], "F1000")
         self.assertEqual(record["mapping_source"], "ai_suggested_human_accepted")
         self.assertIn("[AI 1차 분류 제안", record["rule_summary"])
@@ -371,7 +383,7 @@ class AiSuggestionHumanAcceptanceTest(unittest.TestCase):
         self.assertEqual(record["mapping_source"], "rule_based")
 
     def test_invalid_suggestion_key_falls_back_to_manual_review(self):
-        record = build_statement_record("2024", {"account_name": "임차보증금", "amount": 500.0, "ai_suggestion": {"account_key": "없는키"}}, REF)
+        record = build_statement_record("2024", {"account_name": "권리금", "amount": 500.0, "ai_suggestion": {"account_key": "없는키"}}, REF)
         self.assertEqual(record["standard_code"], "X9999")
         self.assertEqual(record["mapping_source"], "rule_based")
 

@@ -39,25 +39,25 @@ def suggested_row(name, amount=100.0):
 
 class ApplyAiDecisionsTest(unittest.TestCase):
     def test_approved_suggestion_is_kept(self):
-        rows, summary = server.apply_ai_decisions([suggested_row("임차보증금")], {"임차보증금": "approved"})
+        rows, summary = server.apply_ai_decisions([suggested_row("권리금")], {"권리금": "approved"})
         self.assertIn("ai_suggestion", rows[0])
-        self.assertEqual(summary["approved"], ["임차보증금"])
+        self.assertEqual(summary["approved"], ["권리금"])
         self.assertTrue(summary["per_account_review"])
 
     def test_rejected_suggestion_is_stripped(self):
-        rows, summary = server.apply_ai_decisions([suggested_row("임차보증금")], {"임차보증금": "rejected"})
+        rows, summary = server.apply_ai_decisions([suggested_row("권리금")], {"권리금": "rejected"})
         self.assertNotIn("ai_suggestion", rows[0])
-        self.assertEqual(summary["rejected"], ["임차보증금"])
+        self.assertEqual(summary["rejected"], ["권리금"])
         record = build_statement_record("2024", rows[0], REF)
         self.assertEqual(record["standard_code"], "X9999")
 
     def test_undecided_suggestion_is_not_applied(self):
-        rows, summary = server.apply_ai_decisions([suggested_row("임차보증금")], {})
+        rows, summary = server.apply_ai_decisions([suggested_row("권리금")], {})
         self.assertNotIn("ai_suggestion", rows[0])
-        self.assertEqual(summary["undecided"], ["임차보증금"])
+        self.assertEqual(summary["undecided"], ["권리금"])
 
     def test_legacy_client_without_decisions_applies_all(self):
-        rows, summary = server.apply_ai_decisions([suggested_row("임차보증금")], None)
+        rows, summary = server.apply_ai_decisions([suggested_row("권리금")], None)
         self.assertIn("ai_suggestion", rows[0])
         self.assertFalse(summary["per_account_review"])
 
@@ -68,8 +68,8 @@ class ApplyAiDecisionsTest(unittest.TestCase):
         self.assertEqual(summary["rejected"], [])
 
     def test_original_rows_are_not_mutated(self):
-        original = [suggested_row("임차보증금")]
-        server.apply_ai_decisions(original, {"임차보증금": "rejected"})
+        original = [suggested_row("권리금")]
+        server.apply_ai_decisions(original, {"권리금": "rejected"})
         self.assertIn("ai_suggestion", original[0])
 
 

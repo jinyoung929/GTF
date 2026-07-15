@@ -130,20 +130,20 @@ class ApiAuthTests(unittest.TestCase):
         project = self.client.post("/api/projects", json={"company_name": "재분류", "period": "2024"}).json()
         added = self.client.post(
             f"/api/projects/{project['id']}/statements",
-            json={"rows": [{"account_name": "자본잉여금", "amount": 100}]},
+            json={"rows": [{"account_name": "권리금", "amount": 100}]},
         ).json()
         self.client.post(f"/api/projects/{project['id']}/extractions/{added['extraction_id']}/accept", json={})
         bundle = self.client.get(f"/api/projects/{project['id']}").json()
         row = bundle["statements"][0]
-        self.assertEqual(row["standard_code"], "X9999")  # 별칭 사전에 없어 미분류
+        self.assertEqual(row["standard_code"], "X9999")  # 권리금은 별칭 사전에 없어 미분류
 
         patched = self.client.patch(
             f"/api/projects/{project['id']}/statements/{row['id']}/classify",
-            json={"account_key": "capital_surplus"},
+            json={"account_key": "goodwill"},
         )
         self.assertEqual(patched.status_code, 200)
-        self.assertEqual(patched.json()["standard_code"], "E1100")
-        self.assertEqual(patched.json()["mapping_type"], "simple")
+        self.assertEqual(patched.json()["standard_code"], "A3200")
+        self.assertEqual(patched.json()["mapping_type"], "judgment")
 
         rejected = self.client.patch(
             f"/api/projects/{project['id']}/statements/{row['id']}/classify",
