@@ -179,12 +179,31 @@ class DartImportAndWorkbookTests(unittest.TestCase):
         )
 
         loaded = load_workbook(io.BytesIO(workbook))
-        self.assertEqual(len(loaded.sheetnames), 5)
+        self.assertEqual(len(loaded.sheetnames), 6)
         self.assertIn("01_원본_DART", loaded.sheetnames)
-        self.assertIn("05_감사로그", loaded.sheetnames)
+        self.assertIn("05_전환조정요약", loaded.sheetnames)
+        self.assertIn("06_감사로그", loaded.sheetnames)
         sheet1_values = {cell.value for row in loaded["01_원본_DART"].iter_rows() for cell in row}
         self.assertIn("자산총계", sheet1_values)
         self.assertIn("제외사유", sheet1_values)
+
+    def test_transition_summary_aggregates_by_section_sign(self):
+        # 전환조정 요약(1101호 문단 10): 자산(+)·부채(−) 부호를 반영한 순자산 영향 집계.
+        from gtf_app.excel_export import transition_summary_rows
+
+        entries = [
+            {"standard_code": "A2100", "adjustment": 1_000},   # 사용권자산 +1,000
+            {"standard_code": "L2150", "adjustment": 1_200},   # 리스부채 +1,200 (순자산 −1,200)
+            {"standard_code": "R4000", "adjustment": 50},      # 차입원가 자본화 +50
+            {"standard_code": "E1050", "adjustment": 0},       # 재분류 — 집계 제외
+        ]
+        rows = transition_summary_rows(entries)
+        by_label = {row[0]: row for row in rows if row and len(row) >= 4}
+        self.assertEqual(by_label["자산 조정"][3], 1_000)
+        self.assertEqual(by_label["부채 조정"][3], -1_200)
+        self.assertEqual(by_label["손익 조정"][3], 50)
+        self.assertEqual(by_label["순자산(자본총계) 영향 합계"][3], -150)
+        self.assertEqual(by_label["자본 조정"][1], 0)  # 조정액 0 재분류는 건수에서 제외
 
     def test_routes_include_dart_import_and_workbook_export(self):
         routes = {(sorted(r.methods)[0], r.path) for r in server.app.routes if hasattr(r, "methods")}

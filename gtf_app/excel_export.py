@@ -21,6 +21,30 @@ def create_xlsx_workbook(sheets: list[tuple[str, list[list]]]) -> bytes:
     return buffer.getvalue()
 
 
+def transition_summary_rows(entries: list[dict]) -> list[list]:
+    """전환조정 요약 시트 행: 구분(자산/부채/자본/손익)별 조정 집계와 순자산 영향.
+
+    순자산 영향 = 자산·금융 조정 − 부채 조정 + 자본·손익 조정. 재분류(조정액 0)는 영향 없음.
+    OCI 성격 조정(재평가잉여금·재측정요소)은 이익잉여금이 아닌 별도 자본항목 검토가 필요하다.
+    """
+    sections = {"A": ("자산 조정", 1), "F": ("금융상품 조정", 1), "L": ("부채 조정", -1), "E": ("자본 조정", 1), "R": ("손익 조정", 1)}
+    rows: list[list] = [["구분", "건수", "조정액 합계", "순자산 영향(부호 반영)"]]
+    net_effect = 0.0
+    for prefix, (label, sign) in sections.items():
+        matched = [e for e in entries if str(e.get("standard_code", ""))[:1] == prefix and e.get("adjustment")]
+        total = sum(float(e.get("adjustment") or 0) for e in matched)
+        net_effect += sign * total
+        rows.append([label, len(matched), total, sign * total])
+    rows += [
+        ["순자산(자본총계) 영향 합계", "", "", net_effect],
+        [],
+        ["주의", "K-IFRS 제1101호 문단 10: 전환 조정은 원칙적으로 전환일의 이익잉여금(또는 적절한 다른 자본항목)으로 인식합니다."],
+        ["주의", "재평가잉여금·확정급여 재측정요소 등 기타포괄손익 성격의 조정은 이익잉여금이 아닌 별도 자본항목입니다. 항목별 검토가 필요합니다."],
+        ["주의", "재분류(조정액 0)와 전문가 검토 영역(복합금융상품·파생상품)의 평가 결과는 이 합계에 반영되어 있지 않습니다."],
+    ]
+    return rows
+
+
 def review_workbook_bytes(project: dict, extraction_rows: list[dict], statements: list[dict], conversion: dict, audit_logs: list[dict]) -> bytes:
     entries = conversion.get("entries") or []
     notes = conversion.get("draft_notes") or []
@@ -105,7 +129,13 @@ def review_workbook_bytes(project: dict, extraction_rows: list[dict], statements
             ],
         ),
         (
-            "05_감사로그",
+            # 전환일 자본 조정명세(K-IFRS 제1101호 문단 10): 조정을 재무제표 구분별로 집계해
+            # 전환조정이 순자산(자본총계)에 미치는 영향을 요약한다. 코드 앞자리 = 구분.
+            "05_전환조정요약",
+            transition_summary_rows(entries),
+        ),
+        (
+            "06_감사로그",
             [
                 ["시각", "사용자", "이벤트", "상세"],
                 *[
