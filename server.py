@@ -338,6 +338,33 @@ def migrate_legacy_columns(session: Session) -> None:
         for table_name, constraint_name in legacy_checks:
             if table_name in Base.metadata.tables:
                 session.execute(text(f'ALTER TABLE {table_name} DROP CONSTRAINT "{constraint_name}"'))
+
+        # 시드 소유 테이블(시드가 전량 재생성)은 ORM 모델이 구조의 단일 출처다. 모델에 없는
+        # 여분 컬럼(옛 수동 스키마 잔재)이 NOT NULL이면 시드 INSERT가 즉사하고, 레거시 UNIQUE
+        # 제약은 upsert를 거부할 수 있으므로 함께 정리한다. 데이터 테이블(projects 등)은
+        # 사용자 데이터가 있으므로 건드리지 않는다.
+        seed_owned = {
+            "standard_accounts", "kgaap_accounts", "checklist_items",
+            "financial_statement_templates", "standards_paragraphs",
+        }
+        derived_columns = {"standards_paragraphs": {"embedding_vec"}}  # pgvector 파생 컬럼은 보존
+        for table_name in seed_owned:
+            model_columns = set(Base.metadata.tables[table_name].columns.keys())
+            keep = model_columns | derived_columns.get(table_name, set())
+            # 같은 세션으로 컬럼을 조회해야 한다: inspect()는 별도 커넥션을 써서, 이 트랜잭션이
+            # 방금 건 ALTER 락에 스스로 막히는 교착이 생긴다 (같은 커넥션은 자기 변경을 그냥 본다).
+            live_columns = session.execute(
+                text(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}'")
+            ).scalars().all()
+            for column_name in live_columns:
+                if column_name not in keep:
+                    session.execute(text(f'ALTER TABLE {table_name} DROP COLUMN "{column_name}"'))
+            legacy_uniques = session.execute(
+                # 테이블명은 위 고정 목록에서만 오므로 f-string이 안전하다 (:param + ::cast는 text()가 오파싱).
+                text(f"SELECT conname FROM pg_constraint WHERE contype = 'u' AND conrelid = '{table_name}'::regclass")
+            ).all()
+            for (constraint_name,) in legacy_uniques:
+                session.execute(text(f'ALTER TABLE {table_name} DROP CONSTRAINT "{constraint_name}"'))
     session.commit()
 
 
