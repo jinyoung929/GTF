@@ -42,12 +42,12 @@ CALC_CHECKLIST_KEYS = {
     "derivative": {"hedge_designated"},
 }
 
-# 선택가능 회계정책(K-IFRS가 복수 정책을 허용하는 곳)과 그 선택지.
-# 계산기가 결정론이라 같은 재무제표를 선택지별로 계산해 영향을 비교 제시할 수 있다.
+# 선택가능 회계정책(K-IFRS가 복수 정책을 허용하는 곳)의 계정키 → 정책 항목키.
+# 선택지 목록은 체크리스트 시드(input_type='choice'의 options)가 단일 출처이며 런타임에 조회한다.
 POLICY_SCENARIOS = {
-    "ppe": ("measurement_model", ["원가모형", "재평가모형"]),
-    "investment_property": ("measurement_model", ["원가모형", "공정가치모형"]),
-    "government_grant": ("presentation_method", ["자산차감법", "이연수익법"]),
+    "ppe": "measurement_model",
+    "investment_property": "measurement_model",
+    "government_grant": "presentation_method",
 }
 
 
@@ -115,21 +115,16 @@ def account_key_for_statement(item: dict, reference: "ReferenceData") -> str:
     return code_to_key.get(str(item.get("standard_code") or "")) or normalize_account_name(item["account_name"], reference.aliases)
 
 
-def alias_match_priority(alias: str) -> int:
-    """부분 문자열 매칭 우선순위. 긴 별칭이 짧은 별칭보다 먼저 검사되도록 길이를 쓴다."""
-    return len(alias or "")
-
-
 def normalize_account_name(name: str, aliases: dict) -> str:
     """계정명을 내부 표준계정 키로 정규화한다.
 
     aliases(별칭 → 계정키)는 DB에서 로드해 주입받는다(코드에 하드코딩된 사전 없음).
-    긴 별칭부터 검사해 '금융상품 ⊃ 상품', '퇴직급여충당부채 ⊃ 충당부채' 같은 부분 문자열
-    충돌을 정확히 해결한다. domain.py가 DB를 직접 모르도록 맵을 인자로 주입받는다(순수 함수).
+    긴 별칭부터(len 기준) 검사해 '금융상품 ⊃ 상품', '퇴직급여충당부채 ⊃ 충당부채' 같은
+    부분 문자열 충돌을 해결한다. domain.py가 DB를 직접 모르도록 맵을 인자로 주입받는다(순수 함수).
     """
     text = re.sub(r"\s+", " ", name.strip().lower())
     compact = text.replace(" ", "")
-    for needle in sorted(aliases, key=alias_match_priority, reverse=True):
+    for needle in sorted(aliases, key=len, reverse=True):
         if needle in compact or needle in text:
             return aliases[needle]
     return "other"
@@ -717,11 +712,15 @@ def build_review_summary(statements: list[dict], conversion: dict | None, valida
     }
 
 
+# 계정코드 앞자리별 순자산(자본총계) 영향 부호: 자산·금융(+), 부채(−), 자본·손익(+).
+# 정책 비교(_net_equity_effect)와 엑셀 전환조정요약이 공유한다.
+NET_EQUITY_SIGNS = {"A": 1, "F": 1, "L": -1, "E": 1, "R": 1}
+
+
 def _net_equity_effect(entries: list[dict]) -> float:
-    """조정분개들이 순자산(자본총계)에 미치는 영향. 자산·금융(+), 부채(−), 자본·손익(+)."""
-    signs = {"A": 1, "F": 1, "L": -1, "E": 1, "R": 1}
+    """조정분개들이 순자산(자본총계)에 미치는 영향."""
     return sum(
-        signs.get(str(entry.get("standard_code", ""))[:1], 0) * float(entry.get("adjustment") or 0)
+        NET_EQUITY_SIGNS.get(str(entry.get("standard_code", ""))[:1], 0) * float(entry.get("adjustment") or 0)
         for entry in entries
     )
 
@@ -741,10 +740,14 @@ def compare_policy_scenarios(
     comparisons = []
     for item in statements:
         account_key = account_key_for_statement(item, reference)
-        scenario = POLICY_SCENARIOS.get(account_key)
-        if not scenario:
+        item_key = POLICY_SCENARIOS.get(account_key)
+        if not item_key:
             continue
-        item_key, options = scenario
+        checklist = reference.checklists.get(account_key, [])
+        policy_item = next((entry for entry in checklist if entry["key"] == item_key), None)
+        options = (policy_item or {}).get("options") or []
+        if len(options) < 2:
+            continue  # 시드에 선택지가 없으면 비교할 것이 없다
         base_response = dict(responses.get(item["id"], {}))
         option_results = []
         for option in options:
@@ -761,8 +764,7 @@ def compare_policy_scenarios(
                     "calculation": main.get("calculation", ""),
                 }
             )
-        checklist = reference.checklists.get(account_key, [])
-        policy_label = next((entry["label"] for entry in checklist if entry["key"] == item_key), item_key)
+        policy_label = policy_item["label"]
         # 공정가치 입력이 없으면 재평가/공정가치 선택지의 조정이 0으로 나와 비교가 무의미하다.
         needs_fair_value = account_key in {"ppe", "investment_property"} and not float(base_response.get("fair_value") or 0)
         comparisons.append(

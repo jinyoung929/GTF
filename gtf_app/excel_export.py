@@ -5,7 +5,7 @@ import json
 
 from openpyxl import Workbook
 
-from gtf_app.domain import label_backend, localize_export_text
+from gtf_app.domain import NET_EQUITY_SIGNS, label_backend, localize_export_text
 
 
 def create_xlsx_workbook(sheets: list[tuple[str, list[list]]]) -> bytes:
@@ -27,10 +27,11 @@ def transition_summary_rows(entries: list[dict]) -> list[list]:
     순자산 영향 = 자산·금융 조정 − 부채 조정 + 자본·손익 조정. 재분류(조정액 0)는 영향 없음.
     OCI 성격 조정(재평가잉여금·재측정요소)은 이익잉여금이 아닌 별도 자본항목 검토가 필요하다.
     """
-    sections = {"A": ("자산 조정", 1), "F": ("금융상품 조정", 1), "L": ("부채 조정", -1), "E": ("자본 조정", 1), "R": ("손익 조정", 1)}
+    section_labels = {"A": "자산 조정", "F": "금융상품 조정", "L": "부채 조정", "E": "자본 조정", "R": "손익 조정"}
     rows: list[list] = [["구분", "건수", "조정액 합계", "순자산 영향(부호 반영)"]]
     net_effect = 0.0
-    for prefix, (label, sign) in sections.items():
+    for prefix, label in section_labels.items():
+        sign = NET_EQUITY_SIGNS[prefix]
         matched = [e for e in entries if str(e.get("standard_code", ""))[:1] == prefix and e.get("adjustment")]
         total = sum(float(e.get("adjustment") or 0) for e in matched)
         net_effect += sign * total

@@ -147,7 +147,7 @@ class StandardAccount(Base):
 
 
 class KgaapAccount(Base):
-    """K-GAAP 계정명 별칭. match_priority(별칭 길이)가 큰 것부터 부분문자열 매칭한다."""
+    """K-GAAP 계정명 별칭. 매칭은 런타임에 긴 별칭부터(len 기준) 부분문자열로 수행한다."""
 
     __tablename__ = "kgaap_accounts"
 
@@ -156,7 +156,6 @@ class KgaapAccount(Base):
     kgaap_name: Mapped[str] = mapped_column(String, nullable=False)
     normalized_name: Mapped[str] = mapped_column(String, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
-    match_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
 class ChecklistItem(Base):

@@ -85,11 +85,6 @@ class AliasDbSingleSourceTest(unittest.TestCase):
         self.assertGreater(self.alias_count(), 0)
         self.assertEqual(self.alias_count(), len(REF.aliases))
 
-    def test_match_priority_is_alias_length(self):
-        rows = self.session.execute(select(KgaapAccount.kgaap_name, KgaapAccount.match_priority)).all()
-        for name, priority in rows:
-            self.assertEqual(priority, len(name))
-
     def test_alias_targets_exist_in_standard_accounts(self):
         # 별칭이 가리키는 계정키가 표준계정 테이블에 실재해야 한다 (시드 간 정합성)
         known_keys = set(self.session.scalars(select(StandardAccount.account_key)))

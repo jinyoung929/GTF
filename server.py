@@ -319,9 +319,9 @@ def migrate_legacy_columns(session: Session) -> None:
     if "content_hash" not in existing:
         session.execute(text("ALTER TABLE standards_paragraphs ADD COLUMN content_hash text"))
     alias_columns = {column["name"] for column in inspect(session.bind).get_columns("kgaap_accounts")}
-    if "match_priority" not in alias_columns:
-        default = "integer NOT NULL DEFAULT 0" if is_postgres else "INTEGER NOT NULL DEFAULT 0"
-        session.execute(text(f"ALTER TABLE kgaap_accounts ADD COLUMN match_priority {default}"))
+    if "match_priority" in alias_columns:
+        # 별칭 길이는 별칭 자체에서 파생되므로 컬럼으로 이중 저장할 이유가 없다 (단순화 감사로 은퇴).
+        session.execute(text("ALTER TABLE kgaap_accounts DROP COLUMN match_priority"))
     checklist_columns = {column["name"] for column in inspect(session.bind).get_columns("checklist_items")}
     if "options" not in checklist_columns:
         session.execute(text("ALTER TABLE checklist_items ADD COLUMN options text NOT NULL DEFAULT ''"))
@@ -525,9 +525,9 @@ def ensure_statement_templates(session: Session) -> None:
 def ensure_account_aliases(session: Session) -> None:
     """계정명 별칭 사전(kgaap_accounts)을 seeds/kgaap_accounts.sql(단일 출처)에서 시드한다.
 
-    match_priority(별칭 길이)로 '긴 별칭 먼저' 매칭 순서를 DB에 표현한다. 표준계정 FK를
-    참조하므로 ensure_reference_accounts 뒤에 호출해야 한다. 옛 형식 id를 남기지 않도록
-    전체 삭제 후 재삽입한다(참조하는 테이블 없음).
+    매칭 우선순위(긴 별칭 먼저)는 런타임에 별칭 길이로 계산하므로 DB에는 저장하지 않는다.
+    표준계정 FK를 참조하므로 ensure_reference_accounts 뒤에 호출해야 한다. 옛 형식 id를
+    남기지 않도록 전체 삭제 후 재삽입한다(참조하는 테이블 없음).
     """
     session.execute(delete(KgaapAccount))
     run_seed(session, "kgaap_accounts")
@@ -535,11 +535,11 @@ def ensure_account_aliases(session: Session) -> None:
 
 
 def load_account_alias_map(session: Session) -> dict:
-    """kgaap_accounts에서 별칭 → 계정키 맵을 매칭 우선순위(긴 별칭 먼저) 순으로 로드한다."""
+    """kgaap_accounts에서 별칭 → 계정키 맵을 로드한다 (매칭 순서는 normalize가 길이로 정함)."""
     rows = session.execute(
         select(KgaapAccount.kgaap_name, KgaapAccount.account_key)
         .where(KgaapAccount.active.is_(True))
-        .order_by(KgaapAccount.match_priority.desc(), KgaapAccount.kgaap_name)
+        .order_by(KgaapAccount.kgaap_name)
     ).all()
     return {name: account_key for name, account_key in rows}
 
