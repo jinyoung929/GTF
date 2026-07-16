@@ -798,6 +798,13 @@ function ReviewScreen({
                             <option value="true">예</option>
                             <option value="false">아니오</option>
                           </select>
+                        ) : item.type === "choice" ? (
+                          <select onChange={(event) => setResponse(statement.id, item.key, event.target.value)} className="w-full px-3 py-2 text-sm border border-[#D0D5E0] bg-[#F5F7FA]">
+                            <option value="">선택</option>
+                            {(item.options || []).map((option) => (
+                              <option key={option} value={option}>{option}</option>
+                            ))}
+                          </select>
                         ) : (
                           <input type={item.type === "number" ? "number" : "text"} onChange={(event) => setResponse(statement.id, item.key, item.type === "number" ? Number(event.target.value) : event.target.value)} className="w-full px-3 py-2 text-sm border border-[#D0D5E0] bg-[#F5F7FA]" />
                         )}

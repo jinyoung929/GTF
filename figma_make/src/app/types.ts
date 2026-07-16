@@ -66,7 +66,8 @@ export type Statement = {
 export type ChecklistItem = {
   key: string;
   label: string;
-  type: "text" | "number" | "boolean";
+  type: "text" | "number" | "boolean" | "choice";
+  options?: string[];
   required: boolean;
 };
 

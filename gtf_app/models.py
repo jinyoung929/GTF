@@ -169,6 +169,9 @@ class ChecklistItem(Base):
     item_key: Mapped[str] = mapped_column(String, nullable=False)
     label: Mapped[str] = mapped_column(String, nullable=False)
     input_type: Mapped[str] = mapped_column(String, nullable=False)
+    # input_type이 'choice'일 때의 선택지 ('/' 구분). 정책 선택을 자유 입력이 아닌 선택형으로 받아
+    # 오타가 계산 분기를 빗나가는 실수를 차단한다. 선택지도 시드가 단일 출처.
+    options: Mapped[str] = mapped_column(String, nullable=False, default="", server_default=text("''"))
     required: Mapped[bool] = mapped_column(Boolean, nullable=False)
     display_order: Mapped[int] = mapped_column(Integer, nullable=False)
 

@@ -322,6 +322,9 @@ def migrate_legacy_columns(session: Session) -> None:
     if "match_priority" not in alias_columns:
         default = "integer NOT NULL DEFAULT 0" if is_postgres else "INTEGER NOT NULL DEFAULT 0"
         session.execute(text(f"ALTER TABLE kgaap_accounts ADD COLUMN match_priority {default}"))
+    checklist_columns = {column["name"] for column in inspect(session.bind).get_columns("checklist_items")}
+    if "options" not in checklist_columns:
+        session.execute(text("ALTER TABLE checklist_items ADD COLUMN options text NOT NULL DEFAULT ''"))
     session.commit()
 
 
@@ -575,7 +578,13 @@ def load_reference_data(session: Session) -> ReferenceData:
         select(ChecklistItem).order_by(ChecklistItem.account_key, ChecklistItem.display_order)
     ):
         checklists.setdefault(item.account_key, []).append(
-            {"key": item.item_key, "label": item.label, "type": item.input_type, "required": bool(item.required)}
+            {
+                "key": item.item_key,
+                "label": item.label,
+                "type": item.input_type,
+                "options": [option.strip() for option in (item.options or "").split("/") if option.strip()],
+                "required": bool(item.required),
+            }
         )
     return ReferenceData(
         accounts=accounts,
