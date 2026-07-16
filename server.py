@@ -87,6 +87,7 @@ from gtf_app.domain import (
     build_statement_record,
     utc_now,
     conversion_adjustments_csv,
+    compare_policy_scenarios,
     conversion_basis_report,
     generate_conversion,
     looks_numeric,
@@ -2547,6 +2548,22 @@ def validate_project(project_id: str, user: AppUser = Depends(require_write_user
 
 
 # --- 변환·검토 ---
+
+@app.post("/api/projects/{project_id}/policy-comparison")
+def policy_comparison(
+    project_id: str,
+    payload: ConvertRequest,
+    user: AppUser = Depends(require_user),
+    session: Session = Depends(get_db),
+):
+    """선택가능 회계정책(원가/재평가, 원가/공정가치, 자산차감/이연수익)의 영향 비교.
+
+    결정론 계산기를 선택지별 입력으로 재실행하는 조회성 산출 — 저장·확정 없음(읽기 전용도 허용).
+    """
+    project = get_project_or_404(session, project_id)
+    statements = load_project_statements(session, project_id)
+    return compare_policy_scenarios(row_to_dict(project), statements, payload.responses or {}, REFERENCE)
+
 
 @app.post("/api/projects/{project_id}/convert")
 def convert_project(

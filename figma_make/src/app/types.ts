@@ -124,6 +124,25 @@ export type AccountOption = { account_key: string; standard_code: string; intern
 
 export type FocusTarget = { kind: SummaryAction; statementId?: string; seq: number };
 
+export type PolicyComparison = {
+  comparisons: Array<{
+    statement_id: string;
+    account: string;
+    account_key: string;
+    policy_label: string;
+    options: Array<{
+      option: string;
+      adjustment: number;
+      net_equity_effect: number;
+      target_account: string;
+      calculation: string;
+    }>;
+    equity_difference: number;
+    insufficient_inputs: boolean;
+  }>;
+  note: string;
+};
+
 export type ReviewSummary = {
   attention: ReviewAttentionItem[];
   judgment: Array<{

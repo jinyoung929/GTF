@@ -211,6 +211,7 @@ class DartImportAndWorkbookTests(unittest.TestCase):
         self.assertIn(("POST", "/api/projects/{project_id}/dart/reports"), routes)
         self.assertIn(("GET", "/api/projects/{project_id}/exports/{export_name}"), routes)
         self.assertIn(("DELETE", "/api/projects/{project_id}"), routes)
+        self.assertIn(("POST", "/api/projects/{project_id}/policy-comparison"), routes)
 
     def test_dart_available_reports_filters_periodic_reports(self):
         original_request = dart_module.dart_json_request

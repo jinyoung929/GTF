@@ -454,6 +454,31 @@ class TestKifrsDifferenceAreas(unittest.TestCase):
         self.assertNotIn("파생상품부채로 분류될 가능성", e["calculation"])
         self.assertIn("전문가 검토", e["calculation"])
 
+    def test_policy_comparison_shows_both_options_side_by_side(self):
+        # 삼일 서비스의 '선택가능 회계정책의 영향 비교 제시'에 대응: 결정론 계산기를 선택지별 재실행.
+        stmt = server.build_statement_record("2024", {"account_name": "유형자산", "amount": 1000.0}, REF)
+        result = server.compare_policy_scenarios(
+            PROJECT, [stmt], {stmt["id"]: {"fair_value": 1200, "recoverable_amount": 0}}, REF
+        )
+        row = result["comparisons"][0]
+        self.assertEqual(row["account_key"], "ppe")
+        self.assertFalse(row["insufficient_inputs"])
+        by_option = {opt["option"]: opt for opt in row["options"]}
+        self.assertEqual(by_option["원가모형"]["adjustment"], 0)          # 손상 없음 → 조정 없음
+        self.assertEqual(by_option["재평가모형"]["adjustment"], 200)      # 1,200 − 1,000
+        self.assertEqual(row["equity_difference"], 200)                    # 재평가 − 원가
+
+    def test_policy_comparison_flags_missing_fair_value(self):
+        stmt = server.build_statement_record("2024", {"account_name": "투자부동산", "amount": 500.0}, REF)
+        result = server.compare_policy_scenarios(PROJECT, [stmt], {}, REF)
+        row = result["comparisons"][0]
+        self.assertTrue(row["insufficient_inputs"])  # 공정가치 미입력 → 비교 무의미 표시
+
+    def test_policy_comparison_skips_non_policy_accounts(self):
+        lease = server.build_statement_record("2024", {"account_name": "리스부채", "amount": 100.0}, REF)
+        result = server.compare_policy_scenarios(PROJECT, [lease], {}, REF)
+        self.assertEqual(result["comparisons"], [])  # 리스는 정책 선택형이 아님
+
     def test_derivative_hedge_designation_changes_guidance(self):
         designated = self._entry("통화선도", 0, {"hedge_designated": True})
         self.assertEqual(designated["standard_code"], "F2000")

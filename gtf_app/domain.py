@@ -42,6 +42,14 @@ CALC_CHECKLIST_KEYS = {
     "derivative": {"hedge_designated"},
 }
 
+# 선택가능 회계정책(K-IFRS가 복수 정책을 허용하는 곳)과 그 선택지.
+# 계산기가 결정론이라 같은 재무제표를 선택지별로 계산해 영향을 비교 제시할 수 있다.
+POLICY_SCENARIOS = {
+    "ppe": ("measurement_model", ["원가모형", "재평가모형"]),
+    "investment_property": ("measurement_model", ["원가모형", "공정가치모형"]),
+    "government_grant": ("presentation_method", ["자산차감법", "이연수익법"]),
+}
+
 
 class ReferenceData:
     """DB에서 로드한 기준정보 묶음. domain 순수 함수에 주입되어 코드가 DB를 직접 모르게 한다.
@@ -706,6 +714,73 @@ def build_review_summary(statements: list[dict], conversion: dict | None, valida
         "has_conversion": conversion is not None,
         "can_approve": conversion is not None and not blocking,
         "approval_policy": "오류(미분류 등)가 남아 있으면 승인이 차단되고, 경고는 검토자 판단으로 승인할 수 있습니다.",
+    }
+
+
+def _net_equity_effect(entries: list[dict]) -> float:
+    """조정분개들이 순자산(자본총계)에 미치는 영향. 자산·금융(+), 부채(−), 자본·손익(+)."""
+    signs = {"A": 1, "F": 1, "L": -1, "E": 1, "R": 1}
+    return sum(
+        signs.get(str(entry.get("standard_code", ""))[:1], 0) * float(entry.get("adjustment") or 0)
+        for entry in entries
+    )
+
+
+def compare_policy_scenarios(
+    project: dict,
+    statements: list[dict],
+    responses: dict,
+    reference: "ReferenceData",
+) -> dict:
+    """선택가능 회계정책의 영향 비교: 정책 선택지별로 같은 계산기를 돌려 조정액·순자산 영향을 나란히 제시.
+
+    계산기가 결정론 순수 함수라서 가능한 기능 — 입력(정책 선택)만 바꿔 재계산하면 같은
+    데이터에서 항상 같은 비교가 나온다. 결과는 정책 결정의 참고 자료이며 확정은 검토자가 한다
+    (회계정책은 동일 유형 전체에 일관 적용해야 하므로 항목별 선택이 아니라 정책 차원의 결정).
+    """
+    comparisons = []
+    for item in statements:
+        account_key = account_key_for_statement(item, reference)
+        scenario = POLICY_SCENARIOS.get(account_key)
+        if not scenario:
+            continue
+        item_key, options = scenario
+        base_response = dict(responses.get(item["id"], {}))
+        option_results = []
+        for option in options:
+            variant = {item["id"]: {**base_response, item_key: option}}
+            output = generate_conversion(project, [item], variant, reference)
+            entries = output["entries"]
+            main = entries[0]
+            option_results.append(
+                {
+                    "option": option,
+                    "adjustment": main.get("adjustment", 0),
+                    "net_equity_effect": round(_net_equity_effect(entries), 2),
+                    "target_account": main.get("target_account", ""),
+                    "calculation": main.get("calculation", ""),
+                }
+            )
+        checklist = reference.checklists.get(account_key, [])
+        policy_label = next((entry["label"] for entry in checklist if entry["key"] == item_key), item_key)
+        # 공정가치 입력이 없으면 재평가/공정가치 선택지의 조정이 0으로 나와 비교가 무의미하다.
+        needs_fair_value = account_key in {"ppe", "investment_property"} and not float(base_response.get("fair_value") or 0)
+        comparisons.append(
+            {
+                "statement_id": item["id"],
+                "account": item["account_name"],
+                "account_key": account_key,
+                "policy_label": policy_label,
+                "options": option_results,
+                "equity_difference": round(
+                    option_results[-1]["net_equity_effect"] - option_results[0]["net_equity_effect"], 2
+                ),
+                "insufficient_inputs": needs_fair_value,
+            }
+        )
+    return {
+        "comparisons": comparisons,
+        "note": "정책 비교는 참고용 산출입니다. 회계정책은 동일 유형 전체에 일관 적용해야 하며, 선택과 승인은 검토자가 합니다.",
     }
 
 

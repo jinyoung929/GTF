@@ -21,7 +21,7 @@ import { api, download } from "./api";
 import { classNames, fmtKRW } from "./format";
 import { LoginScreen } from "./screens/LoginScreen";
 import { ProjectDashboard } from "./screens/ProjectDashboard";
-import type { AccountOption, AiDecision, AuditLog, Conversion, ConversionEntry, FocusTarget, ImportTab, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, Statement, SummaryAction, UploadRow, UserInfo } from "./types";
+import type { AccountOption, AiDecision, AuditLog, Conversion, ConversionEntry, FocusTarget, ImportTab, PolicyComparison, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, Statement, SummaryAction, UploadRow, UserInfo } from "./types";
 import { HeaderCell, Pill, SectionLabel, StatusBadge } from "./ui";
 
 type DartReportOption = {
@@ -714,8 +714,24 @@ function ReviewScreen({
 }) {
   const [responses, setResponses] = useState<Record<string, Record<string, unknown>>>({});
   const [busy, setBusy] = useState(false);
+  const [comparison, setComparison] = useState<PolicyComparison | null>(null);
+  const [comparing, setComparing] = useState(false);
   const judgmentStatements = bundle.statements.filter((statement) => statement.mapping_type === "judgment");
   const entries = bundle.conversion?.entries || [];
+
+  // 선택가능 회계정책의 영향 비교: 결정론 계산기를 선택지별로 재실행하는 조회성 산출.
+  async function comparePolicies() {
+    setComparing(true);
+    try {
+      const data = await api<PolicyComparison>(`/api/projects/${bundle.project.id}/policy-comparison`, {
+        method: "POST",
+        body: JSON.stringify({ responses }),
+      });
+      setComparison(data);
+    } finally {
+      setComparing(false);
+    }
+  }
 
   // '체크리스트 입력' 버튼이 보낸 목적지: 해당 계정 카드로 스크롤.
   useEffect(() => {
@@ -793,11 +809,69 @@ function ReviewScreen({
               {!judgmentStatements.length && <div className="text-center py-10 text-xs text-[#677089]">판단 필요 계정이 없습니다</div>}
               <div className="flex items-center justify-end gap-3 pt-2 border-t border-[#EEF0F5]">
                 <span className="text-xs text-[#677089]">체크리스트 입력을 마쳤으면 변환 초안을 생성하세요</span>
+                <button
+                  disabled={comparing || !bundle.statements.length}
+                  onClick={comparePolicies}
+                  className="px-4 py-2 text-xs font-bold border border-[#1740BE] text-[#1740BE] bg-white disabled:border-[#C8D0DC] disabled:text-[#C8D0DC]"
+                  title="원가/재평가, 원가/공정가치, 자산차감/이연수익 — 선택가능 정책의 영향을 나란히 계산합니다"
+                >
+                  {comparing ? "비교 중..." : "정책 시나리오 비교"}
+                </button>
                 <button disabled={busy || !bundle.statements.length} onClick={convert} className="flex items-center gap-1.5 px-4 py-2 bg-[#1740BE] disabled:bg-[#C8D0DC] text-white text-xs font-bold">
                   {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                   변환 생성
                 </button>
               </div>
+
+              {comparison && (
+                <div className="border border-[#D0D5E0]">
+                  <div className="px-4 py-2.5 bg-[#EFF4FF] border-b border-[#D0D5E0]">
+                    <span className="text-xs font-bold text-[#1740BE]">회계정책 시나리오 비교</span>
+                    <p className="text-[11px] text-[#677089] mt-0.5">{comparison.note}</p>
+                  </div>
+                  {comparison.comparisons.map((row) => (
+                    <div key={row.statement_id} className="px-4 py-3 border-b border-[#EEF0F5]">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-bold text-[#0A1628]">{row.account}</span>
+                        <span className="text-[11px] text-[#677089]">{row.policy_label}</span>
+                        {row.insufficient_inputs && (
+                          <span className="px-2 py-0.5 text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                            공정가치 입력 후 비교 가능
+                          </span>
+                        )}
+                      </div>
+                      <table className="w-full text-xs mt-2">
+                        <thead>
+                          <tr className="bg-[#F5F7FA]">
+                            <HeaderCell>정책 선택지</HeaderCell>
+                            <HeaderCell right>조정액</HeaderCell>
+                            <HeaderCell right>순자산 영향</HeaderCell>
+                            <HeaderCell>계산/근거</HeaderCell>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {row.options.map((option) => (
+                            <tr key={option.option} className="border-t border-[#EEF0F5]">
+                              <td className="px-4 py-2 font-bold">{option.option}</td>
+                              <td className="px-4 py-2 text-right font-mono">{fmtKRW(option.adjustment)}</td>
+                              <td className="px-4 py-2 text-right font-mono">{fmtKRW(option.net_equity_effect)}</td>
+                              <td className="px-4 py-2 text-[#677089] max-w-[340px] truncate">{option.calculation}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {!row.insufficient_inputs && (
+                        <p className="text-[11px] text-[#1740BE] font-semibold mt-1.5">
+                          선택지 간 순자산 차이: {fmtKRW(row.equity_difference)}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                  {!comparison.comparisons.length && (
+                    <div className="px-4 py-3 text-xs text-[#677089]">비교 가능한 정책 선택 항목(유형자산·투자부동산·정부보조금)이 없습니다.</div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
