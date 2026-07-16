@@ -325,6 +325,19 @@ def migrate_legacy_columns(session: Session) -> None:
     checklist_columns = {column["name"] for column in inspect(session.bind).get_columns("checklist_items")}
     if "options" not in checklist_columns:
         session.execute(text("ALTER TABLE checklist_items ADD COLUMN options text NOT NULL DEFAULT ''"))
+    if is_postgres:
+        # 옛 수동 스키마 시절의 CHECK 제약 잔재 제거. ORM 모델은 CHECK를 정의하지 않으므로
+        # 우리 테이블에 남은 CHECK는 전부 레거시이며, 값 집합이 늘어날 때 시드를 거부한다
+        # (실사례: input_type CHECK가 새 'choice' 값을 거부해 배포 부팅 실패).
+        legacy_checks = session.execute(
+            text(
+                "SELECT conrelid::regclass::text AS table_name, conname FROM pg_constraint "
+                "WHERE contype = 'c' AND conrelid != 0 AND connamespace = 'public'::regnamespace"
+            )
+        ).all()
+        for table_name, constraint_name in legacy_checks:
+            if table_name in Base.metadata.tables:
+                session.execute(text(f'ALTER TABLE {table_name} DROP CONSTRAINT "{constraint_name}"'))
     session.commit()
 
 
