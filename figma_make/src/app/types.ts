@@ -60,6 +60,7 @@ export type Statement = {
   period: string;
   mapping_type: "simple" | "judgment";
   rule_summary: string;
+  scope_status: "" | "out_of_scope";
   checklist: ChecklistItem[];
 };
 
@@ -157,7 +158,13 @@ export type ReviewSummary = {
     checklist_response: Record<string, unknown>;
     standards_paragraph_count: number;
   }>;
-  counts: { attention: number; attention_errors: number; judgment: number; unclassified: number };
+  counts: { attention: number; attention_errors: number; judgment: number; unclassified: number; out_of_scope: number };
+  coverage: {
+    uncovered_amount: number;
+    total_assets: number;
+    uncovered_ratio: number | null;
+    materiality_threshold: number;
+  };
   has_conversion: boolean;
   can_approve: boolean;
   approval_policy: string;

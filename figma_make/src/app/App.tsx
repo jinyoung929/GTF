@@ -658,6 +658,9 @@ function MappingTable({
                   {row.rule_summary?.includes("담당자 재분류") && (
                     <span title="담당자가 직접 재분류한 계정입니다 (감사 로그 기록)" className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 rounded">재분류됨</span>
                   )}
+                  {row.scope_status === "out_of_scope" && (
+                    <span title="담당자가 도구 범위 밖으로 확인한 계정입니다 — 별도 전문가 검토 대상 (감사 로그 기록)" className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-300 rounded">범위 밖</span>
+                  )}
                 </div>
               </td>
               <td className="px-4 py-2.5 text-[#677089] max-w-[320px]">
@@ -675,6 +678,7 @@ function MappingTable({
                           {option.internal_label} ({option.standard_code})
                         </option>
                       ))}
+                      <option value="out_of_scope">범위 밖 — 별도 검토로 확인</option>
                     </select>
                     <button
                       disabled={!choice[row.id] || busyId === row.id}
@@ -1036,6 +1040,24 @@ function ApprovalPanel({ projectId, onAction }: { projectId: string; onAction: (
           {!summary.attention.length && <div className="px-4 py-3 text-xs text-emerald-700 font-semibold">확인 필요 항목이 없습니다.</div>}
         </div>
       </div>
+
+      {summary.coverage && summary.coverage.uncovered_ratio !== null && (
+        <div className={classNames(
+          "border px-4 py-2 text-[11px] flex items-center justify-between",
+          summary.coverage.uncovered_ratio > summary.coverage.materiality_threshold
+            ? "border-amber-300 bg-amber-50 text-amber-800"
+            : "border-[#D0D5E0] bg-[#F8FAFC] text-[#677089]",
+        )}>
+          <span className="font-bold">커버리지</span>
+          <span>
+            미분류·범위 밖 {summary.coverage.uncovered_amount.toLocaleString()} = 총자산의{" "}
+            <b>{(summary.coverage.uncovered_ratio * 100).toFixed(1)}%</b>
+            {summary.coverage.uncovered_ratio > summary.coverage.materiality_threshold
+              ? " — 중요성 수준(5%) 초과, 커버리지 부족 가능"
+              : " (중요성 수준 5% 이내)"}
+          </span>
+        </div>
+      )}
 
       <div className="border border-[#D0D5E0]">
         <div className="px-4 py-2.5 bg-[#EFF4FF] border-b border-[#D0D5E0] flex items-center justify-between">

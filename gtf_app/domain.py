@@ -663,17 +663,63 @@ def build_review_summary(statements: list[dict], conversion: dict | None, valida
         responses_by_statement[item.get("statement_id")] = item.get("checklist_response") or {}
         paragraphs_by_statement[item.get("statement_id")] = item.get("standards_paragraphs") or []
 
-    unclassified = [row for row in statements if row.get("standard_code") == "X9999"]
+    out_of_scope = [row for row in statements if row.get("scope_status") == "out_of_scope"]
+    unclassified = [
+        row for row in statements
+        if row.get("standard_code") == "X9999" and row.get("scope_status") != "out_of_scope"
+    ]
     for row in unclassified:
         attention.append(
             {
                 "type": "unclassified",
                 "severity": "error",
                 "account": row.get("account_name"),
-                "message": "표준계정 미분류 상태입니다. 담당자 분류 또는 AI 제안 승인(1차 승인)이 필요합니다.",
+                "message": "표준계정 미분류 상태입니다. 담당자 분류, AI 제안 승인, 또는 '범위 밖(별도 검토)' 확인이 필요합니다.",
                 # action: 화면이 이 항목에 붙일 행동 버튼. 문자열 매칭 대신 서버가 행동을 내려준다.
                 "action": "classify",
                 "statement_id": row.get("id"),
+            }
+        )
+    for row in out_of_scope:
+        # 확인된 범위 밖 계정은 승인을 막지 않되, 별도 검토 대상임을 끝까지 드러낸다.
+        attention.append(
+            {
+                "type": "out_of_scope",
+                "severity": "warning",
+                "account": row.get("account_name"),
+                "message": "도구 범위 밖으로 확인된 계정입니다. 변환 산출물과 별도로 전문가 검토가 필요합니다.",
+                "action": "classify",
+                "statement_id": row.get("id"),
+            }
+        )
+
+    # 중요성(materiality) 가드: 도구가 다루지 못한 금액(미분류+범위 밖)이 총자산 대비
+    # 얼마나 되는지 항상 표시하고, 중요성 수준(5%)을 넘으면 커버리지 부족을 경고한다.
+    # 도구가 자기 한계를 정량으로 보고해야 '검토 초안'이라는 산출물 성격이 성립한다.
+    total_assets = sum(
+        abs(float(row.get("amount") or 0))
+        for row in statements
+        if str(row.get("standard_code") or "").startswith("A") and row.get("standard_code") != "X9999"
+    )
+    uncovered_amount = sum(abs(float(row.get("amount") or 0)) for row in unclassified + out_of_scope)
+    coverage = {
+        "uncovered_amount": round(uncovered_amount, 2),
+        "total_assets": round(total_assets, 2),
+        "uncovered_ratio": round(uncovered_amount / total_assets, 4) if total_assets else None,
+        "materiality_threshold": 0.05,
+    }
+    if total_assets and uncovered_amount / total_assets > 0.05:
+        attention.append(
+            {
+                "type": "coverage",
+                "severity": "warning",
+                "account": "커버리지",
+                "message": (
+                    f"미분류·범위 밖 금액 {uncovered_amount:,.0f}이 총자산의 "
+                    f"{uncovered_amount / total_assets:.1%}로 중요성 수준(5%)을 초과합니다. "
+                    "이 회사에는 도구의 표준계정 커버리지가 부족할 수 있습니다."
+                ),
+                "action": "review_rows",
             }
         )
 
@@ -709,6 +755,10 @@ def build_review_summary(statements: list[dict], conversion: dict | None, valida
         )
 
     for check in (validation or {}).get("checks") or []:
+        if check.get("name") == "미분류 계정":
+            # 미분류는 이 함수가 현재 계정 행에서 실시간으로 판정한다(범위 밖 확인 반영).
+            # 검증 시점의 스냅숏을 함께 쓰면 재분류·범위 밖 확인 후에도 낡은 오류가 승인을 막는다.
+            continue
         if check.get("status") in {"warning", "error"}:
             attention.append(
                 {
@@ -730,7 +780,9 @@ def build_review_summary(statements: list[dict], conversion: dict | None, valida
             "attention_errors": len(blocking),
             "judgment": len(judgment),
             "unclassified": len(unclassified),
+            "out_of_scope": len(out_of_scope),
         },
+        "coverage": coverage,
         "has_conversion": conversion is not None,
         "can_approve": conversion is not None and not blocking,
         "approval_policy": "오류(미분류 등)가 남아 있으면 승인이 차단되고, 경고는 검토자 판단으로 승인할 수 있습니다.",

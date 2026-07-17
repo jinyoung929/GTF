@@ -70,6 +70,9 @@ class Statement(Base):
     mapping_type: Mapped[str] = mapped_column(String, nullable=False)
     rule_summary: Mapped[str] = mapped_column(Text, nullable=False)
     checklist_json: Mapped[str] = mapped_column(Text, nullable=False)
+    # ''(정상) | 'out_of_scope': 담당자가 이 도구의 표준계정 범위 밖으로 확인한 계정.
+    # 미분류(X9999)의 승인 차단을 풀되, 별도 검토 대상임이 산출물과 감사 로그에 남는다.
+    scope_status: Mapped[str] = mapped_column(String, nullable=False, default="", server_default=text("''"))
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 

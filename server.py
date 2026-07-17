@@ -325,6 +325,9 @@ def migrate_legacy_columns(session: Session) -> None:
     checklist_columns = {column["name"] for column in inspect(session.bind).get_columns("checklist_items")}
     if "options" not in checklist_columns:
         session.execute(text("ALTER TABLE checklist_items ADD COLUMN options text NOT NULL DEFAULT ''"))
+    statement_columns = {column["name"] for column in inspect(session.bind).get_columns("statements")}
+    if "scope_status" not in statement_columns:
+        session.execute(text("ALTER TABLE statements ADD COLUMN scope_status text NOT NULL DEFAULT ''"))
     if is_postgres:
         # 옛 수동 스키마 시절의 CHECK 제약 잔재 제거. ORM 모델은 CHECK를 정의하지 않으므로
         # 우리 테이블에 남은 CHECK는 전부 레거시이며, 값 집합이 늘어날 때 시드를 거부한다
@@ -2560,10 +2563,27 @@ def classify_statement(
     if not statement or statement.project_id != project_id:
         raise HTTPException(404, {"error": "계정 행을 찾지 못했습니다."})
     account_key = payload.account_key.strip()
+    if account_key == "out_of_scope":
+        # 31개 표준계정 어디에도 해당하지 않는 계정의 정직한 출구. 억지 분류 대신
+        # '범위 밖 · 별도 검토'로 확인하면 승인 차단이 풀리고, 확인 사실이 기록에 남는다.
+        before = {"standard_code": statement.standard_code, "scope_status": statement.scope_status}
+        statement.scope_status = "out_of_scope"
+        statement.normalized_account = "범위 밖(별도 검토)"
+        statement.rule_summary = "[범위 밖 확인] 이 도구의 표준계정 범위에 해당하지 않아 별도 검토 대상으로 확인되었습니다."
+        log_event(
+            session,
+            project_id,
+            "statement.scope_confirmed",
+            {"statement_id": statement_id, "account_name": statement.account_name, "before": before},
+            actor=user.email,
+        )
+        session.commit()
+        return row_to_dict(statement)
     account = REFERENCE.accounts.get(account_key)
     if not account or account_key == "other":
         raise HTTPException(400, {"error": "유효한 표준계정 키가 아닙니다. 분류 가능한 계정 목록에서 선택하세요."})
     before = {"standard_code": statement.standard_code, "normalized_account": statement.normalized_account}
+    statement.scope_status = ""  # 범위 밖으로 확인했던 행을 표준계정으로 재분류하면 확인을 해제한다
     checklist = REFERENCE.checklists.get(account_key, []) if account["type"] == "judgment" else []
     statement.normalized_account = account["label"]
     statement.standard_code = account["code"]

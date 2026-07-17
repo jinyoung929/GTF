@@ -157,6 +157,35 @@ class BuildReviewSummaryTest(unittest.TestCase):
         self.assertEqual(actions["자산=부채+자본"], "review_rows")
         self.assertEqual(actions["손익계산서 필수 항목"], "add_rows")
 
+    # --- 범위 밖 출구: 31개 표준계정에 없는 계정의 정직한 종결 경로 ---
+
+    def test_out_of_scope_unblocks_approval_but_keeps_warning(self):
+        lease, other = self.lease_statement(), self.unclassified_statement()
+        other["scope_status"] = "out_of_scope"
+        summary = build_review_summary([lease, other], self.conversion_for(lease, {"lease_term_months": 36}), None)
+        self.assertTrue(summary["can_approve"])  # 확인된 범위 밖은 미분류 오류에서 빠져 승인 가능
+        self.assertEqual(summary["counts"]["unclassified"], 0)
+        self.assertEqual(summary["counts"]["out_of_scope"], 1)
+        by_type = {item["type"]: item for item in summary["attention"]}
+        self.assertEqual(by_type["out_of_scope"]["severity"], "warning")  # 승인은 열리되 경고는 남는다
+        self.assertNotIn("unclassified", by_type)
+
+    # --- 중요성(materiality) 가드: 다루지 못한 금액의 총자산 대비 비율 ---
+
+    def test_coverage_over_materiality_threshold_warns(self):
+        lease = self.lease_statement()  # A2100 자산 1,000 = 총자산
+        big = build_statement_record("2024", {"account_name": "이상한계정", "amount": 100.0}, REF)
+        summary = build_review_summary([lease, big], self.conversion_for(lease, {"lease_term_months": 36}), None)
+        self.assertAlmostEqual(summary["coverage"]["uncovered_ratio"], 0.1)  # 100/1000
+        self.assertIn("coverage", {item["type"] for item in summary["attention"]})
+
+    def test_coverage_within_materiality_reports_ratio_without_warning(self):
+        lease = self.lease_statement()
+        small = build_statement_record("2024", {"account_name": "이상한계정", "amount": 10.0}, REF)
+        summary = build_review_summary([lease, small], self.conversion_for(lease, {"lease_term_months": 36}), None)
+        self.assertAlmostEqual(summary["coverage"]["uncovered_ratio"], 0.01)
+        self.assertNotIn("coverage", {item["type"] for item in summary["attention"]})
+
 
 if __name__ == "__main__":
     unittest.main()
