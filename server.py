@@ -1154,6 +1154,35 @@ def pgvector_search(session: Session, query_vector: list[float], account_key: st
     return results
 
 
+# 검색 보조 채널이 계정 매칭 문단(본체)의 중복을 걷어낸 뒤 남는 하위권까지 싣지 않도록
+# 거는 유사도 바닥값. 실측상 의미 있는 '계정 경계 밖' 문단은 0.35 부근(리스 질의의
+# 충당부채 0.377, 공정가치 0.361), 무관한 꼬리는 그 아래로 떨어진다.
+SUPPLEMENTARY_SIMILARITY_FLOOR = 0.3
+
+
+def select_supplementary_paragraphs(paras: list[dict], attached_paragraphs: list[dict] | None) -> list[dict]:
+    """AI 근거 보강 채널에 실을 검색 문단을 고른다.
+
+    근거의 본체는 계정 매칭 문단(judgment_items에 전량 첨부)이므로, 검색 채널의 몫은
+    결정론 경로가 못 줍는 '계정 경계 밖' 문단뿐이다: ①이미 첨부된 문단은 중복이라 버리고
+    ②중복을 걷어낸 자리를 무관한 하위권이 채우지 않도록 유사도 바닥값 미만도 버린다.
+    (키워드 폴백 결과는 유사도가 없지만 질의어 일치라 그대로 싣는다.)
+    """
+    attached = {
+        (p.get("reference_code"), p.get("paragraph_label"))
+        for p in attached_paragraphs or []
+    }
+    kept = []
+    for para in paras:
+        if (para.get("reference_code"), para.get("paragraph_label")) in attached:
+            continue
+        similarity = para.get("similarity")
+        if similarity is not None and similarity < SUPPLEMENTARY_SIMILARITY_FLOOR:
+            continue
+        kept.append(para)
+    return kept
+
+
 def semantic_search_paragraphs(
     session: Session, query: str, account_key: str | None = None, standard_set: str | None = None, k: int = 5
 ) -> list[dict]:
@@ -1287,7 +1316,7 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
             "최종 회계처리를 확정하지 말고, 사용자가 입력한 체크리스트와 변환 초안을 바탕으로 "
             "판단 필요 항목, 추가 질문, 기준 근거 요약만 한국어로 제시한다. "
             "basis_summary는 한국어 2~3문장으로, ①이 계정의 판단 쟁점 ②관련 기준서 문단의 요지 ③검토 결론 방향의 순서로 쓴다. "
-            "반드시 retrieved_standards로 제공된 기준서 문단에 근거해 작성하고 "
+            "반드시 checklist_inputs의 계정별 기준서 문단과 retrieved_standards로 제공된 문단에만 근거해 작성하고 "
             "해당 문단의 reference_code를 문장 안에 인용하며, 제공된 문단에 없는 내용은 추측하지 않는다. "
             "additional_questions에는 검토자가 실제로 확인해야 할 구체적 질문을 1개 이상 담는다. "
             "금액은 절대 새로 계산하지 않는다. "
@@ -2651,7 +2680,8 @@ def convert_project(
     retrieved_context = []
     for jitem in output["judgment_items"]:
         query = f"{jitem.get('account', '')} {jitem.get('basis', '')}".strip()
-        paras = semantic_search_paragraphs(session, query, k=3) if query else []
+        paras = semantic_search_paragraphs(session, query, k=5) if query else []
+        paras = select_supplementary_paragraphs(paras, jitem.get("standards_paragraphs"))
         retrieved_context.append(
             {
                 "account": jitem.get("account"),

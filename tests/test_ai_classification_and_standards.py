@@ -196,6 +196,20 @@ class AiClassificationCallTest(unittest.TestCase):
         self.assertIn("reference_code", captured["instructions"])
         self.assertIn("2~3문장", captured["instructions"])  # 구조화된 분량 요구
 
+    def test_supplementary_paragraph_selection(self):
+        # 보조 검색 채널 계약: 계정 매칭 문단과 중복이면 제외, 유사도 바닥값 미만 제외,
+        # 키워드 폴백(유사도 없음)은 유지 — '경계 밖 + 충분히 관련'만 남는다.
+        attached = [{"reference_code": "K-IFRS 제1116호 리스", "paragraph_label": "문단 22"}]
+        paras = [
+            {"reference_code": "K-IFRS 제1116호 리스", "paragraph_label": "문단 22", "similarity": 0.59},  # 중복
+            {"reference_code": "K-IFRS 제1037호 충당부채", "paragraph_label": "문단 45", "similarity": 0.38},  # 경계 밖·관련
+            {"reference_code": "K-IFRS 제1002호 재고자산", "paragraph_label": "문단 9", "similarity": 0.12},  # 무관한 꼬리
+            {"reference_code": "일반기업회계기준 제13장 리스", "paragraph_label": "리스이용자", "similarity": None},  # 키워드 폴백
+        ]
+        kept = server.select_supplementary_paragraphs(paras, attached)
+        codes = [p["reference_code"] for p in kept]
+        self.assertEqual(codes, ["K-IFRS 제1037호 충당부채", "일반기업회계기준 제13장 리스"])
+
     def test_prompt_includes_retrieved_standards_for_grounding(self):
         # 분류 프롬프트에 계정별 기준서 문단(RAG)이 첨부되는지 — 근거 접지의 핵심 계약
         captured = {}
