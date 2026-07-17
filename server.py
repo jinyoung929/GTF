@@ -1154,28 +1154,21 @@ def pgvector_search(session: Session, query_vector: list[float], account_key: st
     return results
 
 
-# 검색 보조 채널이 계정 매칭 문단(본체)의 중복을 걷어낸 뒤 남는 하위권까지 싣지 않도록
-# 거는 유사도 바닥값. 실측상 의미 있는 '계정 경계 밖' 문단은 0.35 부근(리스 질의의
-# 충당부채 0.377, 공정가치 0.361), 무관한 꼬리는 그 아래로 떨어진다.
+# 검색 보조 채널에 무관한 하위권 결과까지 싣지 않도록 거는 유사도 바닥값. 실측상
+# 의미 있는 문단은 0.35 이상(리스 질의의 충당부채 0.377, 공정가치 0.361),
+# 무관한 꼬리는 그 아래로 떨어진다.
 SUPPLEMENTARY_SIMILARITY_FLOOR = 0.3
 
 
-def select_supplementary_paragraphs(paras: list[dict], attached_paragraphs: list[dict] | None) -> list[dict]:
-    """AI 근거 보강 채널에 실을 검색 문단을 고른다.
+def select_supplementary_paragraphs(paras: list[dict]) -> list[dict]:
+    """AI 근거 보강 채널에 실을 검색 문단을 고른다: 유사도 바닥값 미만만 버린다.
 
-    근거의 본체는 계정 매칭 문단(judgment_items에 전량 첨부)이므로, 검색 채널의 몫은
-    결정론 경로가 못 줍는 '계정 경계 밖' 문단뿐이다: ①이미 첨부된 문단은 중복이라 버리고
-    ②중복을 걷어낸 자리를 무관한 하위권이 채우지 않도록 유사도 바닥값 미만도 버린다.
+    계정 매칭 문단과의 중복은 허용한다 — 검색이 같은 문단을 다시 골랐다는 건 그 문단이
+    이 질의의 핵심 근거라는 신호이고, 중복 제거로 아낄 토큰보다 남길 정보가치가 크다.
     (키워드 폴백 결과는 유사도가 없지만 질의어 일치라 그대로 싣는다.)
     """
-    attached = {
-        (p.get("reference_code"), p.get("paragraph_label"))
-        for p in attached_paragraphs or []
-    }
     kept = []
     for para in paras:
-        if (para.get("reference_code"), para.get("paragraph_label")) in attached:
-            continue
         similarity = para.get("similarity")
         if similarity is not None and similarity < SUPPLEMENTARY_SIMILARITY_FLOOR:
             continue
@@ -1916,6 +1909,21 @@ def get_project_or_404(session: Session, project_id: str, owner_user_id: str | N
     return project
 
 
+def get_owned_project(
+    project_id: str,
+    user: AppUser = Depends(require_user),
+    session: Session = Depends(get_db),
+) -> Project:
+    """경로의 project_id를 소유권 검증까지 마친 Project로 바꿔 주입한다.
+
+    본문에서 get_project_or_404를 직접 부르면 owner_user_id 인자를 빼먹어도 티가 나지
+    않는다(실제로 여러 라우트에서 누락됐던 실수 계급). 의존성으로 선언하면 라우트가
+    받는 것 자체가 '소유권 통과한 프로젝트'라 검사를 건너뛸 방법이 없다 — 인증(require_user)이
+    주입으로 누락을 막는 것과 같은 원리를 인가(소유권)까지 확장한 것.
+    """
+    return get_project_or_404(session, project_id, owner_user_id=user.id)
+
+
 # --- 요청 본문 모델 (pydantic) ---
 
 class LoginRequest(BaseModel):
@@ -2205,7 +2213,7 @@ def delete_project(project_id: str, user: AppUser = Depends(require_write_user),
 # --- 업로드·추출 ---
 
 @app.get("/api/projects/{project_id}/uploads")
-def list_uploads(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
+def list_uploads(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db), _owned: Project = Depends(get_owned_project)):
     uploads = session.scalars(
         select(Upload).where(Upload.project_id == project_id).order_by(Upload.created_at.desc())
     )
@@ -2218,8 +2226,8 @@ def upload_file(
     file: UploadFile = File(...),
     user: AppUser = Depends(require_write_user),
     session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
 ):
-    get_project_or_404(session, project_id)
 
     original_name = file.filename or "upload.bin"
     content = file.file.read()
@@ -2263,6 +2271,7 @@ def delete_upload(
     upload_id: str,
     user: AppUser = Depends(require_write_user),
     session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
 ):
     upload = session.scalar(select(Upload).where(Upload.id == upload_id, Upload.project_id == project_id))
     if not upload:
@@ -2292,7 +2301,7 @@ def delete_upload(
 
 
 @app.get("/api/projects/{project_id}/extractions")
-def list_extractions(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
+def list_extractions(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db), _owned: Project = Depends(get_owned_project)):
     extractions = session.scalars(
         select(Extraction).where(Extraction.project_id == project_id).order_by(Extraction.created_at.desc())
     )
@@ -2312,6 +2321,7 @@ def extract_upload(
     upload_id: str,
     user: AppUser = Depends(require_write_user),
     session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
 ):
     upload = session.scalar(select(Upload).where(Upload.id == upload_id, Upload.project_id == project_id))
     if not upload:
@@ -2363,8 +2373,8 @@ def dart_import(
     payload: dict = Body(default={}),
     user: AppUser = Depends(require_write_user),
     session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
 ):
-    get_project_or_404(session, project_id)
 
     rows, issues, metadata = fetch_dart_statement_rows(payload, REFERENCE.aliases)
     rows, ai_classification = attach_ai_classification(rows, session)
@@ -2433,8 +2443,8 @@ def dart_reports(
     payload: dict = Body(default={}),
     user: AppUser = Depends(require_write_user),
     session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
 ):
-    get_project_or_404(session, project_id)
     reports, issues, metadata = fetch_dart_available_reports(payload)
     return {"reports": reports, "issues": issues, "metadata": metadata}
 
@@ -2448,6 +2458,7 @@ def accept_extraction(
     payload: AcceptExtractionRequest | None = None,
     user: AppUser = Depends(require_write_user),
     session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
 ):
     ai_decisions = payload.ai_decisions if payload else None
     project = session.get(Project, project_id)
@@ -2517,6 +2528,7 @@ def add_statements(
     payload: StatementsAddRequest,
     user: AppUser = Depends(require_write_user),
     session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
 ):
     raw_rows = parse_statement_rows(payload.model_dump())
     # 수동 입력도 파일/DART 경로와 동일하게 추출(extraction)로 만들어, 미분류 계정에
@@ -2528,7 +2540,6 @@ def add_statements(
     status = "needs_review" if raw_rows else "failed"
     now = utc_now()
 
-    get_project_or_404(session, project_id)
     upload = Upload(
         id=str(uuid.uuid4()),
         project_id=project_id,
@@ -2581,13 +2592,13 @@ def classify_statement(
     payload: ClassifyStatementRequest,
     user: AppUser = Depends(require_write_user),
     session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
 ):
     """반영된 계정 행을 담당자가 표준계정으로 재분류한다.
 
     검토 요약의 '미분류(X9999)' 오류 항목이 유도하는 행동. 재분류 전/후가 감사 로그에 남아
     'AI 제안 → 사람 확정'과 같은 원칙(분류 확정 권한은 사람, 과정은 기록)을 따른다.
     """
-    get_project_or_404(session, project_id)
     statement = session.get(Statement, statement_id)
     if not statement or statement.project_id != project_id:
         raise HTTPException(404, {"error": "계정 행을 찾지 못했습니다."})
@@ -2636,8 +2647,7 @@ def classify_statement(
 
 
 @app.post("/api/projects/{project_id}/validate")
-def validate_project(project_id: str, user: AppUser = Depends(require_write_user), session: Session = Depends(get_db)):
-    project = get_project_or_404(session, project_id)
+def validate_project(project_id: str, user: AppUser = Depends(require_write_user), session: Session = Depends(get_db), project: Project = Depends(get_owned_project)):
     statements = [row_to_dict(s) for s in session.scalars(select(Statement).where(Statement.project_id == project_id))]
     result = validate_statement_records(row_to_dict(project), statements)
     log_event(session, project_id, "validation.completed", result)
@@ -2653,12 +2663,12 @@ def policy_comparison(
     payload: ConvertRequest,
     user: AppUser = Depends(require_user),
     session: Session = Depends(get_db),
+    project: Project = Depends(get_owned_project),
 ):
     """선택가능 회계정책(원가/재평가, 원가/공정가치, 자산차감/이연수익)의 영향 비교.
 
     결정론 계산기를 선택지별 입력으로 재실행하는 조회성 산출 — 저장·확정 없음(읽기 전용도 허용).
     """
-    project = get_project_or_404(session, project_id)
     statements = load_project_statements(session, project_id)
     return compare_policy_scenarios(row_to_dict(project), statements, payload.responses or {}, REFERENCE)
 
@@ -2669,9 +2679,9 @@ def convert_project(
     payload: ConvertRequest,
     user: AppUser = Depends(require_write_user),
     session: Session = Depends(get_db),
+    project_row: Project = Depends(get_owned_project),
 ):
     responses = payload.responses or {}
-    project_row = get_project_or_404(session, project_id)
     project = row_to_dict(project_row)
     statement_rows = load_project_statements(session, project_id)
     output = generate_conversion(project, statement_rows, responses, REFERENCE)
@@ -2681,7 +2691,7 @@ def convert_project(
     for jitem in output["judgment_items"]:
         query = f"{jitem.get('account', '')} {jitem.get('basis', '')}".strip()
         paras = semantic_search_paragraphs(session, query, k=5) if query else []
-        paras = select_supplementary_paragraphs(paras, jitem.get("standards_paragraphs"))
+        paras = select_supplementary_paragraphs(paras)
         retrieved_context.append(
             {
                 "account": jitem.get("account"),
@@ -2726,8 +2736,7 @@ def convert_project(
 
 
 @app.get("/api/projects/{project_id}/review-summary")
-def review_summary(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
-    project = get_project_or_404(session, project_id)
+def review_summary(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db), project: Project = Depends(get_owned_project)):
     statements = sort_statements_by_code([
         row_to_dict(statement)
         for statement in session.scalars(select(Statement).where(Statement.project_id == project_id))
@@ -2746,13 +2755,13 @@ def record_review(
     payload: ReviewRequest,
     user: AppUser = Depends(require_write_user),
     session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
 ):
     if payload.decision not in {"approved", "changes_requested"}:
         raise HTTPException(400, {"error": "Decision must be approved or changes_requested."})
 
     reviewer_name = payload.reviewer_name.strip() or "Unassigned reviewer"
     memo = payload.memo.strip()
-    get_project_or_404(session, project_id)
     conversion = session.scalar(
         select(Conversion).where(Conversion.project_id == project_id).order_by(Conversion.created_at.desc()).limit(1)
     )
@@ -2796,7 +2805,7 @@ def record_review(
 
 
 @app.get("/api/projects/{project_id}/audit")
-def list_audit(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db)):
+def list_audit(project_id: str, user: AppUser = Depends(require_user), session: Session = Depends(get_db), _owned: Project = Depends(get_owned_project)):
     logs = session.scalars(
         select(AuditLog).where(AuditLog.project_id == project_id).order_by(AuditLog.created_at.desc())
     )
@@ -2811,6 +2820,7 @@ def export_project(
     export_name: str,
     user: AppUser = Depends(require_user),
     session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
 ):
     project = session.get(Project, project_id)
     if not project:
