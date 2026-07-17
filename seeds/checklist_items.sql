@@ -52,6 +52,9 @@ VALUES
   ('compound_fx_or_adjustable', 'compound_instrument', 'fx_or_adjustable', '외화표시이거나 전환가격 조정(리픽싱) 조항이 있는가?', 'boolean', '', false, 3),
   ('derivative_instrument_type', 'derivative', 'instrument_type', '파생상품 유형(선도/스왑/옵션/내재파생 등)', 'text', '', true, 1),
   ('derivative_hedge_designated', 'derivative', 'hedge_designated', '위험회피관계로 공식 지정·문서화되어 있는가?', 'boolean', '', true, 2),
+  ('inventory_cost_method', 'inventory', 'cost_method', '원가결정방법', 'choice', '선입선출법/가중평균법/후입선출법/개별법', true, 1),
+  ('inventory_fifo_restated_amount', 'inventory', 'fifo_restated_amount', '후입선출법 적용 시 선입선출·가중평균 재계산 금액', 'number', '', false, 2),
+  ('inventory_normal_capacity', 'inventory', 'normal_capacity_applied', '고정제조간접비를 정상조업도 기준으로 배부했는가?', 'boolean', '', false, 3),
   ('other_management_memo', 'other', 'management_memo', '경영진 분류 메모', 'text', '', true, 1)
 ON CONFLICT (id) DO UPDATE SET
   account_key = excluded.account_key,

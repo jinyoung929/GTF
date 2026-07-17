@@ -18,7 +18,7 @@ def utc_now() -> str:
 # "계산기가 요구하는 이 키들이 실제로 DB 기준정보에 존재하는가"를 검사해 SQL 시드 편집 실수를
 # 조용한 오류(예: 조정액이 0으로 나옴)가 아니라 즉시 실패로 드러낸다.
 CALC_ACCOUNT_KEYS = frozenset({
-    "lease", "development", "revenue", "financial_instrument", "receivables",
+    "lease", "development", "revenue", "financial_instrument", "receivables", "inventory",
     "provision", "retirement_benefit", "ppe", "investment_property",
     "deferred_tax_asset", "government_grant", "borrowing_cost",
     "goodwill", "preferred_shares", "held_for_sale",
@@ -26,6 +26,7 @@ CALC_ACCOUNT_KEYS = frozenset({
 })
 CALC_CHECKLIST_KEYS = {
     "lease": {"lease_term_months", "monthly_payment", "discount_rate"},
+    "inventory": {"cost_method", "fifo_restated_amount", "normal_capacity_applied"},
     "development": {"technical_feasibility", "intention_to_complete", "probable_future_benefits", "reliable_measurement"},
     "revenue": {"recognition_timing"},
     "provision": {"present_obligation", "probable_outflow", "reliable_estimate"},
@@ -414,6 +415,30 @@ def generate_conversion(
                     "statement_line_item": "리스부채 (유동성 구분 검토)",
                     "presentation_basis": "리스부채는 사용권자산과 별도로 부채에 표시합니다.",
                 }
+        elif account_key == "inventory":
+            method = str(checklist_response.get("cost_method") or "")
+            restated = float(checklist_response.get("fifo_restated_amount") or 0)
+            book = float(item["amount"])
+            if "후입선출" in method:
+                if restated > 0:
+                    entry["adjustment"] = round(restated - book, 2)
+                    entry["calculation"] = (
+                        f"K-IFRS 제1002호 문단 25는 후입선출법을 허용하지 않습니다. 재계산액 {restated:,.0f} − "
+                        f"장부금액 {book:,.0f} = {restated - book:,.0f}을 조정하며, 비교표시 기간도 함께 재작성해야 합니다."
+                    )
+                else:
+                    entry["calculation"] = (
+                        "후입선출법을 적용 중입니다. K-IFRS 제1002호 문단 25상 허용되지 않으므로 "
+                        "선입선출법 또는 가중평균법 재계산액을 입력해야 조정액을 산출할 수 있습니다."
+                    )
+            else:
+                entry["calculation"] = (
+                    f"원가결정방법 '{method or '미입력'}'은 K-IFRS에서 허용됩니다. 원가와 순실현가능가치 비교를 검토하세요."
+                )
+                if checklist_response.get("normal_capacity_applied") is False:
+                    entry["calculation"] += (
+                        " 고정제조간접비를 정상조업도 기준으로 배부하지 않았다면 배부액 재계산이 필요합니다(비정상 원가는 비용 처리)."
+                    )
         elif account_key == "development":
             criteria = ["technical_feasibility", "intention_to_complete", "probable_future_benefits", "reliable_measurement"]
             qualifies = all(checklist_response.get(key) is True for key in criteria)

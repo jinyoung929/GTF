@@ -439,6 +439,32 @@ class TestKifrsDifferenceAreas(unittest.TestCase):
         self.assertEqual(e["adjustment"], 0)
         self.assertIn("요건", e["calculation"])
 
+    # --- 재고자산 (K-IFRS 1002 문단 25: 후입선출법 금지) ---
+
+    def test_inventory_lifo_restatement(self):
+        # 후입선출 장부 800 → 선입선출 재계산 950이면 조정 +150
+        e = self._entry("재고자산", 800, {"cost_method": "후입선출법", "fifo_restated_amount": 950})
+        self.assertEqual(e["standard_code"], "A1200")
+        self.assertEqual(e["adjustment"], 150)
+        self.assertIn("문단 25", e["calculation"])
+        self.assertIn("비교표시", e["calculation"])  # 비교연도 재작성 안내
+
+    def test_inventory_lifo_without_restated_amount_requests_input(self):
+        e = self._entry("재고자산", 800, {"cost_method": "후입선출법"})
+        self.assertEqual(e["adjustment"], 0)  # 재계산액 없이는 조정 산출 불가
+        self.assertIn("재계산액", e["calculation"])
+
+    def test_inventory_allowed_method_has_no_adjustment(self):
+        e = self._entry("재고자산", 800, {"cost_method": "선입선출법", "normal_capacity_applied": True})
+        self.assertEqual(e["adjustment"], 0)
+        self.assertIn("허용", e["calculation"])
+        self.assertNotIn("정상조업도 기준으로 배부하지 않았다면", e["calculation"])
+
+    def test_inventory_abnormal_capacity_allocation_is_flagged(self):
+        e = self._entry("재고자산", 800, {"cost_method": "가중평균법", "normal_capacity_applied": False})
+        self.assertEqual(e["adjustment"], 0)
+        self.assertIn("정상조업도", e["calculation"])
+
     # --- 전문가 검토 영역 (복합금융상품·파생상품): 도구는 식별까지만, 조정액 계산 없음 ---
 
     def test_compound_instrument_flags_derivative_liability_risk(self):
