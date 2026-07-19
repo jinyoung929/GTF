@@ -389,18 +389,21 @@ class TestKifrsDifferenceAreas(unittest.TestCase):
 
     # --- 영업권 (K-IFRS 1103·1036: 상각 금지, 매년 손상검사) ---
 
-    def test_goodwill_amortization_restored(self):
-        # K-GAAP 상각 후 장부 900, 당기 상각비 100 → 환입 +100
-        e = self._entry("영업권", 900, {"amortization_expense": 100, "impairment_indicator": False})
+    def test_goodwill_accumulated_amortization_restored(self):
+        # K-GAAP 장부 700(취득 1,000 − 누적상각 300). 최초채택 시 누적 300 전액 소급 환입 → +300
+        # (당기분만 환입하던 옛 버그면 여기서 100 같은 부분값이 나온다)
+        e = self._entry("영업권", 700, {"accumulated_amortization": 300, "impairment_indicator": False})
         self.assertEqual(e["standard_code"], "A3200")
-        self.assertEqual(e["adjustment"], 100)
-        self.assertIn("환입", e["calculation"])
+        self.assertEqual(e["adjustment"], 300)               # 누적 전액 환입 → 취득원가 1,000 복원
+        self.assertIn("취득원가", e["calculation"])
 
     def test_goodwill_impairment_overrides_restoration(self):
-        # 환입 후 1,000 > 회수가능액 800 → 조정 = 800 − 900 = −100
-        e = self._entry("영업권", 900, {"amortization_expense": 100, "impairment_indicator": True, "recoverable_amount": 800})
-        self.assertEqual(e["adjustment"], -100)
+        # 장부 700 → 누적 300 소급 환입한 취득원가 1,000 → 회수가능액 800으로 손상.
+        # 최종 K-IFRS 장부 = 회수가능액 800, 조정 = 800 − 700 = +100 (환입 300 > 손상 200이라 순증가)
+        e = self._entry("영업권", 700, {"accumulated_amortization": 300, "impairment_indicator": True, "recoverable_amount": 800})
+        self.assertEqual(e["adjustment"], 100)
         self.assertIn("손상차손", e["calculation"])
+        self.assertIn("200", e["calculation"])  # 손상차손 = 취득원가 1,000 − 회수가능액 800
 
     def test_goodwill_no_inputs_no_adjustment(self):
         e = self._entry("영업권", 900, {})

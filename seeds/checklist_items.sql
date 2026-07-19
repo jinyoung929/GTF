@@ -39,7 +39,7 @@ VALUES
   ('borrowing_cost_expenditure', 'borrowing_cost', 'expenditure', '적격자산에 대한 평균 지출액', 'number', '', false, 2),
   ('borrowing_cost_capitalization_rate', 'borrowing_cost', 'capitalization_rate', '자본화이자율(%)', 'number', '', false, 3),
   ('borrowing_cost_capitalization_months', 'borrowing_cost', 'capitalization_months', '자본화 기간(개월)', 'number', '', false, 4),
-  ('goodwill_amortization_expense', 'goodwill', 'amortization_expense', '당기 영업권 상각비(K-GAAP)', 'number', '', true, 1),
+  ('goodwill_accumulated_amortization', 'goodwill', 'accumulated_amortization', '전환일까지 누적 영업권 상각비(K-GAAP)', 'number', '', true, 1),
   ('goodwill_impairment_indicator', 'goodwill', 'impairment_indicator', '손상 징후가 있는가?', 'boolean', '', true, 2),
   ('goodwill_recoverable_amount', 'goodwill', 'recoverable_amount', '회수가능액(손상 징후가 있는 경우)', 'number', '', false, 3),
   ('preferred_shares_mandatory_redemption', 'preferred_shares', 'mandatory_redemption', '의무상환 조항 또는 보유자의 상환청구권이 있는가?', 'boolean', '', true, 1),

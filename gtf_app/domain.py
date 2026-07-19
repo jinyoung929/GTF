@@ -36,7 +36,7 @@ CALC_CHECKLIST_KEYS = {
     "deferred_tax_asset": {"temporary_difference", "tax_rate", "realizable"},
     "government_grant": {"grant_relation", "presentation_method"},
     "borrowing_cost": {"qualifying_asset", "expenditure", "capitalization_rate", "capitalization_months"},
-    "goodwill": {"amortization_expense", "impairment_indicator", "recoverable_amount"},
+    "goodwill": {"accumulated_amortization", "impairment_indicator", "recoverable_amount"},
     "preferred_shares": {"mandatory_redemption"},
     "held_for_sale": {"plan_committed", "sale_probable_12m", "fair_value_less_costs"},
     "compound_instrument": {"cash_settlement_possible"},
@@ -534,25 +534,27 @@ def generate_conversion(
             else:
                 entry["calculation"] = "적격자산이 아니므로 차입원가를 발생 기간의 비용으로 인식합니다(자본화 대상 아님)."
         elif account_key == "goodwill":
-            amortization = float(checklist_response.get("amortization_expense") or 0)
+            # 최초채택(제1101호)은 전환일까지 인식한 상각을 전부 소급 환입해 취득원가로 복원한다.
+            # 당기 상각비만 되돌리면 과거 누적분이 누락되므로 '누적 상각비'를 입력받는다.
+            accumulated = float(checklist_response.get("accumulated_amortization") or 0)
             recoverable = float(checklist_response.get("recoverable_amount") or 0)
             book = float(item["amount"])
-            restored = book + amortization  # 상각 환입 후 장부금액
+            restored = book + accumulated  # 누적 상각 소급 환입 후 장부금액 = 취득원가
             impaired = checklist_response.get("impairment_indicator") is True and 0 < recoverable < restored
             if impaired:
                 entry["adjustment"] = round(recoverable - book, 2)
                 entry["calculation"] = (
-                    f"상각비 {amortization:,.0f} 환입 후 장부금액 {restored:,.0f} > 회수가능액 {recoverable:,.0f} → "
+                    f"누적 상각비 {accumulated:,.0f}을 소급 환입한 취득원가 {restored:,.0f} > 회수가능액 {recoverable:,.0f} → "
                     f"손상차손 {restored - recoverable:,.0f}을 인식합니다. K-IFRS는 영업권을 상각하지 않고 매년 손상검사하며, 영업권 손상차손은 환입할 수 없습니다."
                 )
-            elif amortization > 0:
-                entry["adjustment"] = round(amortization, 2)
+            elif accumulated > 0:
+                entry["adjustment"] = round(accumulated, 2)
                 entry["calculation"] = (
-                    f"K-GAAP 영업권 상각비 {amortization:,.0f}을 환입합니다. "
+                    f"K-GAAP 누적 영업권 상각비 {accumulated:,.0f}을 소급 환입해 취득원가 {restored:,.0f}으로 복원합니다. "
                     "K-IFRS 제1103호는 영업권 상각을 금지하며 제1036호에 따라 매년 손상검사를 수행합니다."
                 )
             else:
-                entry["calculation"] = "당기 상각비가 없어 금액 조정은 없습니다. 매년 손상검사 수행 여부를 확인하세요."
+                entry["calculation"] = "누적 상각비가 없어 금액 조정은 없습니다. 매년 손상검사 수행 여부를 확인하세요."
         elif account_key == "preferred_shares":
             if checklist_response.get("mandatory_redemption") is True:
                 entry["target_account"] = "상환우선주부채(금융부채)"
