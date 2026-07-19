@@ -91,6 +91,15 @@ export type StandardsParagraph = {
   paragraph_label: string;
   title: string;
   content: string;
+  retrieval?: "semantic" | "keyword" | "none";
+  similarity?: number | null;
+};
+
+export type StandardsSearchResult = {
+  count: number;
+  retrieval: string;
+  paragraphs: StandardsParagraph[];
+  note: string;
 };
 
 export type Conversion = {

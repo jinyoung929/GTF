@@ -21,7 +21,7 @@ import { api, download } from "./api";
 import { classNames, fmtKRW } from "./format";
 import { LoginScreen } from "./screens/LoginScreen";
 import { ProjectDashboard } from "./screens/ProjectDashboard";
-import type { AccountOption, AiDecision, AuditLog, Conversion, ConversionEntry, FocusTarget, ImportTab, PolicyComparison, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, Statement, SummaryAction, UploadRow, UserInfo } from "./types";
+import type { AccountOption, AiDecision, AuditLog, Conversion, ConversionEntry, FocusTarget, ImportTab, PolicyComparison, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, StandardsSearchResult, Statement, SummaryAction, UploadRow, UserInfo } from "./types";
 import { HeaderCell, Pill, SectionLabel, StatusBadge } from "./ui";
 
 type DartReportOption = {
@@ -747,6 +747,23 @@ function ReviewScreen({
     }
   }
 
+  // 검토자 직접 기준서 검색: 검토 중 궁금한 내용을 검토자가 직접 질의한다.
+  // pgvector 코사인 검색만 사용하고 AI(생성)는 개입하지 않는다 — 검토자가 원문을 직접 확인.
+  const [searchQ, setSearchQ] = useState("");
+  const [searchResult, setSearchResult] = useState<StandardsSearchResult | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  async function searchStandards() {
+    const q = searchQ.trim();
+    if (!q) return;
+    setSearching(true);
+    try {
+      setSearchResult(await api<StandardsSearchResult>(`/api/standards/search?q=${encodeURIComponent(q)}`));
+    } finally {
+      setSearching(false);
+    }
+  }
+
   // 선택가능 회계정책의 영향 비교: 결정론 계산기를 선택지별로 재실행하는 조회성 산출.
   async function comparePolicies() {
     setComparing(true);
@@ -829,6 +846,53 @@ function ReviewScreen({
                 </div>
                 <p className="text-[11px] text-[#677089] mt-1.5">운용리스처럼 원본 재무제표에 행이 없는 판단 계정을 검토자가 추가합니다. 추가하면 아래에 체크리스트가 생기고, 변환 시 조정이 계산됩니다.</p>
               </div>
+
+              <div className="border border-[#D0D5E0]">
+                <div className="px-4 py-2.5 bg-[#F8FAFC] border-b border-[#D0D5E0]">
+                  <span className="text-xs font-bold text-[#0A1628]">기준서 직접 검색</span>
+                  <span className="text-[11px] text-[#677089] ml-2">검토 중 궁금한 내용을 직접 검색하세요 (AI 없이 문단만 찾아줍니다)</span>
+                </div>
+                <div className="p-4">
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={searchQ}
+                      onChange={(event) => setSearchQ(event.target.value)}
+                      onKeyDown={(event) => { if (event.key === "Enter") searchStandards(); }}
+                      placeholder="예: 변동리스료 처리, 리스기간 연장선택권"
+                      className="flex-1 px-3 py-2 text-sm border border-[#D0D5E0] bg-white"
+                    />
+                    <button
+                      disabled={!searchQ.trim() || searching}
+                      onClick={searchStandards}
+                      className="px-4 py-2 text-xs font-bold bg-[#1740BE] disabled:bg-[#C8D0DC] text-white whitespace-nowrap"
+                    >
+                      {searching ? "검색 중..." : "기준서 검색"}
+                    </button>
+                  </div>
+                  {searchResult && (
+                    <div className="mt-3 space-y-2">
+                      {searchResult.paragraphs.length === 0 && (
+                        <div className="text-xs text-[#677089] py-2">검색 결과가 없습니다.</div>
+                      )}
+                      {searchResult.paragraphs.map((para, index) => (
+                        <div key={index} className="border border-[#EEF0F5] p-3">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className={classNames("px-1.5 py-0.5 text-[10px] font-bold rounded", para.standard_set === "K-IFRS" ? "bg-[#EFF4FF] text-[#1740BE]" : "bg-amber-50 text-amber-800")}>{para.standard_set}</span>
+                            <span className="text-xs font-bold text-[#0A1628]">{para.reference_code}</span>
+                            <span className="text-[11px] text-[#677089]">{para.paragraph_label}</span>
+                            {typeof para.similarity === "number" && (
+                              <span className="text-[10px] text-[#9CA3AF] ml-auto">유사도 {(para.similarity).toFixed(2)}</span>
+                            )}
+                          </div>
+                          <p className="text-xs text-[#374151] leading-relaxed">{para.content}</p>
+                        </div>
+                      ))}
+                      <p className="text-[11px] text-[#9CA3AF]">{searchResult.note}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {judgmentStatements.map((statement) => (
                 <div
                   key={statement.id}
