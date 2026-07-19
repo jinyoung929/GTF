@@ -155,6 +155,44 @@ class ApiAuthTests(unittest.TestCase):
         events = {log["event_type"] for log in logs}
         self.assertIn("statement.reclassified", events)
 
+    def test_add_judgment_account_creates_blank_row_and_calculates(self):
+        # 원본에 없는 판단 계정(리스)을 검토자가 소환하면, 판단 행이 생기고 체크리스트로
+        # 입력받아 변환 시 결정론 계산기가 조정을 산출한다. 억지 탐지 없이 신규 인식.
+        os.environ["ADMIN_EMAIL"] = "admin@example.com"
+        os.environ["ADMIN_PASSWORD"] = "write-pass"
+        with server.get_session() as session:
+            server.ensure_admin_user(session)
+        self.login(email="admin@example.com", password="write-pass")
+        project = self.client.post("/api/projects", json={"company_name": "신규인식", "period": "2024"}).json()
+
+        added = self.client.post(
+            f"/api/projects/{project['id']}/statements/judgment",
+            json={"account_key": "lease", "amount": 0},
+        )
+        self.assertEqual(added.status_code, 201)
+        row = added.json()
+        self.assertEqual(row["standard_code"], "A2100")
+        self.assertEqual(row["mapping_type"], "judgment")
+        self.assertIn("신규 인식", row["account_name"])
+
+        # 단순 매핑 계정·미분류는 신규 추가 불가
+        rejected = self.client.post(
+            f"/api/projects/{project['id']}/statements/judgment",
+            json={"account_key": "cash"},
+        )
+        self.assertEqual(rejected.status_code, 400)
+
+        # 체크리스트 입력 → 변환 시 리스 현재가치 조정이 산출된다
+        conversion = self.client.post(
+            f"/api/projects/{project['id']}/convert",
+            json={"responses": {row["id"]: {"lease_term_months": 12, "monthly_payment": 1000000, "discount_rate": 0}}},
+        ).json()
+        lease_entry = next(e for e in conversion["entries"] if e["standard_code"] == "A2100")
+        self.assertEqual(lease_entry["adjustment"], 12000000)  # 할인율 0 → 12개월 × 100만
+
+        logs = self.client.get(f"/api/projects/{project['id']}/audit").json()
+        self.assertIn("statement.judgment_added", {log["event_type"] for log in logs})
+
 
 
     def test_schema_comes_from_orm_models_and_admin_is_seeded(self):

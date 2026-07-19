@@ -122,7 +122,7 @@ export type ReviewAttentionItem = {
   statement_id?: string;
 };
 
-export type AccountOption = { account_key: string; standard_code: string; internal_label: string };
+export type AccountOption = { account_key: string; standard_code: string; internal_label: string; mapping_type?: "simple" | "judgment" };
 
 export type FocusTarget = { kind: SummaryAction; statementId?: string; seq: number };
 

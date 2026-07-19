@@ -1956,6 +1956,11 @@ class ClassifyStatementRequest(BaseModel):
     account_key: str = ""
 
 
+class AddJudgmentAccountRequest(BaseModel):
+    account_key: str = ""
+    amount: float = 0.0
+
+
 class ReviewRequest(BaseModel):
     decision: str = ""
     reviewer_name: str = ""
@@ -2640,6 +2645,58 @@ def classify_statement(
             "before": before,
             "after": {"standard_code": account["code"], "normalized_account": account["label"]},
         },
+        actor=user.email,
+    )
+    session.commit()
+    return row_to_dict(statement)
+
+
+@app.post("/api/projects/{project_id}/statements/judgment", status_code=201)
+def add_judgment_account(
+    project_id: str,
+    payload: AddJudgmentAccountRequest,
+    user: AppUser = Depends(require_write_user),
+    session: Session = Depends(get_db),
+    _owned: Project = Depends(get_owned_project),
+):
+    """원본 재무제표에 행이 없는 판단 계정을 빈 상태로 추가한다(순수 신규 인식).
+
+    운용리스처럼 K-GAAP 본문에 숫자가 없는 계정은 계정 데이터만 받는 흐름으로는 시작할
+    입구가 없다. 검토자가 판단 계정 카탈로그에서 골라 추가하면 해당 체크리스트가 뜨고,
+    변환 시 기존 결정론 계산기가 그대로 조정을 산출한다(리스 PV, 복구충당부채 등).
+    억지 탐지 대신 '사람이 인지→입력, 시스템은 계산·근거'라는 경계를 지킨다.
+
+    주의: 이미 본문에 있는 계정을 분리해야 하는 경우(전환사채 등)는 이 경로가 아니라
+    기존 행 재분류로 처리한다. 이 엔드포인트는 '원본에 없던 계정의 신규 추가'만 담당한다.
+    """
+    account_key = payload.account_key.strip()
+    account = REFERENCE.accounts.get(account_key)
+    if not account or account_key in {"other", "out_of_scope"} or account["type"] != "judgment":
+        raise HTTPException(400, {"error": "판단이 필요한 표준계정만 신규 추가할 수 있습니다."})
+    project = session.get(Project, project_id)
+    checklist = REFERENCE.checklists.get(account_key, [])
+    statement = Statement(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        account_name=f"[신규 인식] {account['label']}",
+        normalized_account=account["label"],
+        standard_code=account["code"],
+        amount=float(payload.amount),
+        period=project.period,
+        mapping_type="judgment",
+        rule_summary=f"[신규 인식] 원본에 없어 검토자가 추가한 판단 계정입니다. {account['rule']}",
+        checklist_json=json.dumps(checklist, ensure_ascii=False),
+        created_at=utc_now(),
+    )
+    session.add(statement)
+    if project.status == "draft":
+        project.status = "mapped"
+    project.updated_at = utc_now()
+    log_event(
+        session,
+        project_id,
+        "statement.judgment_added",
+        {"statement_id": statement.id, "account_key": account_key, "label": account["label"], "amount": float(payload.amount)},
         actor=user.email,
     )
     session.commit()

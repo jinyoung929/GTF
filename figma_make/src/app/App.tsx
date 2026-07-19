@@ -707,6 +707,8 @@ function ReviewScreen({
   onExport,
   focusTarget,
   onSummaryAction,
+  accountOptions,
+  onReload,
 }: {
   bundle: ProjectBundle;
   tab: ReviewTab;
@@ -715,6 +717,8 @@ function ReviewScreen({
   onExport: (name: string) => void;
   focusTarget?: FocusTarget | null;
   onSummaryAction: (action: SummaryAction, statementId?: string) => void;
+  accountOptions: AccountOption[];
+  onReload: () => Promise<void>;
 }) {
   const [responses, setResponses] = useState<Record<string, Record<string, unknown>>>({});
   const [busy, setBusy] = useState(false);
@@ -722,6 +726,26 @@ function ReviewScreen({
   const [comparing, setComparing] = useState(false);
   const judgmentStatements = bundle.statements.filter((statement) => statement.mapping_type === "judgment");
   const entries = bundle.conversion?.entries || [];
+
+  // 원본에 없는 판단 계정(운용리스·복구충당부채 등) 신규 추가용 상태.
+  const judgmentAccounts = accountOptions.filter((account) => account.mapping_type === "judgment");
+  const [addKey, setAddKey] = useState("");
+  const [adding, setAdding] = useState(false);
+
+  async function addJudgmentAccount() {
+    if (!addKey) return;
+    setAdding(true);
+    try {
+      await api(`/api/projects/${bundle.project.id}/statements/judgment`, {
+        method: "POST",
+        body: JSON.stringify({ account_key: addKey, amount: 0 }),
+      });
+      setAddKey("");
+      await onReload();
+    } finally {
+      setAdding(false);
+    }
+  }
 
   // 선택가능 회계정책의 영향 비교: 결정론 계산기를 선택지별로 재실행하는 조회성 산출.
   async function comparePolicies() {
@@ -781,6 +805,30 @@ function ReviewScreen({
         <div className="p-5">
           {tab === "checklist" && (
             <div className="space-y-4">
+              <div className="border border-dashed border-[#C7CDD8] bg-[#F8FAFC] px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <select
+                    value={addKey}
+                    onChange={(event) => setAddKey(event.target.value)}
+                    className="flex-1 px-3 py-2 text-sm border border-[#D0D5E0] bg-white"
+                  >
+                    <option value="">판단 계정 선택 (원본에 없는 계정 추가)</option>
+                    {judgmentAccounts.map((account) => (
+                      <option key={account.account_key} value={account.account_key}>
+                        {account.internal_label} ({account.standard_code})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    disabled={!addKey || adding}
+                    onClick={addJudgmentAccount}
+                    className="px-4 py-2 text-xs font-bold bg-[#1740BE] disabled:bg-[#C8D0DC] text-white whitespace-nowrap"
+                  >
+                    {adding ? "추가 중..." : "판단 계정 추가"}
+                  </button>
+                </div>
+                <p className="text-[11px] text-[#677089] mt-1.5">운용리스처럼 원본 재무제표에 행이 없는 판단 계정을 검토자가 추가합니다. 추가하면 아래에 체크리스트가 생기고, 변환 시 조정이 계산됩니다.</p>
+              </div>
               {judgmentStatements.map((statement) => (
                 <div
                   key={statement.id}
@@ -1380,6 +1428,8 @@ export default function App() {
             onExport={(name) => download(`/api/projects/${liveBundle.project.id}/exports/${name}`)}
             focusTarget={focusTarget}
             onSummaryAction={summaryAction}
+            accountOptions={accountOptions}
+            onReload={refreshBundle}
           />
         )}
       </ProjectLayout>
