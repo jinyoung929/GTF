@@ -556,7 +556,7 @@ def seed_demo_sample_project(session: Session) -> None:
     session.execute(delete(Project).where(Project.id == SAMPLE_PROJECT_ID))
     session.flush()
 
-    period = "2024"
+    period = "2025"
     project = Project(
         id=SAMPLE_PROJECT_ID, owner_user_id=owner_id, is_test=False,
         company_name="(주)가온제조 (샘플)", source_standard="K-GAAP", target_standard="IFRS",
@@ -598,9 +598,23 @@ def seed_demo_sample_project(session: Session) -> None:
         by_code["A2100"]: {"lease_term_months": 36, "monthly_payment": 20_000_000, "discount_rate": 5},
     }
     output = generate_conversion(row_to_dict(project), records, responses, REFERENCE)
-    output["ai_assistance"] = {"provider": "openai", "status": "skipped", "items": [],
-                               "overall_note": "샘플 데이터 — 판단 보조는 실제 검토 시 생성됩니다.",
-                               "human_review_required": True}
+    # 샘플에도 실제 AI 판단 보조를 채운다. 단, 부팅을 붙잡거나 깨뜨리면 안 되므로
+    # 판단 항목마다 기준서 문단을 검색해 컨텍스트로 주고, 호출이 실패하면(키 없음 등)
+    # 조용히 skipped 안내로 대체한다.
+    try:
+        retrieved = []
+        for jitem in output["judgment_items"]:
+            q = f"{jitem.get('account', '')} {jitem.get('basis', '')}".strip()
+            paras = select_supplementary_paragraphs(semantic_search_paragraphs(session, q, k=5)) if q else []
+            retrieved.append({"account": jitem.get("account"), "paragraphs": [
+                {"standard_set": p.get("standard_set"), "reference_code": p.get("reference_code"),
+                 "title": p.get("title"), "content": p.get("content")} for p in paras]})
+        assistance = call_ai_judgment(row_to_dict(project), output["entries"], output["judgment_items"], retrieved)
+    except Exception:
+        assistance = None
+    output["ai_assistance"] = assistance if assistance and assistance.get("status") == "ok" else {
+        "provider": "openai", "status": "skipped", "items": [],
+        "overall_note": "샘플 데이터 — 판단 보조는 실제 검토 시 생성됩니다.", "human_review_required": True}
     session.add(Conversion(id=str(uuid.uuid4()), project_id=SAMPLE_PROJECT_ID,
                            output_json=json.dumps(output, ensure_ascii=False), created_at=utc_now()))
     session.add(Review(id=str(uuid.uuid4()), project_id=SAMPLE_PROJECT_ID, reviewer_name="김검토 (샘플 검토자)",
