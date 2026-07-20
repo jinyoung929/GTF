@@ -392,6 +392,7 @@ def init_db() -> None:
         ensure_admin_user(session)
         session.commit()
         refresh_reference_cache(session)  # 기준정보 캐시 채우기 + 계약 검증(실패 시 시작 중단)
+        seed_demo_sample_project(session)  # 데모 계정용 대표 샘플(캐시 준비 후)
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -532,6 +533,84 @@ def ensure_demo_user(session: Session) -> dict | None:
         session.add(user)
     session.commit()
     return row_to_dict(user)
+
+
+SAMPLE_PROJECT_ID = "sample-gtf"
+
+
+def seed_demo_sample_project(session: Session) -> None:
+    """데모 계정 소유의 대표 샘플 프로젝트를 승인 완료 상태까지 채워 시드한다.
+
+    데모 계정은 읽기 전용이라 직접 프로젝트를 만들 수 없으므로, 방문자가 로그인하자마자
+    변환 초안·검토 근거·전환조정요약·승인 이력이 모두 채워진 프로젝트를 볼 수 있도록 한다.
+    부팅마다 최신 정의로 재생성한다(자식 행을 지우고 결정론 변환을 다시 계산). REFERENCE
+    캐시가 준비된 뒤(refresh_reference_cache 이후) 호출해야 한다.
+    """
+    demo = ensure_demo_user(session)
+    if not demo:
+        return  # 데모 로그인이 꺼져 있으면 샘플도 두지 않는다
+    owner_id = demo["id"]
+
+    for model in (Review, Conversion, Statement, AuditLog):
+        session.execute(delete(model).where(model.project_id == SAMPLE_PROJECT_ID))
+    session.execute(delete(Project).where(Project.id == SAMPLE_PROJECT_ID))
+    session.flush()
+
+    period = "2024"
+    project = Project(
+        id=SAMPLE_PROJECT_ID, owner_user_id=owner_id, is_test=False,
+        company_name="(주)가온제조 (샘플)", source_standard="K-GAAP", target_standard="IFRS",
+        period=period, status="approved", created_at=utc_now(), updated_at=utc_now(),
+    )
+    session.add(project)
+    session.flush()  # audit_logs·자식 행의 project_id 외래키가 유효하도록 먼저 반영
+
+    # 자산 4,000 = 부채 1,200 + 자본 2,800 (단위: 백만원)으로 균형을 맞춘 비상장 제조사.
+    rows = [
+        {"account_name": "현금및현금성자산", "amount": 1_200_000_000},
+        {"account_name": "재고자산", "amount": 600_000_000},
+        {"account_name": "개발비", "amount": 300_000_000},
+        {"account_name": "영업권", "amount": 500_000_000},
+        {"account_name": "유형자산", "amount": 1_400_000_000},
+        {"account_name": "리스", "amount": 0},
+        {"account_name": "외상매입금", "amount": 700_000_000},
+        {"account_name": "미지급금", "amount": 500_000_000},
+        {"account_name": "자본금", "amount": 1_500_000_000},
+        {"account_name": "이익잉여금", "amount": 1_300_000_000},
+    ]
+    records = [build_statement_record(period, row, REFERENCE) for row in rows]
+    for record in records:
+        session.add(Statement(
+            id=record["id"], project_id=SAMPLE_PROJECT_ID, account_name=record["account_name"],
+            normalized_account=record["normalized_account"], standard_code=record["standard_code"],
+            amount=record["amount"], period=period, mapping_type=record["mapping_type"],
+            rule_summary=record["rule_summary"],
+            checklist_json=json.dumps(record["checklist"], ensure_ascii=False), created_at=utc_now(),
+        ))
+
+    by_code = {r["standard_code"]: r["id"] for r in records}
+    responses = {
+        by_code["A1200"]: {"cost_method": "후입선출법", "fifo_restated_amount": 680_000_000},
+        by_code["A3100"]: {"technical_feasibility": True, "intention_to_complete": True,
+                           "probable_future_benefits": True, "reliable_measurement": True},
+        by_code["A3200"]: {"accumulated_amortization": 200_000_000, "impairment_indicator": False},
+        by_code["A1500"]: {"measurement_model": "원가모형"},
+        by_code["A2100"]: {"lease_term_months": 36, "monthly_payment": 20_000_000, "discount_rate": 5},
+    }
+    output = generate_conversion(row_to_dict(project), records, responses, REFERENCE)
+    output["ai_assistance"] = {"provider": "openai", "status": "skipped", "items": [],
+                               "overall_note": "샘플 데이터 — 판단 보조는 실제 검토 시 생성됩니다.",
+                               "human_review_required": True}
+    session.add(Conversion(id=str(uuid.uuid4()), project_id=SAMPLE_PROJECT_ID,
+                           output_json=json.dumps(output, ensure_ascii=False), created_at=utc_now()))
+    session.add(Review(id=str(uuid.uuid4()), project_id=SAMPLE_PROJECT_ID, reviewer_name="김검토 (샘플 검토자)",
+                       decision="approved", memo="계정 매핑·조정 근거·전환조정요약을 확인하고 승인합니다.",
+                       created_at=utc_now()))
+    log_event(session, SAMPLE_PROJECT_ID, "conversion.generated",
+              {"entry_count": len(output["entries"])}, actor="demo@gtf.local")
+    log_event(session, SAMPLE_PROJECT_ID, "review.approved",
+              {"decision": "approved", "reviewer_name": "김검토 (샘플 검토자)"}, actor="demo@gtf.local")
+    session.commit()
 
 
 def run_seed(session: Session, name: str) -> None:
