@@ -407,5 +407,45 @@ class AiSuggestionHumanAcceptanceTest(unittest.TestCase):
         self.assertIsNone(record["ai_suggestion"])
 
 
+class CitationVerificationTest(unittest.TestCase):
+    """AI 인용 재검증: DB에 없는 기준서 인용은 채택하지 않거나(분류) 표시한다(판단보조)."""
+
+    def _fake_openai(self, items):
+        client = mock.Mock()
+        client.responses.create.return_value = mock.Mock(
+            output_text=json.dumps({"items": items}, ensure_ascii=False)
+        )
+        client.embeddings.create.return_value = mock.Mock(data=[])
+        return client
+
+    def test_classification_drops_reference_not_in_db(self):
+        items = [{
+            "account_name": "권리금", "suggested_account_key": "financial_instrument",
+            "confidence": "medium", "rationale": "-",
+            "basis_reference": "K-IFRS 제9999호 가공기준",  # DB에 존재하지 않는 인용
+            "alternative_account_key": "", "alternative_rejected_reason": "",
+        }]
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
+            with mock.patch.object(server, "OpenAI", return_value=self._fake_openai(items)):
+                result = server.call_ai_classification(["권리금"], paragraph_session())
+        self.assertEqual(result["suggestions"]["권리금"]["basis_reference"], "")
+
+    def test_judgment_flags_citation_missing_from_db(self):
+        known = server.known_reference_codes(paragraph_session())
+        items = [{"account": "리스", "classification_hint": "-", "review_note": "-", "additional_questions": [],
+                  "basis_summary": "K-IFRS 제1116호 문단 22에 따라 인식하며 제9999호도 참고한다."}]
+        issues = server.flag_unverified_citations(items, known)
+        self.assertEqual(items[0]["unverified_citations"], ["제9999호"])
+        self.assertTrue(issues and "제9999호" in issues[0])
+
+    def test_judgment_accepts_citations_present_in_db(self):
+        known = server.known_reference_codes(paragraph_session())
+        items = [{"account": "리스", "classification_hint": "-", "review_note": "-", "additional_questions": [],
+                  "basis_summary": "K-IFRS 제1116호 문단 22와 일반기업회계기준 제13장을 근거로 한다."}]
+        issues = server.flag_unverified_citations(items, known)
+        self.assertFalse(issues)
+        self.assertNotIn("unverified_citations", items[0])
+
+
 if __name__ == "__main__":
     unittest.main()

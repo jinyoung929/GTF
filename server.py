@@ -551,7 +551,7 @@ def seed_demo_sample_project(session: Session) -> None:
         return  # 데모 로그인이 꺼져 있으면 샘플도 두지 않는다
     owner_id = demo["id"]
 
-    for model in (Review, Conversion, Statement, AuditLog):
+    for model in (Review, Conversion, Statement, Extraction, Upload, AuditLog):
         session.execute(delete(model).where(model.project_id == SAMPLE_PROJECT_ID))
     session.execute(delete(Project).where(Project.id == SAMPLE_PROJECT_ID))
     session.flush()
@@ -588,6 +588,37 @@ def seed_demo_sample_project(session: Session) -> None:
             checklist_json=json.dumps(record["checklist"], ensure_ascii=False), created_at=utc_now(),
         ))
 
+    # 샘플 추출: 미분류 계정(권리금)의 AI 1차 분류 제안 흐름을 데모 방문자가 볼 수 있게 한다.
+    # OPENAI 키가 있으면 실제 제안이 붙고, 없으면 수동 분류 안내만 남는다(운영과 동일한 폴백).
+    upload = Upload(
+        id=str(uuid.uuid4()), project_id=SAMPLE_PROJECT_ID, original_name="샘플_시산표.csv",
+        stored_name="", content_type="text/csv", size_bytes=0, file_bytes=None,
+        extraction_status="needs_review", created_at=utc_now(),
+    )
+    session.add(upload)
+    session.flush()  # extractions.upload_id 외래키가 유효하도록 업로드 행을 먼저 반영
+    raw_rows = [
+        {"account_name": "권리금", "amount": 80_000_000},
+        {"account_name": "임차보증금", "amount": 50_000_000},
+    ]
+    try:
+        raw_rows, ai_classification = attach_ai_classification(raw_rows, session)
+    except Exception:
+        ai_classification = {"status": "failed", "note": ""}
+    extraction_issues = (
+        [ai_classification["note"]]
+        if ai_classification.get("status") != "skipped" and ai_classification.get("note")
+        else []
+    )
+    session.add(Extraction(
+        id=str(uuid.uuid4()), project_id=SAMPLE_PROJECT_ID, upload_id=upload.id, provider="sample_csv",
+        status="needs_review", rows_json=json.dumps(raw_rows, ensure_ascii=False),
+        issues_json=json.dumps(extraction_issues, ensure_ascii=False), created_at=utc_now(),
+    ))
+    log_event(session, SAMPLE_PROJECT_ID, "source.extracted",
+              {"provider": "sample_csv", "row_count": len(raw_rows), "ai_status": ai_classification.get("status")},
+              actor="demo@gtf.local")
+
     by_code = {r["standard_code"]: r["id"] for r in records}
     responses = {
         by_code["A1200"]: {"cost_method": "후입선출법", "fifo_restated_amount": 680_000_000},
@@ -612,7 +643,7 @@ def seed_demo_sample_project(session: Session) -> None:
         assistance = call_ai_judgment(row_to_dict(project), output["entries"], output["judgment_items"], retrieved)
     except Exception:
         assistance = None
-    output["ai_assistance"] = assistance if assistance and assistance.get("status") == "ok" else {
+    output["ai_assistance"] = assistance if assistance and assistance.get("status") == "connected" else {
         "provider": "openai", "status": "skipped", "items": [],
         "overall_note": "샘플 데이터 — 판단 보조는 실제 검토 시 생성됩니다.", "human_review_required": True}
     session.add(Conversion(id=str(uuid.uuid4()), project_id=SAMPLE_PROJECT_ID,
@@ -1333,6 +1364,51 @@ def semantic_search_paragraphs(
     return results
 
 
+# AI 응답의 기준서 인용 재검증: 접지(grounding) 지시는 프롬프트 문장일 뿐 강제가 아니므로,
+# 응답을 받은 뒤 인용이 실제 DB 문단을 가리키는지 코드로 확인한다 (환각 인용 차단).
+CITATION_TOKEN_RE = re.compile(r"제\s*\d+\s*[호장]")
+
+
+def known_reference_codes(session: Session | None = None) -> set[str]:
+    """DB(없으면 REFERENCE 캐시)에 실제로 존재하는 기준서 문단 reference_code 집합."""
+    if session is not None:
+        return {str(code) for code in session.scalars(select(StandardsParagraph.reference_code).distinct())}
+    return {str(p.get("reference_code") or "") for paras in REFERENCE.paragraphs.values() for p in paras}
+
+
+def _citation_tokens(text) -> set[str]:
+    """텍스트에서 기준서 번호 토큰('제1116호', '제13장')을 뽑는다 (공백 무시)."""
+    return {re.sub(r"\s+", "", token) for token in CITATION_TOKEN_RE.findall(str(text or ""))}
+
+
+def flag_unverified_citations(items: list[dict], known_codes: set[str]) -> list[str]:
+    """판단 보조 항목이 DB에 없는 기준서 번호를 인용하면 항목에 표시하고 경고를 돌려준다.
+
+    basis_summary 등은 자유 문장이라 인용을 문자열 일치로 막을 수 없으므로,
+    기준서 번호 토큰 수준에서 DB 문단과 대조한다. 검증 실패 항목은 버리는 대신
+    unverified_citations로 표시해 검토자가 원문을 직접 확인하게 한다.
+    """
+    if not known_codes:
+        return []  # 대조할 문단이 없으면(빈 DB) 검증을 건너뛴다
+    allowed_tokens = set()
+    for code in known_codes:
+        allowed_tokens |= _citation_tokens(code)
+    issues = []
+    for item in items:
+        cited = set()
+        for field in ("classification_hint", "review_note", "basis_summary"):
+            cited |= _citation_tokens(item.get(field))
+        for question in item.get("additional_questions") or []:
+            cited |= _citation_tokens(question)
+        unknown = sorted(cited - allowed_tokens)
+        if unknown:
+            item["unverified_citations"] = unknown
+            issues.append(
+                f"'{item.get('account', '-')}' 항목이 DB에 없는 기준서를 인용했습니다: {', '.join(unknown)} — 원문 확인이 필요합니다."
+            )
+    return issues
+
+
 def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[dict], retrieved_context: list[dict] | None = None) -> dict:
     config = ai_config()
     if not judgment_items:
@@ -1395,6 +1471,8 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
     }
     payload = {
         "model": config["model"],
+        # 근거 기반 분류·요약 작업이라 표현 다양성보다 재현성이 중요하다 — 같은 입력에 같은 답.
+        "temperature": 0,
         # 판단항목이 10개 이상일 수 있어 항목당 근거가 잘리지 않도록 넉넉히 잡는다.
         "max_output_tokens": 3000,
         "instructions": (
@@ -1521,6 +1599,7 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
         }
 
     items = parsed.get("items") if isinstance(parsed.get("items"), list) else []
+    citation_issues = flag_unverified_citations(items, known_reference_codes())
     retrieval_mode = "none"
     if retrieved_context:
         modes = {p.get("retrieval") for ctx in retrieved_context for p in ctx.get("paragraphs", [])}
@@ -1531,6 +1610,7 @@ def call_ai_judgment(project: dict, entries: list[dict], judgment_items: list[di
         "status": "connected",
         "items": items,
         "overall_note": str(parsed.get("overall_note") or "사람 검토와 승인이 필요합니다."),
+        "issues": citation_issues,
         "retrieved_context": retrieved_context or [],
         "retrieval_mode": retrieval_mode,
         "human_review_required": True,
@@ -1589,6 +1669,8 @@ def call_ai_classification(unmapped_accounts: list[str], session: Session | None
     }
     payload = {
         "model": config["model"],
+        # 후보 중 최적 하나를 고르는 분류 작업 — 다양성이 아니라 일관성이 필요해 온도를 0으로 고정.
+        "temperature": 0,
         "max_output_tokens": 2000,
         "instructions": (
             "너는 K-GAAP 재무제표 계정을 내부 표준계정으로 분류하는 회계 보조자다. "
@@ -1669,18 +1751,22 @@ def call_ai_classification(unmapped_accounts: list[str], session: Session | None
         parsed = {}
     items = parsed.get("items") if isinstance(parsed.get("items"), list) else []
     suggestions = {}
+    known_codes = known_reference_codes(session)
     for item in items:
         name = str(item.get("account_name") or "").strip()
         suggested_key = str(item.get("suggested_account_key") or "").strip()
         if not name or suggested_key not in REFERENCE.accounts or suggested_key == "other":
             continue
         alternative_key = str(item.get("alternative_account_key") or "").strip()
+        basis_reference = str(item.get("basis_reference") or "").strip()
+        if basis_reference and known_codes and basis_reference not in known_codes:
+            basis_reference = ""  # DB에 없는 문단 인용은 채택하지 않는다 (환각 인용 차단)
         suggestions[name] = {
             "account_key": suggested_key,
             "label": REFERENCE.accounts[suggested_key]["label"],
             "confidence": str(item.get("confidence") or "unknown"),
             "rationale": str(item.get("rationale") or "").strip(),
-            "basis_reference": str(item.get("basis_reference") or "").strip(),
+            "basis_reference": basis_reference,
             "alternative_label": REFERENCE.accounts[alternative_key]["label"] if alternative_key in REFERENCE.accounts else "",
             "alternative_rejected_reason": str(item.get("alternative_rejected_reason") or "").strip(),
             "provider": "openai",
@@ -1987,8 +2073,17 @@ def require_write_user(user: AppUser = Depends(require_user)) -> AppUser:
     return user
 
 
-def set_session_cookie(response: Response, token: str) -> None:
-    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_MAX_AGE_SECONDS, path="/", httponly=True, samesite="lax")
+def request_is_https(request: Request) -> bool:
+    """프록시(X-Forwarded-Proto) 뒤를 포함해 이 요청이 HTTPS로 도달했는지 판단한다."""
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    scheme = forwarded.split(",")[0].strip() if forwarded else request.url.scheme
+    return (scheme or "").lower() == "https"
+
+
+def set_session_cookie(response: Response, token: str, secure: bool) -> None:
+    # HTTPS로 발급된 세션 쿠키에는 Secure를 붙여 평문 HTTP 재전송을 차단한다.
+    # 로컬 http://127.0.0.1 개발에서는 Secure를 빼야 브라우저가 쿠키를 저장한다.
+    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_MAX_AGE_SECONDS, path="/", httponly=True, samesite="lax", secure=secure)
 
 
 def get_project_or_404(session: Session, project_id: str, owner_user_id: str | None = None) -> Project:
@@ -2103,7 +2198,7 @@ def auth_session(user: AppUser | None = Depends(current_user)):
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest, response: Response, session: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, response: Response, session: Session = Depends(get_db)):
     email = normalize_email(payload.email)
     if not email or not payload.password:
         raise HTTPException(400, {"error": "이메일과 비밀번호를 입력하세요."})
@@ -2114,18 +2209,18 @@ def login(payload: LoginRequest, response: Response, session: Session = Depends(
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(401, {"error": "이메일 또는 비밀번호가 올바르지 않습니다."})
     token = create_login_session(session, user.id)
-    set_session_cookie(response, token)
+    set_session_cookie(response, token, secure=request_is_https(request))
     return {"authenticated": True, "user": user_public_dict(row_to_dict(user))}
 
 
 @app.post("/api/auth/demo")
-def demo_login(response: Response, session: Session = Depends(get_db)):
+def demo_login(request: Request, response: Response, session: Session = Depends(get_db)):
     ensure_admin_user(session)
     user = ensure_demo_user(session)
     if not user:
         raise HTTPException(403, {"error": "데모 로그인이 비활성화되어 있습니다."})
     token = create_login_session(session, user["id"])
-    set_session_cookie(response, token)
+    set_session_cookie(response, token, secure=request_is_https(request))
     return {"authenticated": True, "user": user_public_dict(user), "demo": True}
 
 

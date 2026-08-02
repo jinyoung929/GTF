@@ -25,13 +25,13 @@ CALC_ACCOUNT_KEYS = frozenset({
     "compound_instrument", "derivative",
 })
 CALC_CHECKLIST_KEYS = {
-    "lease": {"lease_term_months", "monthly_payment", "discount_rate"},
-    "inventory": {"cost_method", "fifo_restated_amount", "normal_capacity_applied"},
+    "lease": {"lease_term_months", "monthly_payment", "discount_rate", "recognition_exemption_elected"},
+    "inventory": {"cost_method", "new_cost_method", "fifo_restated_amount", "normal_capacity_applied"},
     "development": {"technical_feasibility", "intention_to_complete", "probable_future_benefits", "reliable_measurement"},
     "revenue": {"recognition_timing"},
     "provision": {"present_obligation", "probable_outflow", "reliable_estimate"},
-    "retirement_benefit": {"dbo_amount", "plan_assets"},
-    "ppe": {"measurement_model", "fair_value", "recoverable_amount"},
+    "retirement_benefit": {"plan_type", "dbo_amount", "plan_assets"},
+    "ppe": {"kgaap_measurement_model", "measurement_model", "fair_value", "recoverable_amount"},
     "investment_property": {"measurement_model", "fair_value"},
     "deferred_tax_asset": {"temporary_difference", "tax_rate", "realizable"},
     "government_grant": {"grant_relation", "presentation_method"},
@@ -388,7 +388,23 @@ def generate_conversion(
             months = float(checklist_response.get("lease_term_months") or 0)
             payment = float(checklist_response.get("monthly_payment") or 0)
             discount_rate = float(checklist_response.get("discount_rate") or 0) / 100 / 12
-            if months > 0 and payment > 0:
+            if checklist_response.get("recognition_exemption_elected") is True:
+                # 단기·소액자산 리스 인식면제(제1116호 문단 5·8)는 자동 적용 규칙이 아니라 회사의
+                # 선택이므로, 계산기가 기간으로 판정하지 않고 체크리스트 선택을 따른다.
+                book = float(item["amount"])
+                if book:
+                    # K-GAAP 금융리스 등으로 이미 계상된 장부금액이 있으면 비용 처리로 가면서 제거해야 한다.
+                    entry["adjustment"] = round(-book, 2)
+                    entry["calculation"] = (
+                        f"인식면제를 선택하여 K-GAAP에 계상된 리스 관련 장부금액 {book:,.0f}을 제거하고 "
+                        "리스료를 리스기간에 걸쳐 정액 비용으로 인식합니다 (K-IFRS 제1116호 문단 5·8)."
+                    )
+                else:
+                    entry["calculation"] = (
+                        "단기리스·소액자산 리스 인식면제를 선택하여 사용권자산·리스부채를 인식하지 않고 "
+                        "리스료를 리스기간에 걸쳐 정액 비용으로 인식합니다 (K-IFRS 제1116호 문단 5·8)."
+                    )
+            elif months > 0 and payment > 0:
                 if discount_rate > 0:
                     pv = payment * (1 - (1 + discount_rate) ** (-months)) / discount_rate
                 else:
@@ -398,6 +414,11 @@ def generate_conversion(
                     "리스료 현재가치에서 K-GAAP 장부금액을 차감해 사용권자산 조정액을 산출했습니다. "
                     "수정소급법(제1116호 경과규정)에 따라 사용권자산은 리스부채와 동액으로 인식합니다."
                 )
+                if months <= 12:
+                    # 12개월 이하는 코드가 판별 가능한 사실이므로 힌트를 항상 남긴다 — 면제 선택 자체는 사람이 한다.
+                    entry["calculation"] += (
+                        " 리스기간이 12개월 이하로 단기리스 인식면제(문단 5) 대상일 수 있으니 면제 선택 여부를 확인하세요."
+                    )
                 # 수정소급법: 사용권자산 = 리스부채 → 같은 현재가치로 부채 쪽 분개를 쌍으로 생성.
                 # L2150은 표시 순서 도출용 코드(부채 구역)이며 별도 계정 시드는 필요 없다.
                 paired_entry = {
@@ -419,17 +440,19 @@ def generate_conversion(
             method = str(checklist_response.get("cost_method") or "")
             restated = float(checklist_response.get("fifo_restated_amount") or 0)
             book = float(item["amount"])
+            new_method = str(checklist_response.get("new_cost_method") or "")
             if "후입선출" in method:
                 if restated > 0:
                     entry["adjustment"] = round(restated - book, 2)
                     entry["calculation"] = (
-                        f"K-IFRS 제1002호 문단 25는 후입선출법을 허용하지 않습니다. 재계산액 {restated:,.0f} − "
+                        f"K-IFRS 제1002호 문단 25는 후입선출법을 허용하지 않습니다. 전환 후 정책 "
+                        f"'{new_method or '선입선출·가중평균'}' 기준 재계산액 {restated:,.0f} − "
                         f"장부금액 {book:,.0f} = {restated - book:,.0f}을 조정하며, 비교표시 기간도 함께 재작성해야 합니다."
                     )
                 else:
                     entry["calculation"] = (
-                        "후입선출법을 적용 중입니다. K-IFRS 제1002호 문단 25상 허용되지 않으므로 "
-                        "선입선출법 또는 가중평균법 재계산액을 입력해야 조정액을 산출할 수 있습니다."
+                        "기존 정책이 후입선출법입니다. K-IFRS 제1002호 문단 25상 허용되지 않으므로 "
+                        "전환 후 원가결정방법을 선택하고 그 기준의 재계산액을 입력해야 조정액을 산출할 수 있습니다."
                     )
             else:
                 entry["calculation"] = (
@@ -442,8 +465,17 @@ def generate_conversion(
         elif account_key == "development":
             criteria = ["technical_feasibility", "intention_to_complete", "probable_future_benefits", "reliable_measurement"]
             qualifies = all(checklist_response.get(key) is True for key in criteria)
+            # 명시적 '아니오'가 있을 때만 자산 제거 조정을 만든다 — 미응답 상태에서 지우면 안 된다.
+            explicitly_failed = any(checklist_response.get(key) is False for key in criteria)
             entry["target_account"] = "무형자산" if qualifies else "연구개발비(비용)"
-            entry["calculation"] = "K-IFRS 제1038호 개발단계 자산화 요건 충족 여부를 검토했습니다."
+            book = float(item["amount"])
+            if explicitly_failed and book:
+                entry["adjustment"] = round(-book, 2)
+                entry["calculation"] = (
+                    f"자산화 요건 미충족으로 K-GAAP 계상 개발비 {book:,.0f}을 제거하고 비용으로 처리합니다 (K-IFRS 제1038호)."
+                )
+            else:
+                entry["calculation"] = "K-IFRS 제1038호 개발단계 자산화 요건 충족 여부를 검토했습니다."
         elif account_key == "revenue":
             timing = checklist_response.get("recognition_timing") or "추가 검토 필요"
             entry["calculation"] = f"수익인식 시점을 '{timing}'로 문서화했습니다."
@@ -454,11 +486,40 @@ def generate_conversion(
                 checklist_response.get(key) is True
                 for key in ["present_obligation", "probable_outflow", "reliable_estimate"]
             )
-            entry["calculation"] = "충당부채 인식요건을 충족했습니다." if recognized else "충당부채 인식요건이 완전하지 않아 공시 또는 추가 검토가 필요합니다."
+            explicitly_failed = any(
+                checklist_response.get(key) is False
+                for key in ["present_obligation", "probable_outflow", "reliable_estimate"]
+            )
+            book = float(item["amount"])
+            if recognized:
+                entry["calculation"] = "충당부채 인식요건을 충족했습니다."
+            elif explicitly_failed and book:
+                # 요건 미충족이 명시됐고 K-GAAP에 계상돼 있으면 부채 제거 조정을 만든다.
+                entry["adjustment"] = round(-book, 2)
+                entry["calculation"] = (
+                    f"인식요건이 충족되지 않아 K-GAAP 계상 충당부채 {book:,.0f}을 제거합니다. "
+                    "우발부채로서 주석 공시 대상인지 검토하세요 (K-IFRS 제1037호)."
+                )
+            else:
+                entry["calculation"] = "충당부채 인식요건이 충족되지 않아 부채로 인식할 수 없습니다. 우발부채로서 주석 공시 대상인지 검토하세요 (K-IFRS 제1037호)."
         elif account_key == "retirement_benefit":
+            plan_type = str(checklist_response.get("plan_type") or "")
             dbo = float(checklist_response.get("dbo_amount") or 0)
             plan_assets = float(checklist_response.get("plan_assets") or 0)
-            if dbo > 0:
+            if "확정기여형" in plan_type:
+                # DC형은 납부 부담금이 곧 당기 비용이라 미래 채무 추정(보험수리적 평가)이 필요 없고,
+                # K-GAAP과 회계처리 차이도 없어 전환 조정 대상이 아니다. 입력된 DBO가 있어도 계산하지 않는다.
+                entry["calculation"] = (
+                    "확정기여형(DC) 제도는 당기 납부 부담금을 비용으로 인식하며 보험수리적 평가가 필요 없습니다. "
+                    "K-GAAP과 회계처리 차이가 없어 전환 조정이 없습니다 (K-IFRS 제1019호)."
+                )
+                book = float(item["amount"])
+                if book:
+                    # 미납부담금 부채는 DC에서도 정당하게 남을 수 있어 자동 제거하지 않고 확인만 요구한다.
+                    entry["calculation"] += (
+                        f" 다만 계상된 장부금액 {book:,.0f}이 미납부담금 성격인지 확인하세요."
+                    )
+            elif dbo > 0:
                 net_liability = dbo - plan_assets
                 entry["adjustment"] = round(net_liability - float(item["amount"]), 2)
                 entry["calculation"] = (
@@ -467,10 +528,19 @@ def generate_conversion(
                 )
         elif account_key == "ppe":
             model = str(checklist_response.get("measurement_model") or "")
+            kgaap_model = str(checklist_response.get("kgaap_measurement_model") or "")
             book = float(item["amount"])
             fair_value = float(checklist_response.get("fair_value") or 0)
             recoverable = float(checklist_response.get("recoverable_amount") or 0)
-            if "재평가" in model and fair_value > 0:
+            if "간주원가" in model and fair_value > 0:
+                # 최초채택 특례(제1101호): 전환일 공정가치를 간주원가로 한 번만 반영하고 이후 원가모형.
+                # 재평가모형과 달리 매년 재평가 의무가 없고, 전환 조정은 이익잉여금으로 간다.
+                entry["adjustment"] = round(fair_value - book, 2)
+                entry["calculation"] = (
+                    f"최초채택 간주원가 특례(K-IFRS 제1101호): 전환일 공정가치 {fair_value:,.0f}을 간주원가로 보아 "
+                    f"{fair_value - book:,.0f}을 이익잉여금으로 조정하고, 이후에는 원가모형을 적용합니다."
+                )
+            elif "재평가" in model and fair_value > 0:
                 entry["adjustment"] = round(fair_value - book, 2)
                 direction = "증가분은 재평가잉여금(OCI)" if fair_value >= book else "감소분은 당기손익"
                 entry["calculation"] = (
@@ -483,6 +553,13 @@ def generate_conversion(
                 )
             else:
                 entry["calculation"] = "원가모형 유지 또는 손상 징후 없음. 표시 라인만 매핑합니다."
+            if kgaap_model and model:
+                # 기존 정책 대비 유지/변경을 산출물에 명시 — 정책 변경은 감사 관점의 중요 사실이다.
+                entry["calculation"] += (
+                    " 기존 K-GAAP 정책을 유지합니다."
+                    if kgaap_model == model
+                    else f" 기존 K-GAAP 정책({kgaap_model})에서 변경 — 동일 분류 전체에 일관 적용해야 합니다."
+                )
         elif account_key == "investment_property":
             model = str(checklist_response.get("measurement_model") or "")
             fair_value = float(checklist_response.get("fair_value") or 0)
@@ -508,9 +585,18 @@ def generate_conversion(
                     )
                 else:
                     entry["target_account"] = "이연법인세자산(인식 제한)"
-                    entry["calculation"] = (
-                        f"산정 이연법인세자산 {dta:,.0f}이나 회수가능성이 높지 않아 인식을 제한합니다(미래 과세소득 검토 필요)."
-                    )
+                    book = float(item["amount"])
+                    if book:
+                        # 회수가능성이 없으면 K-GAAP에 계상돼 있던 자산도 제거해야 한다.
+                        entry["adjustment"] = round(-book, 2)
+                        entry["calculation"] = (
+                            f"산정 이연법인세자산 {dta:,.0f}이나 회수가능성이 높지 않아 인식을 제한하고, "
+                            f"K-GAAP 계상 장부금액 {book:,.0f}을 제거합니다(미래 과세소득 검토 필요)."
+                        )
+                    else:
+                        entry["calculation"] = (
+                            f"산정 이연법인세자산 {dta:,.0f}이나 회수가능성이 높지 않아 인식을 제한합니다(미래 과세소득 검토 필요)."
+                        )
         elif account_key == "government_grant":
             relation = str(checklist_response.get("grant_relation") or "미입력")
             method = str(checklist_response.get("presentation_method") or "미결정")
@@ -532,7 +618,10 @@ def generate_conversion(
                     "적격자산 원가에 가산하고 동액을 금융원가에서 차감합니다."
                 )
             else:
-                entry["calculation"] = "적격자산이 아니므로 차입원가를 발생 기간의 비용으로 인식합니다(자본화 대상 아님)."
+                entry["calculation"] = (
+                    "적격자산이 아니므로 차입원가를 발생 기간의 비용으로 인식합니다(자본화 대상 아님). "
+                    "K-GAAP에서 자본화를 선택했던 금액이 있다면 비용으로 환원하는 조정을 별도로 검토하세요."
+                )
         elif account_key == "goodwill":
             # 최초채택(제1101호)은 전환일까지 인식한 상각을 전부 소급 환입해 취득원가로 복원한다.
             # 당기 상각비만 되돌리면 과거 누적분이 누락되므로 '누적 상각비'를 입력받는다.

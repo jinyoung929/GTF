@@ -189,11 +189,13 @@ class TestDevelopmentCapitalization(unittest.TestCase):
         _, entry = convert_single("개발비", 30_000_000, "judgment",
                                   response=partial)
         self.assertEqual(entry["target_account"], "연구개발비(비용)")
+        self.assertEqual(entry["adjustment"], -30_000_000)  # 명시적 미충족 → 계상 자산 제거
 
     def test_none_criteria_defaults_to_expense(self):
-        # 체크리스트 미입력(빈 응답)이면 자산화 요건 불충족 → 비용
+        # 체크리스트 미입력(빈 응답)이면 표시상 비용이되, 명시적 '아니오'가 없으니 제거 조정은 안 만든다
         _, entry = convert_single("개발비", 30_000_000, "judgment", response={})
         self.assertEqual(entry["target_account"], "연구개발비(비용)")
+        self.assertEqual(entry["adjustment"], 0)
 
     def test_truthy_but_not_true_does_not_qualify(self):
         # `is True` 엄격 비교이므로 "true"/1 같은 truthy 값은 자산화 안 됨
@@ -228,7 +230,7 @@ class TestProvisionRecognition(unittest.TestCase):
                 "reliable_estimate": True,
             },
         )
-        self.assertIn("추가 검토", entry["calculation"])
+        self.assertIn("우발부채", entry["calculation"])  # 미충족 시 우발부채 주석 공시 검토로 안내
 
 
 # ---------------------------------------------------------------------------
@@ -359,10 +361,12 @@ class TestKifrsDifferenceAreas(unittest.TestCase):
         e = self._entry("이연법인세자산", 80, {"temporary_difference": 500, "tax_rate": 22, "realizable": True})
         self.assertEqual(e["adjustment"], 30)
 
-    def test_deferred_tax_not_realizable_limits_recognition(self):
+    def test_deferred_tax_not_realizable_derecognizes_book(self):
+        # 회수가능성 없음 + K-GAAP 계상 80 → 자산 제거 조정 -80
         e = self._entry("이연법인세자산", 80, {"temporary_difference": 500, "tax_rate": 22, "realizable": False})
-        self.assertEqual(e["adjustment"], 0)
+        self.assertEqual(e["adjustment"], -80)
         self.assertIn("인식 제한", e["target_account"])
+        self.assertIn("제거", e["calculation"])
 
     def test_borrowing_cost_capitalization(self):
         # 지출 1,000 × 5% × 12/12 = 50
@@ -515,6 +519,101 @@ class TestKifrsDifferenceAreas(unittest.TestCase):
         undesignated = self._entry("이자율스왑", 0, {"hedge_designated": False})
         self.assertIn("당기손익", undesignated["calculation"])
         self.assertEqual(undesignated["adjustment"], 0)
+
+
+class TestRecognitionExceptions(unittest.TestCase):
+    """인식 예외 분기: 리스 인식면제(선택), 퇴직급여 DC형, 충당부채 미충족→우발부채."""
+
+    def test_lease_exemption_elected_skips_recognition(self):
+        # 면제를 선택하면 현재가치를 계산하지 않고 리스부채 쌍 분개도 만들지 않는다.
+        result, entry = convert_single(
+            "리스", 0, "judgment",
+            response={"lease_term_months": 6, "monthly_payment": 1_000_000,
+                      "discount_rate": 5, "recognition_exemption_elected": True},
+        )
+        self.assertEqual(entry["adjustment"], 0)
+        self.assertIn("인식면제", entry["calculation"])
+        self.assertEqual(len(result["entries"]), 1)  # 리스부채 쌍 없음
+
+    def test_lease_exemption_with_book_amount_derecognizes(self):
+        # K-GAAP 금융리스 등으로 장부금액이 있으면, 면제 선택 시 그 금액을 제거하는 조정이 생긴다.
+        result, entry = convert_single(
+            "리스", 5_000_000, "judgment",
+            response={"lease_term_months": 6, "monthly_payment": 1_000_000,
+                      "discount_rate": 5, "recognition_exemption_elected": True},
+        )
+        self.assertEqual(entry["adjustment"], -5_000_000)
+        self.assertIn("제거", entry["calculation"])
+        self.assertEqual(len(result["entries"]), 1)
+
+    def test_lease_short_term_hint_when_not_exempt(self):
+        # 12개월 이하는 코드가 판별해 힌트를 강제로 남긴다 — 계산은 정상 수행.
+        _, entry = convert_single(
+            "리스", 8_000_000, "judgment",
+            response={"lease_term_months": 12, "monthly_payment": 1_000_000, "discount_rate": 0},
+        )
+        self.assertEqual(entry["adjustment"], 4_000_000)
+        self.assertIn("인식면제", entry["calculation"])
+
+    def test_retirement_dc_plan_skips_actuarial_calc(self):
+        # 확정기여형은 DBO를 입력했어도 계산하지 않는다 — 전환 조정 대상이 아님.
+        _, entry = convert_single(
+            "퇴직급여충당부채", 700, "judgment",
+            response={"plan_type": "확정기여형(DC)", "dbo_amount": 1200, "plan_assets": 300},
+        )
+        self.assertEqual(entry["adjustment"], 0)
+        self.assertIn("확정기여형", entry["calculation"])
+        self.assertIn("미납부담금", entry["calculation"])  # 계상 장부금액은 자동 제거 대신 성격 확인 요구
+
+    def test_retirement_db_plan_still_calculates(self):
+        _, entry = convert_single(
+            "퇴직급여충당부채", 700, "judgment",
+            response={"plan_type": "확정급여형(DB)", "dbo_amount": 1200, "plan_assets": 300},
+        )
+        self.assertEqual(entry["adjustment"], 200)
+
+    def test_ppe_deemed_cost_adjusts_to_retained_earnings(self):
+        # 최초채택 간주원가 특례(1101호): 전환일 FV를 간주원가로 한 번만 반영, 이후 원가모형
+        _, entry = convert_single(
+            "유형자산", 400, "judgment",
+            response={"measurement_model": "간주원가(전환일 공정가치)", "fair_value": 500},
+        )
+        self.assertEqual(entry["adjustment"], 100)
+        self.assertIn("1101", entry["calculation"])
+        self.assertIn("이익잉여금", entry["calculation"])
+
+    def test_ppe_policy_change_note_from_kgaap(self):
+        _, entry = convert_single(
+            "유형자산", 1000, "judgment",
+            response={"kgaap_measurement_model": "원가모형", "measurement_model": "재평가모형", "fair_value": 1200},
+        )
+        self.assertEqual(entry["adjustment"], 200)
+        self.assertIn("변경", entry["calculation"])
+
+    def test_ppe_policy_kept_note_from_kgaap(self):
+        _, entry = convert_single(
+            "유형자산", 1000, "judgment",
+            response={"kgaap_measurement_model": "원가모형", "measurement_model": "원가모형"},
+        )
+        self.assertEqual(entry["adjustment"], 0)
+        self.assertIn("유지", entry["calculation"])
+
+    def test_inventory_new_policy_named_in_restatement(self):
+        # 기존 후입선출 → 새 정책(선입선출) 기준 재계산액으로 조정, 새 정책명이 근거에 남는다
+        _, entry = convert_single(
+            "재고자산", 500, "judgment",
+            response={"cost_method": "후입선출법", "new_cost_method": "선입선출법", "fifo_restated_amount": 560},
+        )
+        self.assertEqual(entry["adjustment"], 60)
+        self.assertIn("선입선출법", entry["calculation"])
+
+    def test_provision_not_met_points_to_contingent_liability(self):
+        _, entry = convert_single(
+            "충당부채", 100, "judgment",
+            response={"present_obligation": True, "probable_outflow": False, "reliable_estimate": True},
+        )
+        self.assertIn("우발부채", entry["calculation"])
+        self.assertEqual(entry["adjustment"], -100)  # 명시적 미충족 + 계상 → 부채 제거
 
 
 if __name__ == "__main__":

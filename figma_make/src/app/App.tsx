@@ -21,7 +21,7 @@ import { api, download } from "./api";
 import { classNames, fmtKRW } from "./format";
 import { LoginScreen } from "./screens/LoginScreen";
 import { ProjectDashboard } from "./screens/ProjectDashboard";
-import type { AccountOption, AiDecision, AuditLog, Conversion, ConversionEntry, FocusTarget, ImportTab, PolicyComparison, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, StandardsSearchResult, Statement, SummaryAction, UploadRow, UserInfo } from "./types";
+import type { AccountOption, AiDecision, AuditLog, ChecklistItem, Conversion, ConversionEntry, FocusTarget, ImportTab, PolicyComparison, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, StandardsSearchResult, Statement, SummaryAction, UploadRow, UserInfo } from "./types";
 import { HeaderCell, Pill, SectionLabel, StatusBadge } from "./ui";
 
 type DartReportOption = {
@@ -699,6 +699,47 @@ function MappingTable({
   );
 }
 
+// 체크리스트 조건부 표시: 선행 답변(트리거)에 따라 의미가 생기는 항목만 화면에 노출한다.
+// 계산기(domain.py)가 같은 조건으로 분기하므로, 숨겨진 항목은 계산에도 쓰이지 않는다.
+const DEPENDENT_FIELD_TRIGGERS: Record<string, string[]> = {
+  measurement_model: ["fair_value", "recoverable_amount"],
+  impairment_indicator: ["recoverable_amount"],
+  cost_method: ["new_cost_method", "fifo_restated_amount"],
+  qualifying_asset: ["expenditure", "capitalization_rate", "capitalization_months"],
+  plan_committed: ["fair_value_less_costs"],
+  sale_probable_12m: ["fair_value_less_costs"],
+  plan_type: ["dbo_amount", "plan_assets", "discount_rate"],
+  recognition_exemption_elected: ["discount_rate"],
+};
+
+function isChecklistFieldVisible(item: ChecklistItem, answers: Record<string, unknown>, siblingKeys: Set<string>): boolean {
+  switch (item.key) {
+    case "fair_value":
+      // 유형자산(재평가모형)·투자부동산(공정가치모형): 원가모형이 아닌 모형을 고른 뒤에만 필요
+      return typeof answers.measurement_model === "string" && answers.measurement_model !== "" && answers.measurement_model !== "원가모형";
+    case "recoverable_amount":
+      if (siblingKeys.has("impairment_indicator")) return answers.impairment_indicator === true; // 영업권: 손상 징후가 있을 때만
+      return answers.measurement_model === "원가모형"; // 유형자산: 원가모형 손상검토용
+    case "new_cost_method":
+    case "fifo_restated_amount":
+      return answers.cost_method === "후입선출법"; // 기존 정책이 후입선출일 때만 새 정책·재계산액 필요
+    case "expenditure":
+    case "capitalization_rate":
+    case "capitalization_months":
+      return answers.qualifying_asset === true;
+    case "fair_value_less_costs":
+      return answers.plan_committed === true && answers.sale_probable_12m === true;
+    case "dbo_amount":
+    case "plan_assets":
+      return answers.plan_type === "확정급여형(DB)"; // 확정기여형(DC)은 보험수리적 평가 자체가 불필요
+    case "discount_rate":
+      if (siblingKeys.has("plan_type")) return answers.plan_type === "확정급여형(DB)"; // 퇴직급여 할인율
+      return answers.recognition_exemption_elected !== true; // 리스: 인식면제 선택 시 현재가치 계산 없음
+    default:
+      return true;
+  }
+}
+
 function ReviewScreen({
   bundle,
   tab,
@@ -787,7 +828,12 @@ function ReviewScreen({
   }, [focusTarget?.seq, tab]);
 
   function setResponse(statementId: string, key: string, value: unknown) {
-    setResponses((current) => ({ ...current, [statementId]: { ...(current[statementId] || {}), [key]: value } }));
+    setResponses((current) => {
+      const next = { ...(current[statementId] || {}), [key]: value };
+      // 트리거 답변이 바뀌면 종속 항목 입력값을 비워, 숨겨진 낡은 값이 계산에 남지 않게 한다.
+      for (const dependent of DEPENDENT_FIELD_TRIGGERS[key] || []) delete next[dependent];
+      return { ...current, [statementId]: next };
+    });
   }
 
   async function convert() {
@@ -905,7 +951,7 @@ function ReviewScreen({
                     <span className="text-xs text-amber-800">{statement.rule_summary}</span>
                   </div>
                   <div className="grid grid-cols-2 gap-3 p-4">
-                    {statement.checklist.map((item) => (
+                    {statement.checklist.filter((item) => isChecklistFieldVisible(item, responses[statement.id] || {}, new Set(statement.checklist.map((entry) => entry.key)))).map((item) => (
                       <label key={item.key} className="block">
                         <span className="block text-xs font-bold text-[#677089] mb-1.5">{item.label}</span>
                         {item.type === "boolean" ? (
@@ -1070,6 +1116,9 @@ function Notes({ notes, ai, judgmentItems }: { notes: Conversion["draft_notes"];
       {ai && (
         <div className="border border-[#D0D5E0] p-4 bg-blue-50 text-xs text-blue-800">
           AI 판단 보조 {ai.status} · {ai.overall_note || "사람 검토 필요"}
+          {(ai.issues || []).map((issue, index) => (
+            <div key={index} className="mt-1.5 text-amber-800">⚠ {issue}</div>
+          ))}
         </div>
       )}
       {!notes.length && !itemsWithParagraphs.length && <div className="text-center py-10 text-xs text-[#677089]">주석 초안이 없습니다</div>}

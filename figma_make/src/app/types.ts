@@ -112,7 +112,7 @@ export type Conversion = {
     standards_paragraphs?: StandardsParagraph[];
   }>;
   draft_notes: Array<{ account: string; draft_note: string }>;
-  ai_assistance?: { status: string; overall_note?: string; items?: unknown[] };
+  ai_assistance?: { status: string; overall_note?: string; items?: unknown[]; issues?: string[] };
   review_status: string;
 };
 
