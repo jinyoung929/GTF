@@ -30,7 +30,8 @@ from gtf_app.domain import (  # noqa: E402
     UNSECTIONED_CODE_PREFIXES,
     _net_equity_effect,
     entry_debit_credit,
-    equity_counterpart_entry,
+    EQUITY_COUNTERPART_CODE,
+    build_journal,
     generate_conversion,
     journal_rows,
 )
@@ -113,23 +114,43 @@ class JournalBalanceTests(unittest.TestCase):
                 debit, credit = totals(journal_rows(conversion))
                 self.assertEqual(debit, credit, f"{name}: 차변 {debit:,.2f} ≠ 대변 {credit:,.2f}")
 
-    def test_counterpart_equals_net_equity_effect(self):
-        # 상계 행 금액은 전환조정 요약이 쓰는 순자산 영향과 같은 수여야 한다.
+    def test_equity_side_equals_net_equity_effect(self):
+        # 자본항목 행들의 순합은 전환조정 요약이 쓰는 순자산 영향과 같아야 한다.
         # 두 경로가 독립적으로 계산되므로 한쪽만 바뀌면 여기서 잡힌다.
         statements, responses = SCENARIOS["여러 계정 혼합"]
         conversion = generate_conversion(PROJECT, statements, responses, REF)
-        counterpart = conversion["equity_counterpart"]
-        self.assertIsNotNone(counterpart)
-        self.assertEqual(counterpart["adjustment"], round(_net_equity_effect(conversion["entries"]), 2))
-        self.assertEqual(counterpart["standard_code"], "E1200")  # 이익잉여금 (시드에 이미 존재)
-        self.assertEqual(counterpart["target_account"], "이익잉여금")
+        equity = [r for r in journal_rows(conversion) if r["standard_code"] == EQUITY_COUNTERPART_CODE]
+        self.assertTrue(equity)
+        net = round(sum((r["credit"] or 0) - (r["debit"] or 0) for r in equity), 2)
+        self.assertEqual(net, round(_net_equity_effect(conversion["entries"]), 2))
+        for line in equity:
+            self.assertEqual(line["target_account"], "자본항목")
 
     def test_counterpart_is_not_inside_entries(self):
         # 상계 행을 entries에 넣으면 자본 구역으로 다시 집계돼 순자산 영향이 이중 계상된다.
         statements, responses = SCENARIOS["여러 계정 혼합"]
         conversion = generate_conversion(PROJECT, statements, responses, REF)
-        self.assertNotIn("E1200", [e.get("standard_code") for e in conversion["entries"]])
-        self.assertEqual(len(journal_rows(conversion)), len(conversion["entries"]) + 1)
+        self.assertNotIn(EQUITY_COUNTERPART_CODE, [e.get("standard_code") for e in conversion["entries"]])
+
+    def test_each_journal_entry_balances_on_its_own(self):
+        # 개별 분개 단위로도 차·대가 맞아야 한다 — 전체 합계만 맞는 것으로는 부족하다.
+        statements, responses = SCENARIOS["여러 계정 혼합"]
+        conversion = generate_conversion(PROJECT, statements, responses, REF)
+        by_no: dict = {}
+        for line in journal_rows(conversion):
+            by_no.setdefault(line["journal_no"], []).append(line)
+        self.assertTrue(by_no)
+        for number, lines in by_no.items():
+            debit, credit = totals(lines)
+            self.assertEqual(debit, credit, f"{number}번 분개: 차변 {debit:,.2f} ≠ 대변 {credit:,.2f}")
+
+    def test_lease_pair_forms_one_entry_without_an_equity_line(self):
+        # 리스는 사용권자산과 리스부채가 서로 상대라 자본항목 행이 붙지 않는다.
+        statements, responses = SCENARIOS["리스(자산+부채 쌍 생성)"]
+        conversion = generate_conversion(PROJECT, statements, responses, REF)
+        rows = journal_rows(conversion)
+        self.assertEqual({r["journal_no"] for r in rows}, {1})
+        self.assertEqual(sorted(r["standard_code"] for r in rows), ["A2100", "L2150"])
 
     def test_lease_pair_lands_on_both_sides(self):
         # 사용권자산은 차변, 리스부채는 대변 — '반쪽 분개'가 아니라는 것을 고정한다.
@@ -148,7 +169,7 @@ class JournalBalanceTests(unittest.TestCase):
         conversion = generate_conversion(PROJECT, statements, responses, REF)
         for entry in conversion["entries"]:
             self.assertEqual((entry["debit"], entry["credit"]), (0.0, 0.0))
-        self.assertIsNone(conversion["equity_counterpart"])
+        self.assertEqual(journal_rows(conversion), [])
 
     def test_direction_follows_net_asset_effect(self):
         self.assertEqual(entry_debit_credit({"standard_code": "A1000", "adjustment": 100}), (100.0, 0.0))
@@ -180,9 +201,9 @@ class JournalBalanceTests(unittest.TestCase):
         debit, credit = totals(journal_rows(conversion))
         self.assertEqual(debit, credit)
 
-    def test_counterpart_none_when_nothing_to_balance(self):
-        self.assertIsNone(equity_counterpart_entry([]))
-        self.assertIsNone(equity_counterpart_entry([{"standard_code": "A1000", "adjustment": 0}]))
+    def test_no_journal_when_nothing_to_balance(self):
+        self.assertEqual(build_journal([]), [])
+        self.assertEqual(build_journal([{"standard_code": "A1000", "adjustment": 0, "debit": 0.0, "credit": 0.0}]), [])
 
 
 if __name__ == "__main__":

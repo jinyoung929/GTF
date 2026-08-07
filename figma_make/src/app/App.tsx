@@ -21,7 +21,7 @@ import { api, download } from "./api";
 import { classNames, fmtKRW } from "./format";
 import { LoginScreen } from "./screens/LoginScreen";
 import { ProjectDashboard } from "./screens/ProjectDashboard";
-import type { AccountOption, AiDecision, AuditLog, ChecklistItem, Conversion, ConversionEntry, FocusTarget, ImportTab, PolicyComparison, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, StandardsSearchResult, Statement, SummaryAction, UploadRow, UserInfo } from "./types";
+import type { AccountOption, AiDecision, AuditLog, ChecklistItem, Conversion, ConversionEntry, FocusTarget, JournalLine, ImportTab, PolicyComparison, Project, ProjectBundle, ReviewSummary, ReviewTab, Screen, SourceRow, StandardsSearchResult, Statement, SummaryAction, UploadRow, UserInfo } from "./types";
 import { HeaderCell, Pill, SectionLabel, StatusBadge } from "./ui";
 
 type DartReportOption = {
@@ -856,7 +856,7 @@ function ReviewScreen({
         <div className="flex border-b border-[#D0D5E0]">
           {[
             ["checklist", "체크리스트"],
-            ["adjustments", `조정분개 ${entries.length}`],
+            ["adjustments", `조정분개 ${new Set((bundle.conversion?.journal || []).map((l) => l.journal_no)).size}`],
             ["notes", "주석 초안"],
             ["approval", "검토 승인"],
             ["audit", "감사 로그"],
@@ -1044,7 +1044,7 @@ function ReviewScreen({
             </div>
           )}
 
-          {tab === "adjustments" && <AdjustmentTable entries={entries} counterpart={bundle.conversion?.equity_counterpart} />}
+          {tab === "adjustments" && <AdjustmentTable journal={bundle.conversion?.journal || []} />}
           {tab === "notes" && <Notes notes={bundle.conversion?.draft_notes || []} ai={bundle.conversion?.ai_assistance} judgmentItems={bundle.conversion?.judgment_items || []} />}
           {tab === "approval" && <ApprovalPanel projectId={bundle.project.id} onAction={onSummaryAction} />}
           {tab === "audit" && <AuditTable logs={[]} projectId={bundle.project.id} />}
@@ -1055,37 +1055,40 @@ function ReviewScreen({
   );
 }
 
-function AdjustmentTable({ entries, counterpart }: { entries: ConversionEntry[]; counterpart?: ConversionEntry | null }) {
-  // 조정 행 + 이익잉여금 상계 행. 이 목록의 차변 합계와 대변 합계는 항상 일치한다.
-  const rows = counterpart ? [...entries, counterpart] : entries;
-  const totalDebit = rows.reduce((sum, entry) => sum + (entry.debit || 0), 0);
-  const totalCredit = rows.reduce((sum, entry) => sum + (entry.credit || 0), 0);
+function AdjustmentTable({ journal }: { journal: JournalLine[] }) {
+  // 개별 분개 목록. 분개번호별로 차·대가 맞고, 전체 합계도 일치한다.
+  const totalDebit = journal.reduce((sum, line) => sum + (line.debit || 0), 0);
+  const totalCredit = journal.reduce((sum, line) => sum + (line.credit || 0), 0);
   const balanced = Math.round((totalDebit - totalCredit) * 100) === 0;
   return (
     <div className="overflow-x-auto border border-[#D0D5E0]">
-      {/* 차·대 컬럼이 붙어 컬럼이 9개다 — 좁은 화면에서 세로로 접히지 않도록 최소 너비를 주고 가로 스크롤시킨다. */}
-      <table className="w-full min-w-[1180px] text-xs">
-        <thead><tr className="bg-[#F5F7FA] whitespace-nowrap"><HeaderCell>원 계정</HeaderCell><HeaderCell>코드</HeaderCell><HeaderCell>K-IFRS 계정</HeaderCell><HeaderCell>표시 라인</HeaderCell><HeaderCell right>금액</HeaderCell><HeaderCell right>조정액</HeaderCell><HeaderCell right>차변</HeaderCell><HeaderCell right>대변</HeaderCell><HeaderCell>근거</HeaderCell></tr></thead>
+      <table className="w-full min-w-[1020px] text-xs">
+        <thead><tr className="bg-[#F5F7FA] whitespace-nowrap"><HeaderCell>분개</HeaderCell><HeaderCell>계정</HeaderCell><HeaderCell>코드</HeaderCell><HeaderCell>표시 라인</HeaderCell><HeaderCell right>차변</HeaderCell><HeaderCell right>대변</HeaderCell><HeaderCell>근거</HeaderCell></tr></thead>
         <tbody>
-          {rows.map((entry, index) => {
-            const isCounterpart = entry.mapping_type === "counterpart";
+          {journal.map((line, index) => {
+            const isEquity = line.mapping_type === "counterpart";
+            // 분개가 바뀌는 첫 줄에만 번호를 찍고 위쪽 경계선을 굵게 준다.
+            const startsEntry = index === 0 || journal[index - 1].journal_no !== line.journal_no;
             return (
-              <tr key={`${entry.standard_code}-${index}`} className={classNames("border-t border-[#EEF0F5] whitespace-nowrap", isCounterpart && "bg-[#F5F7FA]")}>
-                <td className="px-4 py-2.5 font-semibold">{isCounterpart ? "전환조정 상계" : entry.source_account}</td>
-                <td className="px-4 py-2.5 font-mono text-[#677089]">{entry.standard_code}</td>
-                <td className="px-4 py-2.5">{entry.target_account}</td>
-                <td className="px-4 py-2.5 text-[#677089]">{entry.statement_line_item || "-"}</td>
-                <td className="px-4 py-2.5 text-right font-mono">{isCounterpart ? "-" : fmtKRW(entry.amount)}</td>
-                <td className={classNames("px-4 py-2.5 text-right font-mono font-bold", entry.adjustment ? "text-emerald-700" : "text-[#677089]")}>{fmtKRW(entry.adjustment)}</td>
-                <td className="px-4 py-2.5 text-right font-mono">{entry.debit ? fmtKRW(entry.debit) : "-"}</td>
-                <td className="px-4 py-2.5 text-right font-mono">{entry.credit ? fmtKRW(entry.credit) : "-"}</td>
-                <td className="px-4 py-2.5 text-[#677089] max-w-[320px] truncate">{entry.calculation || entry.basis}</td>
+              <tr
+                key={`${line.journal_no}-${line.standard_code}-${index}`}
+                className={classNames("whitespace-nowrap", startsEntry ? "border-t-2 border-[#D0D5E0]" : "border-t border-[#EEF0F5]")}
+              >
+                <td className="px-4 py-2.5 font-mono text-[#677089]">{startsEntry ? line.journal_no : ""}</td>
+                <td className={classNames("px-4 py-2.5", isEquity ? "text-[#677089] pl-8" : "font-semibold")}>
+                  {line.debit ? "(차) " : "(대) "}{line.target_account}
+                </td>
+                <td className="px-4 py-2.5 font-mono text-[#677089]">{line.standard_code}</td>
+                <td className="px-4 py-2.5 text-[#677089]">{line.statement_line_item || "-"}</td>
+                <td className="px-4 py-2.5 text-right font-mono font-bold">{line.debit ? fmtKRW(line.debit) : ""}</td>
+                <td className="px-4 py-2.5 text-right font-mono font-bold">{line.credit ? fmtKRW(line.credit) : ""}</td>
+                <td className="px-4 py-2.5 text-[#677089] max-w-[340px] truncate">{line.calculation || line.basis}</td>
               </tr>
             );
           })}
-          {!!rows.length && (
-            <tr className="border-t-2 border-[#D0D5E0] bg-[#F5F7FA] font-bold whitespace-nowrap">
-              <td className="px-4 py-2.5" colSpan={6}>합계</td>
+          {!!journal.length && (
+            <tr className="border-t-2 border-[#8C93A5] bg-[#F5F7FA] font-bold whitespace-nowrap">
+              <td className="px-4 py-2.5" colSpan={4}>합계</td>
               <td className="px-4 py-2.5 text-right font-mono">{fmtKRW(totalDebit)}</td>
               <td className="px-4 py-2.5 text-right font-mono">{fmtKRW(totalCredit)}</td>
               <td className={classNames("px-4 py-2.5", balanced ? "text-emerald-700" : "text-red-700")}>
@@ -1095,7 +1098,7 @@ function AdjustmentTable({ entries, counterpart }: { entries: ConversionEntry[];
           )}
         </tbody>
       </table>
-      {!rows.length && <div className="text-center py-10 text-xs text-[#677089]">변환 초안을 먼저 생성하세요</div>}
+      {!journal.length && <div className="text-center py-10 text-xs text-[#677089]">조정할 항목이 없습니다. 변환 초안을 먼저 생성하세요</div>}
     </div>
   );
 }

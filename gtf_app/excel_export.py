@@ -95,17 +95,15 @@ def review_workbook_bytes(project: dict, extraction_rows: list[dict], statements
         (
             "03_조정분개",
             [
-                ["원 계정", "내부 코드", "K-IFRS 계정", "표시 재무제표", "표시 라인",
-                 "금액", "조정액", "차변", "대변", "유형", "계산/근거"],
+                ["분개번호", "원 계정", "내부 코드", "K-IFRS 계정", "표시 라인",
+                 "차변", "대변", "유형", "계산/근거"],
                 *[
                     [
+                        entry.get("journal_no", ""),
                         entry.get("source_account", ""),
                         entry.get("standard_code", ""),
                         entry.get("target_account", ""),
-                        entry.get("statement_type", ""),
                         entry.get("statement_line_item", ""),
-                        entry.get("amount", 0),
-                        entry.get("adjustment", 0),
                         entry.get("debit", 0),
                         entry.get("credit", 0),
                         label_backend(entry.get("mapping_type", "")),
@@ -113,7 +111,7 @@ def review_workbook_bytes(project: dict, extraction_rows: list[dict], statements
                     ]
                     for entry in journal
                 ],
-                ["합계", "", "", "", "", "", "",
+                ["", "합계", "", "", "",
                  round(sum(float(e.get("debit") or 0) for e in journal), 2),
                  round(sum(float(e.get("credit") or 0) for e in journal), 2),
                  "", "차변 합계와 대변 합계는 일치해야 합니다."],

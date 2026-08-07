@@ -718,6 +718,8 @@ def generate_conversion(
 
         entries.append(entry)
         if paired_entry:
+            # 서로가 상대인 쌍으로 표시한다 — 이 둘은 자본항목 상계 행이 붙지 않는다.
+            entry["pair_id"] = paired_entry["pair_id"] = item["id"]
             entries.append(paired_entry)
 
     # 조정분개를 계정코드 기반 표시 순서(재무상태표 → 손익계산서)로 정렬한다.
@@ -738,7 +740,7 @@ def generate_conversion(
         },
         "statement_template": "IFRS 내부 재무제표 양식 DB",
         "entries": entries,
-        "equity_counterpart": equity_counterpart_entry(entries),
+        "journal": build_journal(entries),
         "judgment_items": judgment_items,
         "draft_notes": notes,
         "review_status": "사람 검토 필요",
@@ -902,7 +904,12 @@ def _net_equity_effect(entries: list[dict]) -> float:
 # 전환 조정의 상대계정. K-IFRS 제1101호 문단 10이 전환일 조정을 이익잉여금(또는 적절한
 # 다른 자본항목)으로 인식하라고 정하므로, 상대계정은 임의 선택이 아니라 기준서가 지정한다.
 # E1200은 standard_accounts 시드에 이미 있는 이익잉여금 코드다 — 새 테이블도 새 시드도 없다.
-EQUITY_COUNTERPART_CODE = "E1200"
+# 전환 조정의 상대는 자본이다 (K-IFRS 제1101호 문단 10). 다만 이익잉여금인지 재평가잉여금
+# 같은 다른 자본 항목인지는 기준서도 "또는 적절한 경우 다른 자본 항목"이라고만 정하므로,
+# 시스템은 '자본항목'까지만 확정하고 계정 확정은 검토자에게 남긴다.
+# E1900은 자본 구역 표시 순서를 뽑기 위한 합성 코드다 — 별도 계정 시드는 없다(L2150과 같은 방식).
+EQUITY_COUNTERPART_CODE = "E1900"
+EQUITY_COUNTERPART_LABEL = "자본항목"
 
 # 구역이 정해지지 않은 코드 접두사. 미분류(X9999)는 계정 분류 자체가 끝나지 않아
 # 자산인지 부채인지 알 수 없다. 계산기가 조정액을 내지 않으므로 분개 효과도 없다.
@@ -936,39 +943,60 @@ def entry_debit_credit(entry: dict) -> tuple[float, float]:
     return 0.0, 0.0  # 조정액 0 = 재분류. 분개 효과가 없다.
 
 
-def equity_counterpart_entry(entries: list[dict]) -> dict | None:
-    """조정분개 전체를 이익잉여금 한 줄로 상계한 상대 행 (K-IFRS 제1101호 문단 10).
-
-    순자산이 net만큼 변했으면 자본도 같은 금액만큼 변하므로, 이 행을 더하면 조정분개
-    전체의 차변 합계와 대변 합계가 일치한다.
-
-    entries에는 넣지 않는다. 넣으면 자본(E) 구역으로 다시 집계돼 전환조정 요약의
-    순자산 영향이 이중 계상된다 — 상계 행은 목록의 일부가 아니라 목록의 결론이다.
-    """
-    net = round(_net_equity_effect(entries), 2)
-    if net == 0:
-        return None
-    debit, credit = (0.0, net) if net > 0 else (-net, 0.0)
-    direction = "증가" if net > 0 else "감소"
+def _equity_counterpart_for(entry: dict) -> dict:
+    """조정 한 줄의 상대가 되는 자본항목 행. 조정과 반대편에 같은 금액으로 선다."""
+    debit, credit = entry.get("credit") or 0.0, entry.get("debit") or 0.0
     return {
         "source_account": "",
         "standard_code": EQUITY_COUNTERPART_CODE,
-        "target_account": "이익잉여금",
+        "target_account": EQUITY_COUNTERPART_LABEL,
         "statement_type": "재무상태표",
         "statement_section": "자본",
-        "statement_line_item": "이익잉여금 (전환조정 상계)",
+        "statement_line_item": f"{EQUITY_COUNTERPART_LABEL} (계정 확정 필요)",
         "amount": 0,
-        "adjustment": net,
+        "adjustment": 0,
         "mapping_type": "counterpart",
         "debit": debit,
         "credit": credit,
-        "basis": "K-IFRS 제1101호 문단 10: 전환일의 조정은 이익잉여금(또는 적절한 다른 자본항목)으로 인식합니다.",
+        "basis": "K-IFRS 제1101호 문단 10: 전환일의 조정은 이익잉여금 또는 적절한 다른 자본 항목으로 인식합니다.",
         "calculation": (
-            f"조정분개의 순자산 영향 {net:,.0f}을 이익잉여금 {direction}로 상계합니다. "
-            "세효과는 반영되지 않은 세전 기준이며, 재평가잉여금·확정급여 재측정요소 등 "
-            "기타포괄손익 성격의 조정은 이익잉여금이 아닌 별도 자본항목으로 재분류해야 합니다."
+            f"{entry.get('target_account', '')} 조정의 상대입니다. 원칙은 이익잉여금이나 "
+            "재평가잉여금·확정급여 재측정요소 등 기타포괄손익 성격이면 해당 자본 항목으로 "
+            "확정해야 합니다. 세효과는 반영되지 않은 세전 기준입니다."
         ),
     }
+
+
+def build_journal(entries: list[dict]) -> list[dict]:
+    """조정 명세를 개별 분개 목록으로 편성한다.
+
+    분개 하나의 단위:
+      - 리스처럼 서로가 상대인 쌍(pair_id 공유)은 두 행이 한 분개를 이룬다.
+      - 나머지 조정은 조정 행 + 자본항목 상대 행으로 한 분개를 이룬다.
+      - 조정액이 0인 재분류는 분개 효과가 없으므로 편성에서 제외한다.
+
+    각 행에 journal_no가 붙고, 목록 전체의 차변 합계와 대변 합계는 일치한다.
+    """
+    journal: list[dict] = []
+    seen_pairs: set = set()
+    for entry in entries:
+        if not (entry.get("debit") or entry.get("credit")):
+            continue  # 재분류: 분개 없음
+        pair_id = entry.get("pair_id")
+        if pair_id is not None:
+            if pair_id in seen_pairs:
+                continue
+            seen_pairs.add(pair_id)
+            members = [e for e in entries if e.get("pair_id") == pair_id]
+            journal.append({"lines": members})
+        else:
+            journal.append({"lines": [entry, _equity_counterpart_for(entry)]})
+
+    rows: list[dict] = []
+    for number, item in enumerate(journal, start=1):
+        for line in item["lines"]:
+            rows.append({**line, "journal_no": number})
+    return rows
 
 
 def compare_policy_scenarios(
@@ -1033,30 +1061,26 @@ def compare_policy_scenarios(
 
 
 def journal_rows(conversion: dict) -> list[dict]:
-    """조정분개 행 + 이익잉여금 상계 행. 이 목록의 차변 합계와 대변 합계는 일치한다."""
-    rows = list(conversion.get("entries") or [])
-    counterpart = conversion.get("equity_counterpart")
-    return rows + [counterpart] if counterpart else rows
+    """개별 분개 행 목록. 차변 합계와 대변 합계는 일치한다."""
+    return list(conversion.get("journal") or [])
 
 
 def conversion_adjustments_csv(conversion: dict) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(
-        ["원 계정", "내부 코드", "IFRS 계정", "표시 재무제표", "표시 라인",
-         "금액", "조정액", "차변", "대변", "유형", "계산/근거"]
+        ["분개번호", "원 계정", "내부 코드", "IFRS 계정", "표시 라인",
+         "차변", "대변", "유형", "계산/근거"]
     )
     rows = journal_rows(conversion)
     for entry in rows:
         writer.writerow(
             [
+                entry.get("journal_no", ""),
                 entry.get("source_account", ""),
                 entry.get("standard_code", ""),
                 entry.get("target_account", ""),
-                entry.get("statement_type", ""),
                 entry.get("statement_line_item", ""),
-                entry.get("amount", 0),
-                entry.get("adjustment", 0),
                 entry.get("debit", 0),
                 entry.get("credit", 0),
                 label_backend(entry.get("mapping_type", "")),
@@ -1064,7 +1088,7 @@ def conversion_adjustments_csv(conversion: dict) -> str:
             ]
         )
     writer.writerow(
-        ["합계", "", "", "", "", "", "",
+        ["", "합계", "", "", "",
          round(sum(float(e.get("debit") or 0) for e in rows), 2),
          round(sum(float(e.get("credit") or 0) for e in rows), 2),
          "", "차변 합계와 대변 합계는 일치해야 합니다."]

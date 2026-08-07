@@ -88,6 +88,8 @@ export type ConversionEntry = {
   statement_line_item?: string;
 };
 
+export type JournalLine = ConversionEntry & { journal_no: number };
+
 export type StandardsParagraph = {
   standard_set: "K-GAAP" | "K-IFRS";
   reference_code: string;
@@ -115,8 +117,8 @@ export type Conversion = {
     standards_paragraphs?: StandardsParagraph[];
   }>;
   draft_notes: Array<{ account: string; draft_note: string }>;
-  /** 조정 전체를 이익잉여금으로 상계하는 행 (K-IFRS 제1101호 문단 10). 조정이 없으면 null. */
-  equity_counterpart?: ConversionEntry | null;
+  /** 개별 분개 행 목록. 분개번호별로 차·대가 맞고, 전체 합계도 일치한다. */
+  journal?: JournalLine[];
   ai_assistance?: { status: string; overall_note?: string; items?: unknown[]; issues?: string[] };
   review_status: string;
 };
