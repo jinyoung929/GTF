@@ -723,6 +723,11 @@ def generate_conversion(
     # 조정분개를 계정코드 기반 표시 순서(재무상태표 → 손익계산서)로 정렬한다.
     entries.sort(key=lambda e: (e.get("presentation_order", 800000), e.get("standard_code", "")))
 
+    # 각 행의 차·대를 붙이고, 전체를 이익잉여금으로 상계하는 상대 행을 계산한다.
+    # entries + equity_counterpart의 차변 합계와 대변 합계는 항상 일치한다.
+    for entry in entries:
+        entry["debit"], entry["credit"] = entry_debit_credit(entry)
+
     return {
         "project": {
             "id": project["id"],
@@ -733,6 +738,7 @@ def generate_conversion(
         },
         "statement_template": "IFRS 내부 재무제표 양식 DB",
         "entries": entries,
+        "equity_counterpart": equity_counterpart_entry(entries),
         "judgment_items": judgment_items,
         "draft_notes": notes,
         "review_status": "사람 검토 필요",
@@ -893,6 +899,78 @@ def _net_equity_effect(entries: list[dict]) -> float:
     )
 
 
+# 전환 조정의 상대계정. K-IFRS 제1101호 문단 10이 전환일 조정을 이익잉여금(또는 적절한
+# 다른 자본항목)으로 인식하라고 정하므로, 상대계정은 임의 선택이 아니라 기준서가 지정한다.
+# E1200은 standard_accounts 시드에 이미 있는 이익잉여금 코드다 — 새 테이블도 새 시드도 없다.
+EQUITY_COUNTERPART_CODE = "E1200"
+
+# 구역이 정해지지 않은 코드 접두사. 미분류(X9999)는 계정 분류 자체가 끝나지 않아
+# 자산인지 부채인지 알 수 없다. 계산기가 조정액을 내지 않으므로 분개 효과도 없다.
+UNSECTIONED_CODE_PREFIXES = {"X"}
+
+
+def entry_debit_credit(entry: dict) -> tuple[float, float]:
+    """조정 한 줄의 (차변, 대변).
+
+    방향은 그 행이 순자산에 미치는 영향으로 정한다: 순자산 증가(자산 증가·부채 감소·
+    비용 감소)는 차변, 감소는 대변이다.
+
+    조정액이 0이면 구역과 무관하게 분개 효과가 없다 — 재분류와 미분류 행이 여기 해당한다.
+    조정액이 있는데 구역 부호가 없으면 조용히 0으로 새어나가 대차가 맞는 것처럼 보이므로
+    즉시 실패시킨다.
+    """
+    adjustment = float(entry.get("adjustment") or 0)
+    if round(adjustment, 2) == 0:
+        return 0.0, 0.0
+    code = str(entry.get("standard_code", ""))
+    sign = NET_EQUITY_SIGNS.get(code[:1])
+    if sign is None:
+        raise ValueError(
+            f"조정분개의 차·대를 정할 수 없습니다: 내부 코드 '{code}'에 구역 부호(NET_EQUITY_SIGNS)가 없습니다."
+        )
+    effect = round(sign * adjustment, 2)
+    if effect > 0:
+        return effect, 0.0
+    if effect < 0:
+        return 0.0, -effect
+    return 0.0, 0.0  # 조정액 0 = 재분류. 분개 효과가 없다.
+
+
+def equity_counterpart_entry(entries: list[dict]) -> dict | None:
+    """조정분개 전체를 이익잉여금 한 줄로 상계한 상대 행 (K-IFRS 제1101호 문단 10).
+
+    순자산이 net만큼 변했으면 자본도 같은 금액만큼 변하므로, 이 행을 더하면 조정분개
+    전체의 차변 합계와 대변 합계가 일치한다.
+
+    entries에는 넣지 않는다. 넣으면 자본(E) 구역으로 다시 집계돼 전환조정 요약의
+    순자산 영향이 이중 계상된다 — 상계 행은 목록의 일부가 아니라 목록의 결론이다.
+    """
+    net = round(_net_equity_effect(entries), 2)
+    if net == 0:
+        return None
+    debit, credit = (0.0, net) if net > 0 else (-net, 0.0)
+    direction = "증가" if net > 0 else "감소"
+    return {
+        "source_account": "",
+        "standard_code": EQUITY_COUNTERPART_CODE,
+        "target_account": "이익잉여금",
+        "statement_type": "재무상태표",
+        "statement_section": "자본",
+        "statement_line_item": "이익잉여금 (전환조정 상계)",
+        "amount": 0,
+        "adjustment": net,
+        "mapping_type": "counterpart",
+        "debit": debit,
+        "credit": credit,
+        "basis": "K-IFRS 제1101호 문단 10: 전환일의 조정은 이익잉여금(또는 적절한 다른 자본항목)으로 인식합니다.",
+        "calculation": (
+            f"조정분개의 순자산 영향 {net:,.0f}을 이익잉여금 {direction}로 상계합니다. "
+            "세효과는 반영되지 않은 세전 기준이며, 재평가잉여금·확정급여 재측정요소 등 "
+            "기타포괄손익 성격의 조정은 이익잉여금이 아닌 별도 자본항목으로 재분류해야 합니다."
+        ),
+    }
+
+
 def compare_policy_scenarios(
     project: dict,
     statements: list[dict],
@@ -954,11 +1032,22 @@ def compare_policy_scenarios(
     }
 
 
+def journal_rows(conversion: dict) -> list[dict]:
+    """조정분개 행 + 이익잉여금 상계 행. 이 목록의 차변 합계와 대변 합계는 일치한다."""
+    rows = list(conversion.get("entries") or [])
+    counterpart = conversion.get("equity_counterpart")
+    return rows + [counterpart] if counterpart else rows
+
+
 def conversion_adjustments_csv(conversion: dict) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["원 계정", "내부 코드", "IFRS 계정", "표시 재무제표", "표시 라인", "금액", "조정액", "유형", "계산/근거"])
-    for entry in conversion.get("entries", []):
+    writer.writerow(
+        ["원 계정", "내부 코드", "IFRS 계정", "표시 재무제표", "표시 라인",
+         "금액", "조정액", "차변", "대변", "유형", "계산/근거"]
+    )
+    rows = journal_rows(conversion)
+    for entry in rows:
         writer.writerow(
             [
                 entry.get("source_account", ""),
@@ -968,10 +1057,18 @@ def conversion_adjustments_csv(conversion: dict) -> str:
                 entry.get("statement_line_item", ""),
                 entry.get("amount", 0),
                 entry.get("adjustment", 0),
+                entry.get("debit", 0),
+                entry.get("credit", 0),
                 label_backend(entry.get("mapping_type", "")),
                 localize_export_text(entry.get("calculation") or entry.get("basis")),
             ]
         )
+    writer.writerow(
+        ["합계", "", "", "", "", "", "",
+         round(sum(float(e.get("debit") or 0) for e in rows), 2),
+         round(sum(float(e.get("credit") or 0) for e in rows), 2),
+         "", "차변 합계와 대변 합계는 일치해야 합니다."]
+    )
     return buffer.getvalue()
 
 

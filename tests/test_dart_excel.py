@@ -206,7 +206,10 @@ class DartImportAndWorkbookTests(unittest.TestCase):
         self.assertEqual(by_label["자본 조정"][1], 0)  # 조정액 0 재분류는 건수에서 제외
 
     def test_routes_include_dart_import_and_workbook_export(self):
-        routes = {(sorted(r.methods)[0], r.path) for r in server.app.routes if hasattr(r, "methods")}
+        # FastAPI 0.141+는 include_router를 지연 등록(_IncludedRouter)하므로 app.routes를
+        # 직접 순회하면 라우터 경로가 안 보인다 — 공개 API인 openapi() 경로표로 검증한다.
+        paths = server.app.openapi()["paths"]
+        routes = {(method.upper(), path) for path, ops in paths.items() for method in ops}
         self.assertIn(("POST", "/api/projects/{project_id}/dart/import"), routes)
         self.assertIn(("POST", "/api/projects/{project_id}/dart/reports"), routes)
         self.assertIn(("GET", "/api/projects/{project_id}/exports/{export_name}"), routes)

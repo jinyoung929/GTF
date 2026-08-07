@@ -5,7 +5,7 @@ import json
 
 from openpyxl import Workbook
 
-from gtf_app.domain import NET_EQUITY_SIGNS, label_backend, localize_export_text
+from gtf_app.domain import NET_EQUITY_SIGNS, journal_rows, label_backend, localize_export_text
 
 
 def create_xlsx_workbook(sheets: list[tuple[str, list[list]]]) -> bytes:
@@ -48,6 +48,7 @@ def transition_summary_rows(entries: list[dict]) -> list[list]:
 
 def review_workbook_bytes(project: dict, extraction_rows: list[dict], statements: list[dict], conversion: dict, audit_logs: list[dict]) -> bytes:
     entries = conversion.get("entries") or []
+    journal = journal_rows(conversion)  # 조정분개 행 + 이익잉여금 상계 행 (대차 일치)
     notes = conversion.get("draft_notes") or []
     ai_assistance = conversion.get("ai_assistance") or {}
     judgment_items = conversion.get("judgment_items") or []
@@ -94,7 +95,8 @@ def review_workbook_bytes(project: dict, extraction_rows: list[dict], statements
         (
             "03_조정분개",
             [
-                ["원 계정", "내부 코드", "K-IFRS 계정", "표시 재무제표", "표시 라인", "금액", "조정액", "유형", "계산/근거"],
+                ["원 계정", "내부 코드", "K-IFRS 계정", "표시 재무제표", "표시 라인",
+                 "금액", "조정액", "차변", "대변", "유형", "계산/근거"],
                 *[
                     [
                         entry.get("source_account", ""),
@@ -104,11 +106,17 @@ def review_workbook_bytes(project: dict, extraction_rows: list[dict], statements
                         entry.get("statement_line_item", ""),
                         entry.get("amount", 0),
                         entry.get("adjustment", 0),
+                        entry.get("debit", 0),
+                        entry.get("credit", 0),
                         label_backend(entry.get("mapping_type", "")),
                         localize_export_text(entry.get("calculation") or entry.get("basis")),
                     ]
-                    for entry in entries
+                    for entry in journal
                 ],
+                ["합계", "", "", "", "", "", "",
+                 round(sum(float(e.get("debit") or 0) for e in journal), 2),
+                 round(sum(float(e.get("credit") or 0) for e in journal), 2),
+                 "", "차변 합계와 대변 합계는 일치해야 합니다."],
             ],
         ),
         (

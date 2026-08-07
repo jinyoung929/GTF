@@ -78,6 +78,9 @@ export type ConversionEntry = {
   target_account: string;
   amount: number;
   adjustment: number;
+  /** 차변·대변. 방향은 그 행이 순자산에 미치는 영향으로 정해진다 (서버 계산). */
+  debit?: number;
+  credit?: number;
   mapping_type: string;
   basis: string;
   calculation?: string;
@@ -112,6 +115,8 @@ export type Conversion = {
     standards_paragraphs?: StandardsParagraph[];
   }>;
   draft_notes: Array<{ account: string; draft_note: string }>;
+  /** 조정 전체를 이익잉여금으로 상계하는 행 (K-IFRS 제1101호 문단 10). 조정이 없으면 null. */
+  equity_counterpart?: ConversionEntry | null;
   ai_assistance?: { status: string; overall_note?: string; items?: unknown[]; issues?: string[] };
   review_status: string;
 };
